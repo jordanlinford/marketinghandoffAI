@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 
 export default function SecurityPage() {
-  const companyName = "MarketingHandoffAI";
+  const companyName = "Marketing Handoff AI";
   const companyEmail = "security@marketinghandoffai.com";
   const lastUpdated = "January 8, 2026";
 

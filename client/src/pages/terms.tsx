@@ -5,8 +5,8 @@ import { Separator } from "@/components/ui/separator";
 export default function TermsPage() {
   const lastUpdated = "January 8, 2026";
   const effectiveDate = "January 8, 2026";
-  const companyName = "MarketingHandoffAI";
-  const legalEntity = "MarketingHandoffAI, LLC";
+  const companyName = "Marketing Handoff AI";
+  const legalEntity = "Marketing Handoff AI LLC";
   const companyEmail = "support@marketinghandoffai.com";
   const websiteUrl = "marketinghandoffai.com";
 
@@ -31,7 +31,7 @@ export default function TermsPage() {
               This Terms and Conditions agreement ("Agreement") governs your access to and use of {companyName} (the "Service"), including all content, functionality, features, and services offered by {companyName} through the website {websiteUrl}. By signing up for, accessing, or using the Service, you ("Client," "you," "your") accept and agree to be bound by this Agreement.
             </p>
             <p className="text-muted-foreground leading-relaxed mb-8">
-              <strong>Legal Entity:</strong> The Service is operated by {legalEntity}, a limited liability company organized under the laws of the State of Delaware, United States.
+              <strong>Legal Entity:</strong> The Service is operated by {legalEntity}, a limited liability company organized under the laws of the State of Wyoming, United States. Registered address: 30 N Gould St, Ste N, Sheridan, WY 82801, USA.
             </p>
 
             <section className="mb-8">

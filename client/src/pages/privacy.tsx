@@ -4,7 +4,7 @@ import { Separator } from "@/components/ui/separator";
 
 export default function PrivacyPage() {
   const lastUpdated = "January 8, 2026";
-  const companyName = "MarketingHandoffAI";
+  const companyName = "Marketing Handoff AI";
   const companyEmail = "privacy@marketinghandoffai.com";
 
   return (

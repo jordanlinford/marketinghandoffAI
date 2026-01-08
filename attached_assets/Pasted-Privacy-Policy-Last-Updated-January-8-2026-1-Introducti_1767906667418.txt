@@ -1,0 +1,152 @@
+Privacy Policy
+Last Updated: January 8, 2026
+
+1. Introduction
+MarketingHandoffAI ("Company," "we," "us," or "our") is committed to protecting your privacy. This Privacy Policy explains how we collect, use, disclose, and safeguard your information when you visit our website and use our SEO optimization and AI discovery services (collectively, the "Services").
+
+Please read this Privacy Policy carefully. By accessing or using our Services, you acknowledge that you have read, understood, and agree to be bound by this Privacy Policy. If you do not agree with the terms of this Privacy Policy, please do not access or use the Services.
+
+2. Information We Collect
+2.1 Personal Information You Provide
+We collect personal information that you voluntarily provide when you:
+
+Create an Account: Name, email address, profile information through Replit authentication
+Submit a Project: Company name, website URL, business description, target keywords, content samples, industry information, and optimization goals
+Make a Payment: Billing information processed through our payment processor (Stripe)
+Contact Us: Name, email address, and any information you choose to include in your message
+2.2 Information Collected Automatically
+When you access our Services, we may automatically collect:
+
+Device Information: Browser type, operating system, device identifiers
+Usage Data: Pages visited, time spent on pages, clicks, and navigation patterns
+Log Data: IP address, access times, referring URLs, and error logs
+Cookies and Tracking Technologies: Session cookies for authentication and preferences
+2.3 Information from Third Parties
+We may receive information about you from third-party services you use to access our platform (such as Replit for authentication) and payment processors (such as Stripe for billing).
+
+3. How We Use Your Information
+We use the information we collect for the following purposes:
+
+3.1 Service Delivery
+Provide, operate, and maintain our Services
+Process and complete transactions
+Perform SEO audits, keyword research, and optimization analysis
+Create and deliver project reports and recommendations
+Manage your account and provide customer support
+3.2 Communication
+Send project updates and status notifications
+Respond to your comments, questions, and requests
+Send administrative information such as service changes or policy updates
+Send marketing communications (with your consent, where required)
+3.3 Improvement and Analytics
+Understand how users interact with our Services
+Develop new features, products, and services
+Monitor and analyze usage trends and preferences
+Detect, prevent, and address technical issues
+3.4 Legal and Security
+Comply with legal obligations and respond to lawful requests
+Protect our rights, privacy, safety, or property
+Enforce our Terms and Conditions
+Prevent fraud and abuse of our Services
+4. Legal Basis for Processing (GDPR)
+For users in the European Economic Area (EEA), we process your personal data based on the following legal grounds:
+
+Contract Performance: Processing necessary to fulfill our contractual obligations to you
+Legitimate Interests: Processing necessary for our legitimate business interests, such as improving our Services and preventing fraud
+Consent: Processing based on your explicit consent, which you may withdraw at any time
+Legal Obligations: Processing necessary to comply with applicable laws and regulations
+5. Information Sharing and Disclosure
+We do not sell your personal information. We may share your information in the following circumstances:
+
+5.1 Service Providers
+We may share information with third-party vendors, service providers, and contractors who perform services on our behalf, including:
+
+Payment processing (Stripe)
+Authentication services (Replit)
+Cloud hosting and infrastructure
+Analytics and monitoring services
+5.2 Legal Requirements
+We may disclose your information if required to do so by law or in response to valid requests by public authorities (e.g., court orders, government requests).
+
+5.3 Business Transfers
+In the event of a merger, acquisition, or sale of all or a portion of our assets, your information may be transferred as part of that transaction.
+
+5.4 With Your Consent
+We may share your information with third parties when you have given us your explicit consent to do so.
+
+6. Data Retention
+We retain your personal information for as long as necessary to:
+
+Provide you with the Services you have requested
+Comply with legal obligations (e.g., tax and accounting requirements)
+Resolve disputes and enforce our agreements
+Support business operations and improve our Services
+When we no longer need to retain your personal information, we will securely delete or anonymize it in accordance with applicable laws.
+
+7. Data Security
+We implement appropriate technical and organizational measures to protect your personal information against unauthorized access, alteration, disclosure, or destruction. These measures include:
+
+Encryption of data in transit using TLS/SSL
+Encryption of sensitive data at rest
+Access controls and authentication requirements
+Regular security assessments and monitoring
+Employee training on data protection practices
+However, no method of transmission over the Internet or electronic storage is 100% secure. While we strive to protect your personal information, we cannot guarantee its absolute security.
+
+8. Your Rights and Choices
+8.1 Access and Portability
+You have the right to request access to the personal information we hold about you and to receive a copy of that information in a structured, commonly used, and machine-readable format.
+
+8.2 Correction
+You have the right to request that we correct any inaccurate or incomplete personal information we hold about you.
+
+8.3 Deletion
+You have the right to request that we delete your personal information, subject to certain exceptions (e.g., legal obligations, legitimate business purposes).
+
+8.4 Restriction and Objection
+You have the right to request that we restrict the processing of your personal information or to object to our processing based on legitimate interests.
+
+8.5 Withdraw Consent
+Where we rely on your consent to process your personal information, you have the right to withdraw that consent at any time.
+
+8.6 Exercising Your Rights
+To exercise any of these rights, please contact us at privacy@marketinghandoffai.com. We will respond to your request within the timeframe required by applicable law (typically 30 days).
+
+9. International Data Transfers
+Your information may be transferred to and processed in countries other than the country in which you reside. These countries may have data protection laws that are different from the laws of your country.
+
+When we transfer your information internationally, we take steps to ensure that appropriate safeguards are in place to protect your information, including through the use of Standard Contractual Clauses approved by the European Commission or other lawful transfer mechanisms.
+
+10. Cookies and Tracking Technologies
+We use cookies and similar tracking technologies to collect and track information about your use of our Services. Cookies are small data files stored on your device.
+
+10.1 Types of Cookies We Use
+Essential Cookies: Required for the operation of our Services (e.g., authentication, security)
+Functional Cookies: Enable personalized features and remember your preferences
+Analytics Cookies: Help us understand how users interact with our Services
+10.2 Managing Cookies
+You can control and manage cookies through your browser settings. Please note that disabling certain cookies may affect the functionality of our Services.
+
+11. California Privacy Rights (CCPA)
+If you are a California resident, you have additional rights under the California Consumer Privacy Act (CCPA):
+
+Right to Know: You can request information about the categories and specific pieces of personal information we have collected about you
+Right to Delete: You can request that we delete your personal information, subject to certain exceptions
+Right to Opt-Out: You can opt-out of the sale of your personal information (note: we do not sell personal information)
+Right to Non-Discrimination: We will not discriminate against you for exercising your privacy rights
+To exercise your California privacy rights, please contact us at privacy@marketinghandoffai.com.
+
+12. Children's Privacy
+Our Services are not directed to individuals under the age of 18. We do not knowingly collect personal information from children. If we become aware that we have collected personal information from a child, we will take steps to delete such information promptly.
+
+13. Changes to This Privacy Policy
+We may update this Privacy Policy from time to time. We will notify you of any material changes by posting the new Privacy Policy on this page and updating the "Last Updated" date. We encourage you to review this Privacy Policy periodically. Your continued use of the Services after any changes constitutes your acceptance of the updated Privacy Policy.
+
+14. Contact Us
+If you have any questions, concerns, or requests regarding this Privacy Policy or our data practices, please contact us at:
+
+MarketingHandoffAI
+
+Email: privacy@marketinghandoffai.com
+
+For EU residents, you may also have the right to lodge a complaint with your local data protection authority.

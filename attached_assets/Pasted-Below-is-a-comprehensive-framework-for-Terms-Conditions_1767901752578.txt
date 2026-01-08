@@ -1,0 +1,117 @@
+Below is a comprehensive framework for Terms & Conditions (Terms of Service / ToS) for your MarketingHandoffAI platform, structured around what a SaaS-style service and professional delivery service should include. This framework helps you cover the essential clauses that protect your business, clarify your relationship with clients, and articulate responsibilities without overpromising. It’s meant to be drafted into a proper legal document, and you should consider final review by a qualified attorney, but this covers the core elements you need.
+
+MarketingHandoffAI — Terms and Conditions (Draft Framework)
+
+Last Updated: [Date]
+Effective Date: [Date]
+Company: MarketingHandoffAI (“we,” “us,” “our”)
+
+This Terms and Conditions agreement (“Agreement”) governs your access to and use of MarketingHandoffAI (the “Service”), including all content, functionality, features, and services offered by MarketingHandoffAI through the website marketinghandoffai.com. By signing up for, accessing, or using the Service, you (“Client,” “you,” “your”) accept and agree to be bound by this Agreement.
+
+1. Acceptance of Terms
+
+By using our Service, you agree to these Terms. If you do not agree to these terms, do not use our Service. Compliance with these Terms is required even if access is free or partially complimentary.
+
+2. Scope of Services
+
+MarketingHandoffAI provides professional services to optimize client content for search visibility (including search engine and generative/AI search), advisory, and associated tasks. The specific scope, deliverables, and milestones shall be described in each client engagement or order form.
+
+Clients agree that the Service consists of effort, tools, and best-practice execution — not guaranteed search outcomes, rankings, or traffic. Client is responsible for the quality, authority, and factual accuracy of content provided for optimization.
+
+3. Eligibility
+
+You must be at least 18 years old and have the authority to enter into this Agreement. If representing a business entity, you confirm you have authority to bind that entity to these terms.
+
+4. Payments and Fees
+
+(a) Pricing. Services are sold in fixed tranches (e.g., $5,000 per tranche) as set on our site or in your engagement form. Clients acknowledge that payment is due in advance of commencement of work.
+
+(b) Non-Refundable. Unless otherwise stated in writing, all payments are non-refundable once services commence or deliverables are issued.
+
+(c) Taxes. Clients are responsible for applicable taxes associated with services.
+
+(d) Stripe. Payment processing is facilitated by Stripe. You agree to comply with the terms of Stripe for payment processing.
+
+5. Client Obligations
+
+(a) You agree to provide accurate and complete information, including keywords, content, access details, and material necessary to fulfill the engagement.
+
+(b) You retain ownership of your content and are responsible for its legality, compliance, and accuracy.
+
+(c) Client is solely responsible for compliance with laws that govern their own content and business practices.
+
+6. No Guarantees / Disclaimers
+
+MarketingHandoffAI does not guarantee any specific results, including increases in search rankings, traffic, conversions, or citations by AI systems or search engines. Outcomes depend on external platforms and variables beyond our control. Any example results or case studies are not guarantees of future performance.
+
+7. Intellectual Property
+
+(a) Client retains ownership of their pre-existing content and deliverables included in the project.
+
+(b) MarketingHandoffAI retains ownership of workflows, proprietary tools, processes, and methodologies used to perform services.
+
+(c) You grant MarketingHandoffAI a limited license to use your content only for the purpose of delivering services under this Agreement.
+
+8. Restrictions on Use / Acceptable Conduct
+
+Clients agree not to use the Service to:
+
+Upload or distribute illegal, harmful, infringing, defamatory, or malicious content.
+
+Violate any applicable laws, export controls, or third-party rights.
+
+Attempt to compromise the security of MarketingHandoffAI systems or other clients.
+
+Violations may result in suspension or termination under Section 10.
+
+9. Confidentiality and Data Handling
+
+We handle client data with industry-standard security measures, but you acknowledge that no system is impenetrable. You consent to the collection and processing of personal and business data as necessary to provide services and for internal business purposes, in accordance with our Privacy Policy.
+
+10. Termination
+
+(a) Either party may terminate this Agreement for material breach if the breach is not cured within a specified notice period.
+
+(b) MarketingHandoffAI may suspend or terminate access immediately for serious violations, including non-payment or harmful use of services.
+
+(c) Termination does not relieve Client of payment obligations for work already performed.
+
+11. Limitation of Liability
+
+To the maximum extent permitted by law, MarketingHandoffAI’s aggregate liability is limited to the amount paid by the Client for the services giving rise to the claim. We are not liable for indirect, incidental, consequential, or punitive damages.
+
+12. Indemnification
+
+Client agrees to indemnify and hold harmless MarketingHandoffAI and its affiliates from any claims arising out of or related to Client’s content, use of the Service, or breach of this Agreement.
+
+13. Governing Law
+
+This Agreement is governed by the laws of the state where MarketingHandoffAI is registered (or as otherwise specified), without regard to conflict of law principles.
+
+14. Changes to Terms
+
+MarketingHandoffAI may update these Terms at any time. Notice of material changes will be posted on the site or communicated via email. Continued use of the Service after changes constitutes acceptance.
+
+15. Entire Agreement
+
+This Agreement, including any engagement forms or orders referencing it, constitutes the full understanding between Client and MarketingHandoffAI regarding the services.
+
+16. Contact Information
+
+Questions about these Terms should be sent to:
+
+MarketingHandoffAI
+[Your operational address or registered address]
+Email: [support@marketinghandoffai.com
+ or appropriate address]
+
+Additional Notes
+
+You will also require a Privacy Policy that explains what personal information you collect, how you use it, and retention policies. This is required if you collect emails, user accounts, analytics data, or any personal identifiers in most jurisdictions. SaaS privacy templates typically include definitions of what data you collect, how and why you use it, and your security practices. 
+TermsFeed
+
+Terms and Conditions should be easily accessible from your site footer and included as part of sign-up (for enforceability). You can use clickwrap consent (a required checkbox) to strengthen enforceability. 
+Termly
+
+If you’re delivering professional services rather than a pure SaaS product, it may be wise to also provide a Service Agreement/Engagement Letter that spells out the exact deliverables, timelines, fees, cancellation rights, and client responsibilities. 
+Superlegal

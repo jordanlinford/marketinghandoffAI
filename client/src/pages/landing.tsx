@@ -1,3 +1,4 @@
+import { Link } from "wouter";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -320,6 +321,11 @@ export default function LandingPage() {
               <Link href="/privacy">
                 <span className="text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer" data-testid="link-privacy">
                   Privacy Policy
+                </span>
+              </Link>
+              <Link href="/security">
+                <span className="text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer" data-testid="link-security">
+                  Security
                 </span>
               </Link>
             </div>

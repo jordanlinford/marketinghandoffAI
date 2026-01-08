@@ -15,6 +15,7 @@ import CheckoutSuccessPage from "@/pages/checkout-success";
 import CheckoutCancelPage from "@/pages/checkout-cancel";
 import TermsPage from "@/pages/terms";
 import PrivacyPage from "@/pages/privacy";
+import SecurityPage from "@/pages/security";
 import NotFound from "@/pages/not-found";
 
 function AuthenticatedRoute({ component: Component }: { component: React.ComponentType }) {
@@ -56,6 +57,7 @@ function Router() {
       <Route path="/checkout/cancel" component={CheckoutCancelPage} />
       <Route path="/terms" component={TermsPage} />
       <Route path="/privacy" component={PrivacyPage} />
+      <Route path="/security" component={SecurityPage} />
       <Route component={NotFound} />
     </Switch>
   );

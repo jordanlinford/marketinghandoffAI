@@ -1,0 +1,153 @@
+Here’s a structured due diligence checklist of questions you can use when your legal and security teams are evaluating a vendor like MarketingHandoffAI (or any other third-party service). These questions help assess security, privacy, compliance, operational risk, and overall vendor maturity.
+
+Vendor Identity and Basics
+
+What is the vendor’s legal business name, jurisdiction, and tax ID?
+
+Who are the primary contacts (support, security, legal, escalation)?
+
+Can you provide basic company documentation (incorporation, financials, insurance)? 
+KirkpatrickPrice
+
+Security Posture
+
+What security certifications and standards do you adhere to (e.g., SOC 2, ISO 27001)? 
+Cloud Security Alliance
+
+Do you have a formal information security policy that is current and enforced? 
+Omega Systems
+
+How is data encrypted both in transit and at rest? 
+Cloud Security Alliance
+
+What authentication mechanisms do you use (MFA, RBAC, password standards)?
+
+Do you conduct regular internal and external security testing, including penetration tests?
+
+What tools or controls are used for vulnerability scanning and remediation?
+
+Data Privacy and Handling
+
+What categories of client data will you access, store, or process? 
+UpGuard
+
+Where is client data stored geographically (data centers, cloud providers)?
+
+What data retention and deletion policies are in place? 
+relyance.ai
+
+Do you provide the ability to review, export, or delete client data upon request? 
+relyance.ai
+
+Who within your organization has access to client data, and how is that access controlled? 
+relyance.ai
+
+How do you handle backup data and deletion from backups?
+
+Access and Authentication
+
+Describe your identity and access management controls.
+
+Do you enforce multi-factor authentication for all privileged access?
+
+How often are user access rights reviewed and adjusted?
+
+How are privileged accounts monitored and logged?
+
+Infrastructure and Operations
+
+Do you host systems on isolated infrastructure for each client or shared multi-tenant models?
+
+How do you manage patching and configuration management?
+
+What monitoring or intrusion detection systems are in place?
+
+How do you handle disruptions, outages, or degraded service conditions?
+
+Compliance and Legal
+
+Which privacy laws and regulations does your service comply with (GDPR, CCPA, etc.)?
+
+Do you have a documented data processing agreement (DPA) or support one?
+
+Are you subject to industry-specific regulations (e.g., HIPAA for health data)?
+
+Can you provide copies of your most recent audit reports (SOC 2, ISO, PCI, if applicable)? 
+Omega Systems
+
+Incident Response
+
+Do you maintain a formal incident response plan?
+
+How quickly are breaches or incidents reported to clients?
+
+What is your mean time to detect and respond to a security incident?
+
+Service Availability and Continuity
+
+Do you have a business continuity and disaster recovery plan? 
+Cynomi
+
+What is your RTO/RPO in case of system failures?
+
+How often do you test your disaster recovery procedures?
+
+Subprocessors and Third Parties
+
+Do you use subvendors or subprocessors? If so, who are they?
+
+How do you manage third-party risk related to subprocessors? 
+Venminder
+
+Are subprocessors subject to the same security controls as you?
+
+Contractual and Legal Safeguards
+
+What indemnification commitments do you provide for data breaches or security failures?
+
+What liability limitations are in your agreement?
+
+What are your termination and data return/destruction terms?
+
+Do you have insurance coverage (cyber liability, errors & omissions)?
+
+AI/Automation (if applicable)
+
+What AI models or automation tools are used in your service? 
+Trustible
+
+How do you ensure data inputs are not retained or reused without consent? 
+Trustible
+
+Are your models explainable or auditable? 
+Trustible
+
+Ongoing Monitoring
+
+What reporting and transparency do you provide on security and compliance?
+
+Do you offer continuous monitoring of security posture or automatic alerting? 
+Cisive Blog
+
+How frequently do you update your policies with respect to evolving threats and standards?
+
+Documentation and Evidence
+
+Can you provide your most recent security assessments or questionnaire responses? 
+UpGuard
+
+Can you provide internal policy documents related to security and privacy?
+
+What training and certification programs do staff responsible for security undergo?
+
+How to Use This List
+
+You can use these questions to:
+
+Build a vendor due diligence questionnaire for security and legal review. 
+Cynomi
+
+Evaluate whether the vendor meets internal risk thresholds and compliance requirements. 
+Sprinto
+
+Support discussions and contract negotiations with clear evidence requests.

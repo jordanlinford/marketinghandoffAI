@@ -114,15 +114,27 @@ export default function TermsPage() {
 
             <section className="mb-8">
               <h2 className="text-xl font-semibold mb-4">6. No Guarantees / Disclaimers</h2>
-              <p className="text-muted-foreground leading-relaxed font-medium">
+              <p className="text-muted-foreground leading-relaxed font-medium mb-4">
                 {companyName} does not guarantee any specific results, including increases in search rankings, traffic, conversions, or citations by AI systems or search engines. Outcomes depend on external platforms and variables beyond our control. Any example results or case studies are not guarantees of future performance.
+              </p>
+              <p className="text-muted-foreground leading-relaxed font-medium uppercase text-sm">
+                THE SERVICE IS PROVIDED "AS IS" AND "AS AVAILABLE," WITHOUT WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, OR NON-INFRINGEMENT. {companyName} DOES NOT WARRANT THAT THE SERVICE WILL BE UNINTERRUPTED, ERROR-FREE, OR COMPLETELY SECURE.
               </p>
             </section>
 
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">7. Intellectual Property</h2>
+              <h2 className="text-xl font-semibold mb-4">7. AI and Third-Party Dependencies</h2>
+              <p className="text-muted-foreground leading-relaxed">
+                The Service may incorporate artificial intelligence systems and third-party platforms. {companyName} does not control and is not responsible for the outputs, availability, or policies of such systems. Client is responsible for reviewing and validating all outputs before use and ensuring compliance with applicable laws and regulations.
+              </p>
+            </section>
+
+            <Separator className="my-8" />
+
+            <section className="mb-8">
+              <h2 className="text-xl font-semibold mb-4">8. Intellectual Property</h2>
               
               <p className="text-muted-foreground leading-relaxed mb-4">
                 <strong>(a)</strong> Client retains ownership of their pre-existing content and deliverables included in the project.
@@ -140,7 +152,7 @@ export default function TermsPage() {
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">8. Restrictions on Use / Acceptable Conduct</h2>
+              <h2 className="text-xl font-semibold mb-4">9. Restrictions on Use / Acceptable Conduct</h2>
               <p className="text-muted-foreground leading-relaxed mb-4">
                 Clients agree not to use the Service to:
               </p>
@@ -150,14 +162,14 @@ export default function TermsPage() {
                 <li>Attempt to compromise the security of {companyName} systems or other clients.</li>
               </ul>
               <p className="text-muted-foreground leading-relaxed">
-                Violations may result in suspension or termination under Section 10.
+                Violations may result in suspension or termination under Section 11.
               </p>
             </section>
 
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">9. Confidentiality and Data Handling</h2>
+              <h2 className="text-xl font-semibold mb-4">10. Confidentiality and Data Handling</h2>
               <p className="text-muted-foreground leading-relaxed">
                 We handle client data with industry-standard security measures, but you acknowledge that no system is impenetrable. You consent to the collection and processing of personal and business data as necessary to provide services and for internal business purposes, in accordance with our Privacy Policy.
               </p>
@@ -166,25 +178,29 @@ export default function TermsPage() {
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">10. Termination</h2>
+              <h2 className="text-xl font-semibold mb-4">11. Termination</h2>
               
               <p className="text-muted-foreground leading-relaxed mb-4">
-                <strong>(a)</strong> Either party may terminate this Agreement for material breach if the breach is not cured within a specified notice period.
+                <strong>(a)</strong> Either party may terminate this Agreement for material breach if the breach is not cured within thirty (30) days after written notice describing the breach in reasonable detail. Notice must be delivered via email to the address on record or as specified in the engagement form.
               </p>
               
               <p className="text-muted-foreground leading-relaxed mb-4">
                 <strong>(b)</strong> {companyName} may suspend or terminate access immediately for serious violations, including non-payment or harmful use of services.
               </p>
               
-              <p className="text-muted-foreground leading-relaxed">
+              <p className="text-muted-foreground leading-relaxed mb-4">
                 <strong>(c)</strong> Termination does not relieve Client of payment obligations for work already performed.
+              </p>
+              
+              <p className="text-muted-foreground leading-relaxed">
+                <strong>(d)</strong> Upon termination, Client may request export of their data within thirty (30) days. After this period, {companyName} may delete Client data in accordance with standard data retention policies.
               </p>
             </section>
 
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">11. Limitation of Liability</h2>
+              <h2 className="text-xl font-semibold mb-4">12. Limitation of Liability</h2>
               <p className="text-muted-foreground leading-relaxed font-medium">
                 To the maximum extent permitted by law, {companyName}'s aggregate liability is limited to the amount paid by the Client for the services giving rise to the claim. We are not liable for indirect, incidental, consequential, or punitive damages.
               </p>
@@ -193,16 +209,39 @@ export default function TermsPage() {
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">12. Indemnification</h2>
+              <h2 className="text-xl font-semibold mb-4">13. Indemnification</h2>
+              
+              <p className="text-muted-foreground leading-relaxed mb-4">
+                <strong>(a) Client Indemnification:</strong> Client agrees to indemnify and hold harmless {companyName} and its affiliates from any claims arising out of or related to Client's content, use of the Service, or breach of this Agreement.
+              </p>
+              
               <p className="text-muted-foreground leading-relaxed">
-                Client agrees to indemnify and hold harmless {companyName} and its affiliates from any claims arising out of or related to Client's content, use of the Service, or breach of this Agreement.
+                <strong>(b) {companyName} Indemnification:</strong> {companyName} will indemnify Client against third-party claims alleging that the Service (excluding Client content and third-party components) directly infringes a third party's intellectual property rights, provided Client promptly notifies {companyName} of any such claim and cooperates in the defense.
               </p>
             </section>
 
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">13. Governing Law</h2>
+              <h2 className="text-xl font-semibold mb-4">14. Force Majeure</h2>
+              <p className="text-muted-foreground leading-relaxed">
+                Neither party shall be liable for any failure or delay in performance due to causes beyond its reasonable control, including but not limited to acts of God, natural disasters, war, terrorism, labor disputes, government actions, internet or telecommunications failures, cloud provider outages, or third-party service disruptions. The affected party shall provide prompt notice and use reasonable efforts to resume performance.
+              </p>
+            </section>
+
+            <Separator className="my-8" />
+
+            <section className="mb-8">
+              <h2 className="text-xl font-semibold mb-4">15. Assignment</h2>
+              <p className="text-muted-foreground leading-relaxed">
+                Client may not assign or transfer this Agreement or any rights hereunder without {companyName}'s prior written consent. {companyName} may assign this Agreement in connection with a merger, acquisition, corporate reorganization, or sale of all or substantially all of its assets. Any attempted assignment in violation of this section shall be void.
+              </p>
+            </section>
+
+            <Separator className="my-8" />
+
+            <section className="mb-8">
+              <h2 className="text-xl font-semibold mb-4">16. Governing Law</h2>
               <p className="text-muted-foreground leading-relaxed">
                 This Agreement is governed by the laws of the State of Delaware, United States, without regard to conflict of law principles.
               </p>
@@ -211,7 +250,7 @@ export default function TermsPage() {
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">14. Changes to Terms</h2>
+              <h2 className="text-xl font-semibold mb-4">17. Changes to Terms</h2>
               <p className="text-muted-foreground leading-relaxed">
                 {companyName} may update these Terms at any time. Notice of material changes will be posted on the site or communicated via email. Continued use of the Service after changes constitutes acceptance.
               </p>
@@ -220,7 +259,7 @@ export default function TermsPage() {
             <Separator className="my-8" />
 
             <section className="mb-8">
-              <h2 className="text-xl font-semibold mb-4">15. Entire Agreement</h2>
+              <h2 className="text-xl font-semibold mb-4">18. Entire Agreement</h2>
               <p className="text-muted-foreground leading-relaxed">
                 This Agreement, including any engagement forms or orders referencing it, constitutes the full understanding between Client and {companyName} regarding the services.
               </p>
@@ -229,7 +268,7 @@ export default function TermsPage() {
             <Separator className="my-8" />
 
             <section>
-              <h2 className="text-xl font-semibold mb-4">16. Contact Information</h2>
+              <h2 className="text-xl font-semibold mb-4">19. Contact Information</h2>
               <p className="text-muted-foreground leading-relaxed mb-4">
                 Questions about these Terms should be sent to:
               </p>

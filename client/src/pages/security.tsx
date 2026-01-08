@@ -183,7 +183,14 @@ export default function SecurityPage() {
                 <div>
                   <h3 className="font-medium mb-2">Data Retention & Deletion</h3>
                   <p className="text-muted-foreground text-sm leading-relaxed">
-                    We retain client data for the duration of the business relationship and for a reasonable period thereafter to fulfill legal and business obligations. Upon request, we can provide data export or deletion in accordance with applicable data protection laws.
+                    We retain client data for the duration of the business relationship and for a limited period thereafter as required for legal, accounting, or dispute resolution purposes. Upon request, we can provide data export or deletion in accordance with applicable data protection laws.
+                  </p>
+                </div>
+
+                <div>
+                  <h3 className="font-medium mb-2">AI & Third-Party Tools</h3>
+                  <p className="text-muted-foreground text-sm leading-relaxed">
+                    AI and third-party tools are used as assistive technologies; clients remain responsible for validating outputs and ensuring compliance of their content.
                   </p>
                 </div>
 
@@ -220,6 +227,13 @@ export default function SecurityPage() {
                       <p className="text-xs text-muted-foreground">California Consumer Privacy Act</p>
                     </div>
                   </div>
+                </div>
+
+                <div>
+                  <h3 className="font-medium mb-2">Security Certifications</h3>
+                  <p className="text-muted-foreground text-sm leading-relaxed">
+                    {companyName} is not currently certified under SOC 2, ISO 27001, or similar frameworks but aligns its controls with generally accepted security best practices.
+                  </p>
                 </div>
 
                 <div>

@@ -14,6 +14,9 @@ export function Navigation() {
     { href: "/#features", label: "Features" },
     { href: "/#pricing", label: "Pricing" },
     { href: "/#how-it-works", label: "How It Works" },
+    { href: "/terms", label: "Terms" },
+    { href: "/privacy", label: "Privacy" },
+    { href: "/security", label: "Security" },
   ];
 
   return (

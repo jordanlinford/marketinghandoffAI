@@ -72,6 +72,7 @@ export default function TermsPage() {
                 Services are sold in fixed tranches as set on our site or in your engagement form:
               </p>
               <ul className="list-disc pl-6 text-muted-foreground space-y-2 mb-4">
+                <li><strong>Intro Package:</strong> $1,000</li>
                 <li><strong>Foundation Package:</strong> $5,000</li>
                 <li><strong>Growth Package:</strong> $10,000</li>
                 <li><strong>Enterprise Package:</strong> $15,000</li>

@@ -29,6 +29,7 @@ const statusConfig = {
 };
 
 const tierNames = {
+  tier_0: "Intro ($1,000)",
   tier_1: "Foundation ($5,000)",
   tier_2: "Growth ($10,000)",
   tier_3: "Enterprise ($15,000)",

@@ -48,6 +48,12 @@ const goals = [
 
 const tiers = [
   {
+    id: "tier_0",
+    name: "Intro",
+    price: 1000,
+    description: "Quick-start SEO assessment",
+  },
+  {
     id: "tier_1",
     name: "Foundation",
     price: 5000,

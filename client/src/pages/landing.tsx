@@ -52,11 +52,25 @@ const features = [
 
 const pricingTiers = [
   {
+    name: "Intro",
+    price: "$1,000",
+    tier: "tier_0",
+    description: "Quick-start SEO assessment",
+    features: [
+      "Initial SEO health check",
+      "Top 5 keyword opportunities",
+      "Basic content recommendations",
+      "One-time optimization report",
+    ],
+    popular: false,
+  },
+  {
     name: "Foundation",
     price: "$5,000",
     tier: "tier_1",
     description: "Essential SEO optimization package",
     features: [
+      "Everything in Intro",
       "Keyword refinement audit",
       "Content optimization (titles, meta, structure)",
       "On-page AI readiness adjustments",
@@ -71,7 +85,7 @@ const pricingTiers = [
     tier: "tier_2",
     description: "Comprehensive SEO + outreach package",
     features: [
-      "Everything in Foundation",
+      "Everything in previous tiers",
       "Link placement outreach",
       "Syndication strategy",
       "Technical SEO checklist",

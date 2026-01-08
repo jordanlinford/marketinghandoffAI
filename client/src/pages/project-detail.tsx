@@ -28,12 +28,14 @@ const statusConfig = {
 };
 
 const tierNames = {
+  tier_0: "Intro",
   tier_1: "Foundation",
   tier_2: "Growth",
   tier_3: "Enterprise",
 };
 
 const tierPrices = {
+  tier_0: 1000,
   tier_1: 5000,
   tier_2: 10000,
   tier_3: 15000,

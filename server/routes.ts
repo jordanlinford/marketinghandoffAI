@@ -23,12 +23,14 @@ function addAdmin(userId: string): void {
 }
 
 const TIER_PRICES: Record<string, number> = {
+  tier_0: 100000, // $1,000 in cents
   tier_1: 500000, // $5,000 in cents
   tier_2: 1000000, // $10,000 in cents
   tier_3: 1500000, // $15,000 in cents
 };
 
 const TIER_NAMES: Record<string, string> = {
+  tier_0: "Intro Package",
   tier_1: "Foundation Package",
   tier_2: "Growth Package",
   tier_3: "Enterprise Package",

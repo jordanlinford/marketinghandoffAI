@@ -311,6 +311,18 @@ export default function LandingPage() {
               <Sparkles className="h-5 w-5 text-primary" />
               <span className="font-semibold">MarketingHandoffAI</span>
             </div>
+            <div className="flex flex-wrap items-center justify-center gap-6">
+              <Link href="/terms">
+                <span className="text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer" data-testid="link-terms">
+                  Terms and Conditions
+                </span>
+              </Link>
+              <Link href="/privacy">
+                <span className="text-sm text-muted-foreground hover:text-foreground transition-colors cursor-pointer" data-testid="link-privacy">
+                  Privacy Policy
+                </span>
+              </Link>
+            </div>
             <p className="text-sm text-muted-foreground">
               {new Date().getFullYear()} MarketingHandoffAI. All rights reserved.
             </p>

@@ -6,6 +6,7 @@ import { setupAuth } from "./replit_integrations/auth";
 import { runMigrations } from "stripe-replit-sync";
 import { getStripeSync } from "./stripeClient";
 import { WebhookHandlers } from "./webhookHandlers";
+import { seedDemoData } from "./seed";
 
 const app = express();
 const httpServer = createServer(app);
@@ -172,6 +173,7 @@ async function initStripe() {
     },
     () => {
       log(`serving on port ${port}`);
+      seedDemoData();
     },
   );
 })();

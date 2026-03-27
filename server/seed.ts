@@ -121,7 +121,7 @@ export async function seedDemoData() {
       log("Onit tasks already seeded — skipping task seed", "seed");
     }
 
-    // Seed deliverables
+    // Seed deliverables — always ensure correct file URLs
     const existingDeliverables = await db
       .select()
       .from(deliverables)
@@ -139,7 +139,14 @@ export async function seedDemoData() {
       }
       log(`Seeded ${DEMO_DELIVERABLES.length} deliverables for Onit project`, "seed");
     } else {
-      log("Onit deliverables already seeded — skipping", "seed");
+      // Always update file URLs in case they were stale
+      for (const d of DEMO_DELIVERABLES) {
+        await db
+          .update(deliverables)
+          .set({ fileUrl: d.fileUrl, fileType: d.fileType })
+          .where(and(eq(deliverables.projectId, projectId), ilike(deliverables.title, `%${d.title.split("—")[0].trim()}%`)));
+      }
+      log("Updated deliverable file URLs for Onit project", "seed");
     }
 
     log("Demo data seed complete", "seed");

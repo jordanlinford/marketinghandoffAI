@@ -156,7 +156,6 @@ export default function DashboardPage() {
 
   const activeProjects = projects?.filter(p => p.status !== "completed")?.length || 0;
   const completedProjects = projects?.filter(p => p.status === "completed")?.length || 0;
-  const totalInvested = projects?.reduce((sum, p) => sum + (p.amountPaid || 0), 0) || 0;
 
   return (
     <div className="min-h-screen bg-background">
@@ -180,7 +179,7 @@ export default function DashboardPage() {
           </Link>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-8">
+        <div className="grid gap-4 md:grid-cols-3 mb-8">
           <StatsCard
             title="Active Projects"
             value={isLoading ? "-" : String(activeProjects)}
@@ -198,12 +197,6 @@ export default function DashboardPage() {
             value={isLoading ? "-" : String(totalTasksCompleted)}
             description="Across all projects"
             icon={FileText}
-          />
-          <StatsCard
-            title="Total Invested"
-            value={isLoading ? "-" : `$${totalInvested.toLocaleString()}`}
-            description="In optimization services"
-            icon={TrendingUp}
           />
         </div>
 

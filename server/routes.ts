@@ -55,6 +55,29 @@ export async function registerRoutes(
     }
   });
 
+  // Get task stats for all user projects (must be before /:id route)
+  app.get("/api/projects/stats/tasks", isAuthenticated, async (req: any, res) => {
+    try {
+      const userId = req.user.claims.sub;
+      const projects = await storage.getProjectsByUserId(userId);
+      
+      const stats: Record<string, { completed: number; total: number }> = {};
+      
+      for (const project of projects) {
+        const tasks = await storage.getTasksByProjectId(project.id);
+        stats[project.id] = {
+          completed: tasks.filter(t => t.status === "completed").length,
+          total: tasks.length,
+        };
+      }
+      
+      res.json(stats);
+    } catch (error) {
+      console.error("Error fetching task stats:", error);
+      res.status(500).json({ message: "Failed to fetch task stats" });
+    }
+  });
+
   // Get single project
   app.get("/api/projects/:id", isAuthenticated, async (req: any, res) => {
     try {
@@ -147,29 +170,6 @@ export async function registerRoutes(
         return res.status(400).json({ message: "Invalid project data", errors: error.errors });
       }
       res.status(500).json({ message: "Failed to create project" });
-    }
-  });
-
-  // Get task stats for all user projects
-  app.get("/api/projects/stats/tasks", isAuthenticated, async (req: any, res) => {
-    try {
-      const userId = req.user.claims.sub;
-      const projects = await storage.getProjectsByUserId(userId);
-      
-      const stats: Record<string, { completed: number; total: number }> = {};
-      
-      for (const project of projects) {
-        const tasks = await storage.getTasksByProjectId(project.id);
-        stats[project.id] = {
-          completed: tasks.filter(t => t.status === "completed").length,
-          total: tasks.length,
-        };
-      }
-      
-      res.json(stats);
-    } catch (error) {
-      console.error("Error fetching task stats:", error);
-      res.status(500).json({ message: "Failed to fetch task stats" });
     }
   });
 

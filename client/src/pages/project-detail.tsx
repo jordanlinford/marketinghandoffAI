@@ -14,7 +14,7 @@ import {
   AlertCircle,
   TrendingUp,
   FileText,
-  Download,
+  FileSpreadsheet,
   ExternalLink,
   Calendar,
 } from "lucide-react";
@@ -69,24 +69,43 @@ function TaskItem({ task }: { task: ProjectTask }) {
   );
 }
 
+const fileTypeConfig: Record<string, { icon: React.ElementType; color: string; bg: string }> = {
+  PDF:        { icon: FileText,        color: "text-red-500",   bg: "bg-red-500/10" },
+  Spreadsheet:{ icon: FileSpreadsheet, color: "text-green-600", bg: "bg-green-500/10" },
+  Doc:        { icon: FileText,        color: "text-blue-500",  bg: "bg-blue-500/10" },
+};
+
 function DeliverableItem({ deliverable }: { deliverable: Deliverable }) {
+  const type = deliverable.fileType || "PDF";
+  const cfg = fileTypeConfig[type] || fileTypeConfig["PDF"];
+  const Icon = cfg.icon;
+
   return (
-    <div className="flex items-center justify-between py-3" data-testid={`deliverable-${deliverable.id}`}>
-      <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-lg bg-primary/10 flex items-center justify-center">
-          <FileText className="h-5 w-5 text-primary" />
+    <div className="flex items-start justify-between gap-4 py-4" data-testid={`deliverable-${deliverable.id}`}>
+      <div className="flex items-start gap-3 flex-1 min-w-0">
+        <div className={`w-10 h-10 rounded-lg ${cfg.bg} flex items-center justify-center shrink-0 mt-0.5`}>
+          <Icon className={`h-5 w-5 ${cfg.color}`} />
         </div>
-        <div>
-          <p className="font-medium">{deliverable.title}</p>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="font-medium">{deliverable.title}</p>
+            <Badge variant="secondary" className="text-xs shrink-0">{type}</Badge>
+          </div>
           {deliverable.description && (
-            <p className="text-sm text-muted-foreground">{deliverable.description}</p>
+            <p className="text-sm text-muted-foreground mt-1 leading-relaxed">{deliverable.description}</p>
+          )}
+          {deliverable.createdAt && (
+            <p className="text-xs text-muted-foreground mt-1">
+              Delivered {new Date(deliverable.createdAt).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}
+            </p>
           )}
         </div>
       </div>
       {deliverable.fileUrl && (
-        <Button variant="ghost" size="icon" asChild>
+        <Button variant="outline" size="sm" className="shrink-0" asChild>
           <a href={deliverable.fileUrl} target="_blank" rel="noopener noreferrer">
-            <Download className="h-4 w-4" />
+            <ExternalLink className="h-3.5 w-3.5 mr-1.5" />
+            Open
           </a>
         </Button>
       )}

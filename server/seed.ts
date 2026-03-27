@@ -23,6 +23,30 @@ const DEMO_TASKS = [
   { title: "Quarterly Follow-up Report", description: "Comprehensive quarterly analysis with ROI summary, ranking gains, and 90-day roadmap", status: "pending", daysAgo: null },
 ];
 
+const DEMO_DELIVERABLES = [
+  {
+    title: "Initial SEO & Technical Audit — Onit.com",
+    description: "Full crawl audit uncovering 23 technical issues (12 critical), Core Web Vitals failures on 8 key pages, and a 340-keyword gap vs. top competitors. Includes a prioritized fix list and 90-day SEO roadmap.",
+    fileUrl: "https://docs.google.com/document/d/1BzKpR8mNvT3qYoJx5hGaWcDfIeL2nMs7rPuF4wH9tSqZ/edit",
+    fileType: "PDF",
+    daysAgo: 35,
+  },
+  {
+    title: "Keyword Strategy & Opportunity Matrix",
+    description: '84 prioritized keywords with monthly search volume, keyword difficulty scores, current ranking positions, and projected traffic gains. Top opportunity: "legal operations software" (3,600 searches/mo, KD 42). Mapped to 12 content assets for optimization.',
+    fileUrl: "https://docs.google.com/spreadsheets/d/1CaLqS9nOwV4rBmZrMy7kIcCeHjJg3pOw0uTyI8zL3xTuE/edit",
+    fileType: "Spreadsheet",
+    daysAgo: 28,
+  },
+  {
+    title: "Month 1 Progress Report — Rankings, Links & AI Visibility",
+    description: "Organic impressions up 34% month-over-month. 6 editorial backlinks secured (DA range: 40–72 — JD Supra, Legal Tech News, G2). 12 pages fully re-optimized. 18 target keywords moved into top-30 positions. Onit now cited in 4 out of 10 tested Perplexity queries for \"legal ops software.\"",
+    fileUrl: "https://docs.google.com/document/d/1DdMtU0pQiX6sOoBtNa9mKeBgKh4qPw1vSzJ7yM4xVuF/edit",
+    fileType: "PDF",
+    daysAgo: 10,
+  },
+];
+
 function daysAgo(days: number): Date {
   const d = new Date();
   d.setDate(d.getDate() - days);
@@ -31,7 +55,6 @@ function daysAgo(days: number): Date {
 
 export async function seedDemoData() {
   try {
-    // Find the Onit project for this user
     const [onitProject] = await db
       .select()
       .from(projects)
@@ -61,14 +84,13 @@ export async function seedDemoData() {
       })
       .where(eq(projects.id, projectId));
 
-    // Check if tasks already seeded
+    // Seed tasks
     const existingTasks = await db
       .select()
       .from(projectTasks)
       .where(eq(projectTasks.projectId, projectId));
 
     if (existingTasks.length === 0) {
-      // Insert all tasks
       for (let i = 0; i < DEMO_TASKS.length; i++) {
         const t = DEMO_TASKS[i];
         await db.insert(projectTasks).values({
@@ -82,8 +104,6 @@ export async function seedDemoData() {
       }
       log(`Seeded ${DEMO_TASKS.length} tasks for Onit project`, "seed");
     } else if (existingTasks.length < DEMO_TASKS.length) {
-      // Tasks exist but are incomplete (e.g. only 5 default tasks from form submission)
-      // Delete old ones and recreate
       await db.delete(projectTasks).where(eq(projectTasks.projectId, projectId));
       for (let i = 0; i < DEMO_TASKS.length; i++) {
         const t = DEMO_TASKS[i];
@@ -99,6 +119,27 @@ export async function seedDemoData() {
       log(`Re-seeded ${DEMO_TASKS.length} tasks for Onit project`, "seed");
     } else {
       log("Onit tasks already seeded — skipping task seed", "seed");
+    }
+
+    // Seed deliverables
+    const existingDeliverables = await db
+      .select()
+      .from(deliverables)
+      .where(eq(deliverables.projectId, projectId));
+
+    if (existingDeliverables.length === 0) {
+      for (const d of DEMO_DELIVERABLES) {
+        await db.insert(deliverables).values({
+          projectId,
+          title: d.title,
+          description: d.description,
+          fileUrl: d.fileUrl,
+          fileType: d.fileType,
+        });
+      }
+      log(`Seeded ${DEMO_DELIVERABLES.length} deliverables for Onit project`, "seed");
+    } else {
+      log("Onit deliverables already seeded — skipping", "seed");
     }
 
     log("Demo data seed complete", "seed");

@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Month 1 Progress Report — Onit.com</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; color: #1e293b; font-size: 14px; line-height: 1.6; }
+  .page { max-width: 900px; margin: 0 auto; background: white; min-height: 100vh; }
+  .header { background: #0f172a; color: white; padding: 40px 48px; }
+  .header-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
+  .logo { font-size: 13px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: #94a3b8; }
+  .date { font-size: 13px; color: #64748b; }
+  .report-title { font-size: 28px; font-weight: 700; margin-bottom: 6px; }
+  .report-subtitle { color: #94a3b8; font-size: 15px; }
+  .content { padding: 48px; }
+  .section { margin-bottom: 48px; }
+  .section-title { font-size: 18px; font-weight: 700; color: #0f172a; padding-bottom: 12px; border-bottom: 2px solid #e2e8f0; margin-bottom: 20px; }
+  .section-subtitle { font-size: 13px; color: #64748b; margin-top: -8px; margin-bottom: 20px; }
+  .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
+  .metric-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 22px; }
+  .metric-card.positive { border-color: #86efac; }
+  .metric-label { font-size: 12px; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 10px; }
+  .metric-compare { display: flex; align-items: flex-end; gap: 12px; }
+  .metric-before { font-size: 20px; font-weight: 600; color: #94a3b8; }
+  .metric-arrow { font-size: 18px; color: #16a34a; font-weight: 700; }
+  .metric-after { font-size: 28px; font-weight: 800; color: #0f172a; }
+  .metric-change { font-size: 13px; font-weight: 700; color: #16a34a; margin-top: 4px; }
+  .metric-period { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: #f1f5f9; text-align: left; padding: 10px 14px; font-weight: 600; color: #475569; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { padding: 11px 14px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8fafc; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-green { background: #dcfce7; color: #16a34a; }
+  .badge-blue { background: #dbeafe; color: #1d4ed8; }
+  .badge-purple { background: #f3e8ff; color: #7c3aed; }
+  .badge-orange { background: #ffedd5; color: #ea580c; }
+  .up { color: #16a34a; font-weight: 700; }
+  .down { color: #dc2626; font-weight: 700; }
+  .insight-box { border-radius: 8px; padding: 16px 20px; margin-top: 16px; }
+  .insight-green { background: #f0fdf4; border: 1px solid #bbf7d0; }
+  .insight-green h4 { color: #15803d; font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .insight-green p { color: #166534; font-size: 13px; }
+  .insight-blue { background: #eff6ff; border: 1px solid #bfdbfe; }
+  .insight-blue h4 { color: #1d4ed8; font-size: 13px; font-weight: 700; margin-bottom: 4px; }
+  .insight-blue p { color: #1e40af; font-size: 13px; }
+  .ai-result { background: #fafafa; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px 16px; margin-bottom: 10px; font-size: 13px; }
+  .ai-result .query { font-weight: 600; color: #0f172a; margin-bottom: 6px; }
+  .ai-result .cited { display: inline-block; background: #dcfce7; color: #15803d; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+  .ai-result .not-cited { display: inline-block; background: #f1f5f9; color: #94a3b8; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 4px; }
+  .ai-result .excerpt { color: #64748b; font-style: italic; margin-top: 4px; font-size: 12px; }
+  .footer { background: #f8fafc; border-top: 1px solid #e2e8f0; padding: 24px 48px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #94a3b8; }
+  .rank-change { font-weight: 700; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <div class="header-top">
+      <div class="logo">Marketing Handoff AI — Confidential Report</div>
+      <div class="date">Prepared: March 17, 2026 &nbsp;·&nbsp; Reporting Period: Feb 10 – Mar 15, 2026</div>
+    </div>
+    <div class="report-title">Month 1 Progress Report</div>
+    <div class="report-subtitle">Onit, Inc. — onit.com &nbsp;|&nbsp; Enterprise Package &nbsp;·&nbsp; Rankings · Links · AI Visibility</div>
+  </div>
+
+  <div class="content">
+
+    <div class="section">
+      <div class="section-title">Organic Performance — Month-over-Month</div>
+      <div class="section-subtitle">Source: Google Search Console &nbsp;·&nbsp; Comparison: Jan 10 – Feb 9 vs. Feb 10 – Mar 15, 2026</div>
+      <div class="metric-grid">
+        <div class="metric-card positive">
+          <div class="metric-label">Organic Impressions</div>
+          <div class="metric-compare">
+            <div class="metric-before">12,400</div>
+            <div class="metric-arrow">→</div>
+            <div class="metric-after">16,616</div>
+          </div>
+          <div class="metric-change">↑ +34.0%</div>
+          <div class="metric-period">vs. prior 35-day period</div>
+        </div>
+        <div class="metric-card positive">
+          <div class="metric-label">Organic Clicks</div>
+          <div class="metric-compare">
+            <div class="metric-before">423</div>
+            <div class="metric-arrow">→</div>
+            <div class="metric-after">571</div>
+          </div>
+          <div class="metric-change">↑ +35.0%</div>
+          <div class="metric-period">vs. prior 35-day period</div>
+        </div>
+        <div class="metric-card positive">
+          <div class="metric-label">Average Position</div>
+          <div class="metric-compare">
+            <div class="metric-before">48.2</div>
+            <div class="metric-arrow">→</div>
+            <div class="metric-after">41.7</div>
+          </div>
+          <div class="metric-change">↑ +6.5 positions improved</div>
+          <div class="metric-period">across all tracked keywords</div>
+        </div>
+      </div>
+      <div class="metric-grid">
+        <div class="metric-card">
+          <div class="metric-label">Click-Through Rate</div>
+          <div class="metric-compare">
+            <div class="metric-before">3.4%</div>
+            <div class="metric-arrow">→</div>
+            <div class="metric-after">3.4%</div>
+          </div>
+          <div class="metric-change" style="color:#64748b;">— Stable (meta rewrites in progress)</div>
+          <div class="metric-period">CTR gains expected in Month 2</div>
+        </div>
+        <div class="metric-card positive">
+          <div class="metric-label">Pages w/ Impressions</div>
+          <div class="metric-compare">
+            <div class="metric-before">38</div>
+            <div class="metric-arrow">→</div>
+            <div class="metric-after">54</div>
+          </div>
+          <div class="metric-change">↑ +42.1% more indexed pages</div>
+          <div class="metric-period">post sitemap submission</div>
+        </div>
+        <div class="metric-card positive">
+          <div class="metric-label">Keywords in Top 30</div>
+          <div class="metric-compare">
+            <div class="metric-before">4</div>
+            <div class="metric-arrow">→</div>
+            <div class="metric-after">22</div>
+          </div>
+          <div class="metric-change">↑ +18 new top-30 rankings</div>
+          <div class="metric-period">from optimization + submissions</div>
+        </div>
+      </div>
+      <div class="insight-box insight-green" style="margin-top:0;">
+        <h4>✅ Strong Month 1 Foundation</h4>
+        <p>The 34% impression lift and 18 new top-30 rankings are ahead of our 90-day projection of 25% impression growth by day 30. Technical fixes resolved the JS rendering issue, allowing 6 previously invisible product pages to be crawled and indexed for the first time.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Keyword Ranking Improvements</div>
+      <div class="section-subtitle">18 tracked keywords showing measurable position improvements since engagement start</div>
+      <table>
+        <thead>
+          <tr><th>Keyword</th><th>Volume</th><th>Position (Start)</th><th>Position (Now)</th><th>Change</th><th>Status</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>legal operations software</td><td>3,600</td><td>#47</td><td><strong>#31</strong></td><td class="up">↑ +16</td><td><span class="badge badge-blue">Climbing</span></td></tr>
+          <tr><td>legal spend management</td><td>1,900</td><td>#82</td><td><strong>#44</strong></td><td class="up">↑ +38</td><td><span class="badge badge-blue">Climbing</span></td></tr>
+          <tr><td>legal matter management software</td><td>1,600</td><td>#55</td><td><strong>#28</strong></td><td class="up">↑ +27</td><td><span class="badge badge-green">Top 30</span></td></tr>
+          <tr><td>legal ops platform</td><td>1,200</td><td>#62</td><td><strong>#39</strong></td><td class="up">↑ +23</td><td><span class="badge badge-blue">Climbing</span></td></tr>
+          <tr><td>automated contract review software</td><td>1,600</td><td>#91</td><td><strong>#47</strong></td><td class="up">↑ +44</td><td><span class="badge badge-blue">Climbing</span></td></tr>
+          <tr><td>Onit contract management</td><td>720</td><td>#18</td><td><strong>#7</strong></td><td class="up">↑ +11</td><td><span class="badge badge-green">Top 10</span></td></tr>
+          <tr><td>matter management platform</td><td>880</td><td>#68</td><td><strong>#41</strong></td><td class="up">↑ +27</td><td><span class="badge badge-blue">Climbing</span></td></tr>
+          <tr><td>Onit software review</td><td>390</td><td>#24</td><td><strong>#9</strong></td><td class="up">↑ +15</td><td><span class="badge badge-green">Top 10</span></td></tr>
+          <tr><td>AI legal operations software</td><td>1,300</td><td>NR</td><td><strong>#62</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-purple">New</span></td></tr>
+          <tr><td>legal ops tools comparison</td><td>480</td><td>NR</td><td><strong>#58</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-purple">New</span></td></tr>
+          <tr><td>in-house legal department software</td><td>720</td><td>NR</td><td><strong>#71</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-purple">New</span></td></tr>
+          <tr><td>Onit vs SimpleLegal</td><td>390</td><td>NR</td><td><strong>#14</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-green">Top 15</span></td></tr>
+          <tr><td>outside counsel billing software</td><td>1,100</td><td>NR</td><td><strong>#68</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-purple">New</span></td></tr>
+          <tr><td>e-billing software legal</td><td>2,400</td><td>NR</td><td><strong>#83</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-purple">New</span></td></tr>
+          <tr><td>best legal ops software 2026</td><td>1,100</td><td>NR</td><td><strong>#22</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-green">Top 25</span></td></tr>
+          <tr><td>legal technology platform enterprise</td><td>590</td><td>#78</td><td><strong>#52</strong></td><td class="up">↑ +26</td><td><span class="badge badge-blue">Climbing</span></td></tr>
+          <tr><td>contract approval workflow software</td><td>880</td><td>NR</td><td><strong>#44</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-blue">Climbing</span></td></tr>
+          <tr><td>legal invoice management</td><td>720</td><td>NR</td><td><strong>#38</strong></td><td class="up">↑ New entry</td><td><span class="badge badge-green">Top 40</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Editorial Backlinks Secured</div>
+      <div class="section-subtitle">6 placements secured through targeted outreach &nbsp;·&nbsp; DA = Domain Authority (Moz)</div>
+      <table>
+        <thead>
+          <tr><th>Publication</th><th>DA</th><th>Link Type</th><th>Anchor Text</th><th>Date Live</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>JD Supra</strong></td><td>67</td><td><span class="badge badge-green">Editorial</span></td><td>"legal operations software"</td><td>Feb 28, 2026</td></tr>
+          <tr><td><strong>Legal Tech News</strong></td><td>52</td><td><span class="badge badge-green">Editorial</span></td><td>"Onit's legal ops platform"</td><td>Mar 3, 2026</td></tr>
+          <tr><td><strong>G2 (Onit Profile)</strong></td><td>84</td><td><span class="badge badge-blue">Directory</span></td><td>Branded</td><td>Mar 5, 2026</td></tr>
+          <tr><td><strong>Above the Law</strong></td><td>72</td><td><span class="badge badge-green">Editorial</span></td><td>"legal department management tools"</td><td>Mar 8, 2026</td></tr>
+          <tr><td><strong>Capterra</strong></td><td>78</td><td><span class="badge badge-blue">Directory</span></td><td>Branded</td><td>Mar 10, 2026</td></tr>
+          <tr><td><strong>Corporate Counsel</strong></td><td>40</td><td><span class="badge badge-orange">Mention</span></td><td>"legal operations software"</td><td>Mar 14, 2026</td></tr>
+        </tbody>
+      </table>
+      <div class="insight-box insight-green" style="margin-top:16px;">
+        <h4>✅ Strong Link Profile Progress</h4>
+        <p>Average DA of secured links: 65.5 — well above our Month 1 target of DA 45+. The Above the Law and G2 placements in particular carry significant trust signals for legal-vertical queries. Domain authority is expected to move from 54 to 57–59 by end of Month 2.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">AI Search Visibility — Perplexity & ChatGPT</div>
+      <div class="section-subtitle">10 test queries run across Perplexity AI and ChatGPT · March 15, 2026</div>
+      <div class="ai-result">
+        <div class="query">"What is the best legal operations software for enterprise companies?"</div>
+        <span class="cited">✓ Onit Cited</span>
+        <div class="excerpt">Perplexity response included: "...Onit is frequently mentioned as a leading platform for enterprise legal operations, offering contract management, matter management, and e-billing in a unified suite..."</div>
+      </div>
+      <div class="ai-result">
+        <div class="query">"Top legal ops platforms for in-house legal teams"</div>
+        <span class="cited">✓ Onit Cited</span>
+        <div class="excerpt">Perplexity listed Onit alongside SimpleLegal and Mitratech in a direct comparison table.</div>
+      </div>
+      <div class="ai-result">
+        <div class="query">"Legal spend management software recommendations"</div>
+        <span class="cited">✓ Onit Cited</span>
+        <div class="excerpt">ChatGPT-4o included Onit in top 4 recommendations with a summary of key features.</div>
+      </div>
+      <div class="ai-result">
+        <div class="query">"Best CLM software 2026"</div>
+        <span class="cited">✓ Onit Cited</span>
+        <div class="excerpt">Perplexity cited Onit's G2 profile and a Legal Tech News article placed during Month 1.</div>
+      </div>
+      <div class="ai-result">
+        <div class="query">"How does Onit compare to Mitratech?"</div>
+        <span class="not-cited">Not Yet Cited</span>
+        <div class="excerpt">Neither Perplexity nor ChatGPT returned Onit content for this comparison query. Comparison page content is in progress for Month 2.</div>
+      </div>
+      <div class="ai-result">
+        <div class="query">"Contract management software for Fortune 500 legal teams"</div>
+        <span class="not-cited">Not Yet Cited</span>
+        <div class="excerpt">High-competition query — requires more authority signals and dedicated content. Targeted in Month 2–3 roadmap.</div>
+      </div>
+      <div class="insight-box insight-blue">
+        <h4>📊 AI Visibility Score: 4/10 queries cited (40%)</h4>
+        <p>This is ahead of our Month 1 benchmark of 25% citation rate. The structured data and FAQ schema implemented in Week 3 appears to be driving citation pickup in Perplexity. Target for end of Month 2: 60% citation rate across test queries. Month 3 target: 75%+.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Month 2 Priorities</div>
+      <table>
+        <thead>
+          <tr><th>#</th><th>Initiative</th><th>Expected Impact</th><th>Owner</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1</td><td>Complete Technical SEO Checklist (14 remaining issues)</td><td>Core Web Vitals pass, +5–10 position lift on 8 pages</td><td>MH AI Team</td></tr>
+          <tr><td>2</td><td>Publish 5 syndicated articles (JD Supra, LinkedIn, Medium)</td><td>3–4 new backlinks, AI citation pickup</td><td>MH AI Team</td></tr>
+          <tr><td>3</td><td>Create "Onit vs X" comparison pages (SimpleLegal, Mitratech, TeamConnect)</td><td>Top 5 for branded comparison queries</td><td>MH AI Team</td></tr>
+          <tr><td>4</td><td>Secure 4+ additional placements (target: Law.com, Forbes Legal)</td><td>DA boost to 58–60</td><td>MH AI Team</td></tr>
+          <tr><td>5</td><td>Optimize CTR via A/B title tag testing</td><td>CTR from 3.4% → 4.5%+, +20% clicks</td><td>MH AI Team</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+  <div class="footer">
+    <span>Marketing Handoff AI LLC &nbsp;·&nbsp; Confidential &amp; Proprietary</span>
+    <span>Onit, Inc. Enterprise Package &nbsp;·&nbsp; Month 1 of 3</span>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Initial SEO & Technical Audit — Onit.com</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f8fafc; color: #1e293b; font-size: 14px; line-height: 1.6; }
+  .page { max-width: 900px; margin: 0 auto; background: white; min-height: 100vh; }
+  .header { background: #0f172a; color: white; padding: 40px 48px; }
+  .header-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 24px; }
+  .logo { font-size: 13px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: #94a3b8; }
+  .date { font-size: 13px; color: #64748b; }
+  .report-title { font-size: 28px; font-weight: 700; margin-bottom: 6px; }
+  .report-subtitle { color: #94a3b8; font-size: 15px; }
+  .content { padding: 48px; }
+  .section { margin-bottom: 48px; }
+  .section-title { font-size: 18px; font-weight: 700; color: #0f172a; margin-bottom: 4px; padding-bottom: 12px; border-bottom: 2px solid #e2e8f0; margin-bottom: 20px; }
+  .section-subtitle { font-size: 13px; color: #64748b; margin-top: -8px; margin-bottom: 20px; }
+  .summary-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+  .summary-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 20px; text-align: center; }
+  .summary-card.critical { border-color: #fca5a5; background: #fff1f2; }
+  .summary-card.warning { border-color: #fcd34d; background: #fffbeb; }
+  .summary-card.info { border-color: #93c5fd; background: #eff6ff; }
+  .summary-card.good { border-color: #86efac; background: #f0fdf4; }
+  .summary-num { font-size: 36px; font-weight: 800; line-height: 1; margin-bottom: 4px; }
+  .summary-card.critical .summary-num { color: #dc2626; }
+  .summary-card.warning .summary-num { color: #d97706; }
+  .summary-card.info .summary-num { color: #2563eb; }
+  .summary-card.good .summary-num { color: #16a34a; }
+  .summary-label { font-size: 12px; color: #64748b; font-weight: 500; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { background: #f1f5f9; text-align: left; padding: 10px 14px; font-weight: 600; color: #475569; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { padding: 11px 14px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8fafc; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+  .badge-critical { background: #fee2e2; color: #dc2626; }
+  .badge-moderate { background: #fef3c7; color: #d97706; }
+  .badge-low { background: #dbeafe; color: #2563eb; }
+  .badge-pass { background: #dcfce7; color: #16a34a; }
+  .badge-fail { background: #fee2e2; color: #dc2626; }
+  .vitals-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+  .vital-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 20px; }
+  .vital-card.fail { border-color: #fca5a5; }
+  .vital-name { font-size: 12px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 8px; }
+  .vital-value { font-size: 28px; font-weight: 800; margin-bottom: 4px; }
+  .vital-card.fail .vital-value { color: #dc2626; }
+  .vital-threshold { font-size: 12px; color: #94a3b8; }
+  .vital-bar-bg { height: 6px; background: #f1f5f9; border-radius: 3px; margin-top: 10px; }
+  .vital-bar { height: 6px; border-radius: 3px; background: #dc2626; }
+  .competitor-bar-bg { height: 8px; background: #f1f5f9; border-radius: 4px; }
+  .competitor-bar { height: 8px; border-radius: 4px; }
+  .roadmap-item { display: flex; gap: 16px; padding: 16px 0; border-bottom: 1px solid #f1f5f9; }
+  .roadmap-item:last-child { border-bottom: none; }
+  .roadmap-phase { font-size: 12px; font-weight: 700; color: white; background: #0f172a; border-radius: 4px; padding: 2px 8px; white-space: nowrap; height: fit-content; }
+  .roadmap-body h4 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+  .roadmap-body p { font-size: 13px; color: #64748b; }
+  .insight-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px; padding: 16px 20px; margin-top: 16px; }
+  .insight-box h4 { font-size: 13px; font-weight: 700; color: #15803d; margin-bottom: 4px; }
+  .insight-box p { font-size: 13px; color: #166534; }
+  .footer { background: #f8fafc; border-top: 1px solid #e2e8f0; padding: 24px 48px; display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #94a3b8; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="header">
+    <div class="header-top">
+      <div class="logo">Marketing Handoff AI — Confidential Report</div>
+      <div class="date">Prepared: February 20, 2026</div>
+    </div>
+    <div class="report-title">Initial SEO & Technical Audit</div>
+    <div class="report-subtitle">Onit, Inc. — onit.com &nbsp;|&nbsp; Enterprise Package &nbsp;|&nbsp; Audit Period: Feb 10–20, 2026</div>
+  </div>
+
+  <div class="content">
+
+    <div class="section">
+      <div class="section-title">Executive Summary</div>
+      <div class="summary-grid">
+        <div class="summary-card critical">
+          <div class="summary-num">12</div>
+          <div class="summary-label">Critical Issues</div>
+        </div>
+        <div class="summary-card warning">
+          <div class="summary-num">8</div>
+          <div class="summary-label">Moderate Issues</div>
+        </div>
+        <div class="summary-card info">
+          <div class="summary-num">3</div>
+          <div class="summary-label">Low Priority</div>
+        </div>
+        <div class="summary-card good">
+          <div class="summary-num">340</div>
+          <div class="summary-label">Keyword Opportunities</div>
+        </div>
+      </div>
+      <p style="color:#475569; font-size:14px; line-height:1.8;">Onit.com has a solid domain foundation (DA 54) but is underperforming significantly on technical SEO fundamentals. Core Web Vitals fail on all three metrics, 12 critical crawl errors are blocking indexation of key product pages, and competitors are capturing over 340 high-intent keywords where Onit has no ranking presence. Addressing these issues represents a significant and attainable organic growth opportunity.</p>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Core Web Vitals (Mobile)</div>
+      <div class="section-subtitle">Measured across 8 key product and solution pages · Google PageSpeed Insights</div>
+      <div class="vitals-grid">
+        <div class="vital-card fail">
+          <div class="vital-name">Largest Contentful Paint</div>
+          <div class="vital-value">4.2s</div>
+          <div class="vital-threshold">Target: &lt; 2.5s &nbsp;·&nbsp; <span style="color:#dc2626;font-weight:600;">FAILING</span></div>
+          <div class="vital-bar-bg"><div class="vital-bar" style="width:84%;"></div></div>
+        </div>
+        <div class="vital-card fail">
+          <div class="vital-name">Cumulative Layout Shift</div>
+          <div class="vital-value">0.18</div>
+          <div class="vital-threshold">Target: &lt; 0.10 &nbsp;·&nbsp; <span style="color:#dc2626;font-weight:600;">FAILING</span></div>
+          <div class="vital-bar-bg"><div class="vital-bar" style="width:72%;"></div></div>
+        </div>
+        <div class="vital-card fail">
+          <div class="vital-name">First Input Delay</div>
+          <div class="vital-value">210ms</div>
+          <div class="vital-threshold">Target: &lt; 100ms &nbsp;·&nbsp; <span style="color:#dc2626;font-weight:600;">FAILING</span></div>
+          <div class="vital-bar-bg"><div class="vital-bar" style="width:68%;"></div></div>
+        </div>
+      </div>
+      <div class="insight-box">
+        <h4>💡 Opportunity</h4>
+        <p>Google uses Core Web Vitals as a ranking signal. Bringing all three metrics into "Good" range is estimated to improve rankings by 4–8 positions for competitive head terms, based on observed outcomes from similar enterprise SaaS clients.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Critical Technical Issues</div>
+      <table>
+        <thead>
+          <tr><th>Issue</th><th>Severity</th><th>Pages Affected</th><th>Impact</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Redirect chains (3+ hops)</td><td><span class="badge badge-critical">Critical</span></td><td>34</td><td>Crawl budget waste, PageRank dilution</td></tr>
+          <tr><td>Missing canonical tags on paginated content</td><td><span class="badge badge-critical">Critical</span></td><td>18</td><td>Duplicate content penalty risk</td></tr>
+          <tr><td>Broken internal links (404)</td><td><span class="badge badge-critical">Critical</span></td><td>12</td><td>Poor user experience, lost link equity</td></tr>
+          <tr><td>Images missing alt text</td><td><span class="badge badge-critical">Critical</span></td><td>87 images</td><td>Accessibility + image search visibility</td></tr>
+          <tr><td>JavaScript-rendered content not indexed</td><td><span class="badge badge-critical">Critical</span></td><td>6 pages</td><td>Key product pages invisible to Googlebot</td></tr>
+          <tr><td>Missing structured data (schema.org)</td><td><span class="badge badge-critical">Critical</span></td><td>All pages</td><td>No rich result eligibility</td></tr>
+          <tr><td>Mobile viewport not configured correctly</td><td><span class="badge badge-critical">Critical</span></td><td>3 templates</td><td>Mobile ranking penalty</td></tr>
+          <tr><td>Duplicate H1 tags</td><td><span class="badge badge-critical">Critical</span></td><td>9</td><td>Diluted keyword signals</td></tr>
+          <tr><td>Missing meta descriptions</td><td><span class="badge badge-critical">Critical</span></td><td>22</td><td>Lower CTR in search results</td></tr>
+          <tr><td>Page speed score &lt;50 (mobile)</td><td><span class="badge badge-critical">Critical</span></td><td>8</td><td>Core Web Vitals failure</td></tr>
+          <tr><td>Thin content pages (&lt;300 words)</td><td><span class="badge badge-critical">Critical</span></td><td>14</td><td>Low-quality content signals</td></tr>
+          <tr><td>Sitemap not submitted to GSC</td><td><span class="badge badge-critical">Critical</span></td><td>—</td><td>Delayed indexation of new pages</td></tr>
+          <tr><td>HTTP to HTTPS mixed content warnings</td><td><span class="badge badge-moderate">Moderate</span></td><td>5</td><td>Security warning, minor ranking signal</td></tr>
+          <tr><td>Title tags too long (&gt;60 chars)</td><td><span class="badge badge-moderate">Moderate</span></td><td>19</td><td>Titles truncated in SERPs</td></tr>
+          <tr><td>No robots.txt optimization</td><td><span class="badge badge-moderate">Moderate</span></td><td>—</td><td>Crawl budget inefficiency</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Competitor Keyword Gap Analysis</div>
+      <div class="section-subtitle">Onit vs. top 3 organic competitors · Source: Semrush, February 2026</div>
+      <table style="margin-bottom:20px;">
+        <thead>
+          <tr><th>Competitor</th><th>Domain Authority</th><th>Ranking Keywords</th><th>Keywords Onit is Missing</th><th>Est. Traffic Lost/Mo</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>SimpleLegal</td><td>48</td><td>1,840</td><td>127</td><td>~4,200 visits</td></tr>
+          <tr><td>Mitratech</td><td>61</td><td>3,120</td><td>148</td><td>~6,800 visits</td></tr>
+          <tr><td>TeamConnect (Wolters Kluwer)</td><td>74</td><td>4,560</td><td>65</td><td>~2,100 visits</td></tr>
+          <tr style="font-weight:700;"><td>Total Gap</td><td>—</td><td>—</td><td>340</td><td>~13,100 visits/mo</td></tr>
+        </tbody>
+      </table>
+      <div class="insight-box">
+        <h4>💡 Key Finding</h4>
+        <p>Capturing even 20% of the identified keyword gap would represent an additional ~2,600 monthly organic visitors — equivalent to a significant increase in qualified pipeline for Onit's enterprise sales team.</p>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">90-Day Optimization Roadmap</div>
+      <div class="roadmap-item">
+        <div><div class="roadmap-phase">Days 1–14</div></div>
+        <div class="roadmap-body">
+          <h4>Critical Technical Fixes</h4>
+          <p>Resolve redirect chains, fix broken links, submit sitemap to Google Search Console, configure canonical tags, fix mobile viewport issues. Estimated: +8–12 ranking positions on crawled pages.</p>
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <div><div class="roadmap-phase">Days 15–30</div></div>
+        <div class="roadmap-body">
+          <h4>Content & Metadata Optimization</h4>
+          <p>Rewrite all 22 missing meta descriptions, fix 9 duplicate H1s, optimize 14 thin content pages with 600–900 word rewrites. Add schema markup to homepage, product pages, and blog.</p>
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <div><div class="roadmap-phase">Days 31–60</div></div>
+        <div class="roadmap-body">
+          <h4>Core Web Vitals & Page Speed</h4>
+          <p>Compress and lazy-load images across 8 failing pages, defer non-critical JavaScript, implement server-side rendering for JS-heavy product pages. Target: LCP &lt; 2.5s, CLS &lt; 0.10.</p>
+        </div>
+      </div>
+      <div class="roadmap-item">
+        <div><div class="roadmap-phase">Days 61–90</div></div>
+        <div class="roadmap-body">
+          <h4>AI Readiness & Keyword Gap</h4>
+          <p>Add FAQ schema and conversational content blocks targeting 80+ keyword gap opportunities. Submit structured data to Bing, DuckDuckGo, and emerging AI search indexes. Begin link outreach targeting DA 40+ legal tech publications.</p>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <div class="footer">
+    <span>Marketing Handoff AI LLC &nbsp;·&nbsp; Confidential &amp; Proprietary</span>
+    <span>Onit, Inc. Enterprise Package &nbsp;·&nbsp; Page 1 of 1</span>
+  </div>
+</div>
+</body>
+</html>

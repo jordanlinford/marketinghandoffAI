@@ -10,9 +10,11 @@ system-level setup, not a tenant request.
 """
 from __future__ import annotations
 
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.db import SessionLocal, create_all
+from app.main import app
 from app.models import AgentRegistration, Org, Run
 from app.queue import enqueue
 from app.tenancy import scoped
@@ -55,6 +57,14 @@ def main() -> None:
         leaked = db.execute(scoped(Run, other.id)).scalars().all()
         assert leaked == [], "TENANT LEAK: another org could see Onit's runs!"
         print("\n[OK] Tenant isolation holds — Acme sees 0 of Onit's runs.")
+
+        # UI check: the review page is served and contains the expected shell.
+        client = TestClient(app)
+        ui = client.get("/ui")
+        assert ui.status_code == 200, f"/ui returned {ui.status_code}"
+        assert "Agent" in ui.text and "Approval queue" in ui.text, "/ui body missing expected shell"
+        print("[OK] /ui returns 200 with the review shell.")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

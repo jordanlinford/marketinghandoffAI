@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Agent HQ</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel-2: #1d222c;
+    --border: #262c38;
+    --text: #e6e8ee;
+    --muted: #8a93a6;
+    --accent: #5b8cff;
+    --accent-2: #7aa2ff;
+    --ok: #2ecc71;
+    --warn: #f5a623;
+    --err: #ef4444;
+    --info: #5b8cff;
+    --queued: #8a93a6;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  a { color: var(--accent-2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button {
+    background: var(--accent);
+    color: white;
+    border: 0;
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 500;
+  }
+  button:hover { background: var(--accent-2); }
+  button:disabled { background: #34384a; color: #6e7384; cursor: not-allowed; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button.ghost:hover { background: var(--panel-2); }
+  button.approve { background: var(--ok); }
+  button.reject { background: var(--err); }
+  input[type=text], input[type=email] {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font: inherit;
+    min-width: 220px;
+  }
+  header.bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header.bar .brand { font-weight: 600; letter-spacing: .2px; }
+  header.bar .brand .dot { color: var(--accent); }
+  header.bar .who { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+  header.bar .who strong { color: var(--text); }
+  main { display: grid; grid-template-columns: 360px 1fr 360px; gap: 16px; padding: 16px; min-height: calc(100vh - 53px); }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    min-height: 200px;
+  }
+  .panel h2 {
+    margin: 0 0 10px;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .stack { display: flex; flex-direction: column; gap: 8px; }
+  .runs-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .run-item {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+  }
+  .run-item:hover { border-color: var(--accent); }
+  .run-item.selected { border-color: var(--accent); background: #1f263a; }
+  .run-item .top { display: flex; justify-content: space-between; align-items: center; }
+  .run-item .meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
+  }
+  .badge.queued    { background: #2c3142; color: #c5cad6; }
+  .badge.running   { background: #1f3b6b; color: #c8dcff; }
+  .badge.succeeded { background: #143a26; color: #7ce0a3; }
+  .badge.failed    { background: #4a1a1a; color: #ff9b9b; }
+  .badge.passed    { background: #143a26; color: #7ce0a3; }
+  .badge.blocked   { background: #4a1a1a; color: #ff9b9b; }
+  .badge.pending   { background: #2c3142; color: #c5cad6; }
+  .detail-empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .detail h1 { font-size: 18px; margin: 0 0 4px; }
+  .detail .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .section { margin-top: 18px; }
+  .section h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1.4px;
+    color: var(--muted); margin: 0 0 8px; font-weight: 600;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
+  .cluster {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; margin-bottom: 8px;
+  }
+  .cluster h4 { margin: 0 0 6px; font-size: 13px; }
+  .cluster ul { margin: 0; padding-left: 18px; color: var(--muted); }
+  .cluster li { padding: 2px 0; }
+  .sizing { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .sizing .card {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; text-align: center;
+  }
+  .sizing .card .num { font-size: 18px; font-weight: 600; }
+  .sizing .card .lbl { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .8px; }
+  ul.recs { padding-left: 18px; margin: 0; }
+  ul.recs li { padding: 3px 0; }
+  ul.cites { list-style: none; padding: 0; margin: 0; }
+  ul.cites li { padding: 4px 0; color: var(--muted); font-size: 13px; }
+  .narrative {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .narrative h1, .narrative h2, .narrative h3 { color: var(--text); }
+  .narrative p { color: #c5cad6; }
+  details.logs { margin-top: 14px; }
+  details.logs summary { cursor: pointer; color: var(--muted); }
+  details.logs pre {
+    background: #0a0d12; padding: 10px; border-radius: 6px; overflow: auto;
+    max-height: 260px; font-size: 12px; color: #b5bccc; border: 1px solid var(--border);
+  }
+  .proposal {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 10px;
+  }
+  .proposal .row { margin-bottom: 6px; }
+  .proposal pre {
+    background: #0a0d12; padding: 8px; border-radius: 6px; font-size: 12px;
+    overflow: auto; border: 1px solid var(--border); margin: 6px 0;
+  }
+  .proposal .actions { display: flex; gap: 8px; margin-top: 8px; }
+  .empty-state {
+    text-align: center; padding: 30px 10px; color: var(--muted);
+    border: 1px dashed var(--border); border-radius: 8px;
+  }
+  .empty-state .big { color: var(--text); font-weight: 600; margin-bottom: 4px; }
+  .err {
+    background: #3a1a1a; color: #ffb3b3; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid #5a2424; font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="brand">Agent <span class="dot">●</span> HQ</div>
+  <div class="who" id="who">
+    <span>loading…</span>
+  </div>
+</header>
+<main>
+  <!-- LEFT: Runs -->
+  <section class="panel" aria-label="Runs">
+    <div class="row">
+      <h2 style="margin:0">Runs</h2>
+      <button id="trigger-btn">Run market intelligence</button>
+    </div>
+    <div id="runs-error"></div>
+    <div class="runs-list" id="runs-list"></div>
+  </section>
+
+  <!-- CENTER: Detail -->
+  <section class="panel detail" aria-label="Run detail" id="detail">
+    <div class="detail-empty">Select a run to see its brief.</div>
+  </section>
+
+  <!-- RIGHT: Approval queue -->
+  <section class="panel" aria-label="Approval queue">
+    <h2>Approval queue</h2>
+    <div id="proposals"></div>
+  </section>
+</main>
+
+<script>
+// ---- TODO(prod): replace dev email header with the SSO session cookie. ----
+// In dev, the page holds the current email in memory and sends it on every
+// fetch as X-Dev-User-Email. No localStorage by design — refresh resets.
+const state = {
+  email: 'jordan@onit.com',
+  me: null,
+  runs: [],
+  selectedRunId: null,
+  detail: null,
+  proposals: [],
+  pollTimer: null,
+};
+
+async function api(path, opts = {}) {
+  const headers = Object.assign(
+    { 'Content-Type': 'application/json', 'X-Dev-User-Email': state.email },
+    opts.headers || {},
+  );
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`${res.status} ${res.statusText}: ${text}`);
+  }
+  return res.json();
+}
+
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') n.className = v;
+    else if (k === 'onclick') n.addEventListener('click', v);
+    else if (k === 'html') n.innerHTML = v;
+    else if (v != null) n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null) continue;
+    n.appendChild(typeof kid === 'string' ? document.createTextNode(kid) : kid);
+  }
+  return n;
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const now = new Date();
+  const diff = (now - d) / 1000;
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return d.toLocaleString();
+}
+
+function fmtCost(c) {
+  if (!c) return '$0.00';
+  return '$' + Number(c).toFixed(c < 0.01 ? 4 : 2);
+}
+
+// ---- Identity bar ---------------------------------------------------------
+async function loadMe() {
+  const who = document.getElementById('who');
+  who.innerHTML = '';
+  try {
+    state.me = await api('/api/me');
+    who.appendChild(el('span', {}, 'Signed in as '));
+    who.appendChild(el('strong', {}, state.me.user.name || state.me.user.email));
+    who.appendChild(el('span', {}, ` · ${state.me.org.name}`));
+    who.appendChild(el('span', { style: 'margin: 0 8px; color: var(--border);' }, '|'));
+  } catch (e) {
+    who.appendChild(el('span', { class: 'err' }, `Auth: ${e.message}`));
+  }
+  const input = el('input', { type: 'email', value: state.email, title: 'Dev email (X-Dev-User-Email)' });
+  input.addEventListener('change', (ev) => {
+    state.email = ev.target.value.trim();
+    refreshAll();
+  });
+  who.appendChild(input);
+}
+
+// ---- Runs -----------------------------------------------------------------
+function renderRuns() {
+  const list = document.getElementById('runs-list');
+  list.innerHTML = '';
+  if (!state.runs.length) {
+    list.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No runs yet'),
+      el('div', {}, 'Click "Run market intelligence" to enqueue one.'),
+    ));
+    return;
+  }
+  for (const r of state.runs) {
+    const item = el('div',
+      { class: 'run-item' + (r.id === state.selectedRunId ? ' selected' : ''),
+        onclick: () => selectRun(r.id) },
+      el('div', { class: 'top' },
+        el('span', {}, r.agent_key),
+        el('span', { class: `badge ${r.status}` }, r.status),
+      ),
+      el('div', { class: 'meta' }, `${fmtTime(r.created_at)} · ${fmtCost(r.cost_usd)} · ${r.trigger}`),
+    );
+    list.appendChild(item);
+  }
+}
+
+async function loadRuns() {
+  try {
+    state.runs = await api('/api/runs');
+    document.getElementById('runs-error').innerHTML = '';
+  } catch (e) {
+    document.getElementById('runs-error').innerHTML =
+      `<div class="err">Failed to load runs: ${e.message}</div>`;
+    state.runs = [];
+  }
+  renderRuns();
+  managePolling();
+}
+
+async function triggerRun() {
+  const btn = document.getElementById('trigger-btn');
+  btn.disabled = true;
+  btn.textContent = 'Enqueueing…';
+  try {
+    const run = await api('/api/runs', {
+      method: 'POST',
+      body: JSON.stringify({ agent_key: 'market_intel' }),
+    });
+    await loadRuns();
+    selectRun(run.id);
+  } catch (e) {
+    alert(`Failed to enqueue run: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Run market intelligence';
+  }
+}
+
+function managePolling() {
+  const active = state.runs.some(r => r.status === 'queued' || r.status === 'running');
+  if (active && !state.pollTimer) {
+    state.pollTimer = setInterval(async () => {
+      await loadRuns();
+      if (state.selectedRunId) await loadDetail(state.selectedRunId);
+    }, 3000);
+  } else if (!active && state.pollTimer) {
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+}
+
+// ---- Run detail -----------------------------------------------------------
+async function selectRun(id) {
+  state.selectedRunId = id;
+  renderRuns();
+  await loadDetail(id);
+}
+
+async function loadDetail(id) {
+  try {
+    state.detail = await api(`/api/runs/${id}`);
+  } catch (e) {
+    document.getElementById('detail').innerHTML =
+      `<div class="err">Failed to load run: ${e.message}</div>`;
+    return;
+  }
+  renderDetail();
+}
+
+function renderSizing(s) {
+  if (!s) return null;
+  return el('div', { class: 'sizing' },
+    el('div', { class: 'card' },
+      el('div', { class: 'num' }, String(s.tam_companies ?? '—')),
+      el('div', { class: 'lbl' }, 'TAM companies')),
+    el('div', { class: 'card' },
+      el('div', { class: 'num' }, s.tam_revenue_usd != null ? '$' + Math.round(s.tam_revenue_usd / 1e6) + 'M' : '—'),
+      el('div', { class: 'lbl' }, 'TAM revenue')),
+    el('div', { class: 'card' },
+      el('div', { class: 'num' }, String(s.sam_companies ?? '—')),
+      el('div', { class: 'lbl' }, 'SAM')),
+    el('div', { class: 'card' },
+      el('div', { class: 'num' }, String(s.som_companies ?? '—')),
+      el('div', { class: 'lbl' }, 'SOM')),
+  );
+}
+
+function renderTargets(targets) {
+  if (!targets || !targets.length) return null;
+  const tbody = el('tbody');
+  for (const t of targets) {
+    tbody.appendChild(el('tr', {},
+      el('td', {}, t.name),
+      el('td', {}, t.industry || ''),
+      el('td', {}, String(t.employees ?? '')),
+      el('td', {}, t.fit_score != null ? Math.round(t.fit_score * 100) + '%' : ''),
+      el('td', {}, t.intent_score != null ? Math.round(t.intent_score * 100) + '%' : ''),
+    ));
+  }
+  return el('table', {},
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Account'),
+      el('th', {}, 'Industry'),
+      el('th', {}, 'Employees'),
+      el('th', {}, 'Fit'),
+      el('th', {}, 'Intent'),
+    )),
+    tbody,
+  );
+}
+
+function renderClusters(clusters) {
+  if (!clusters) return null;
+  const wrap = el('div');
+  const intents = Object.keys(clusters).sort();
+  if (!intents.length) return null;
+  for (const intent of intents) {
+    const terms = clusters[intent] || [];
+    const ul = el('ul');
+    for (const t of terms.slice(0, 8)) {
+      ul.appendChild(el('li', {},
+        `${t.term} · vol ${t.volume ?? '?'} · diff ${t.difficulty ?? '?'}`));
+    }
+    wrap.appendChild(el('div', { class: 'cluster' },
+      el('h4', {}, `${intent} (${terms.length})`),
+      ul,
+    ));
+  }
+  return wrap;
+}
+
+function renderRecs(recs) {
+  if (!recs || !recs.length) return null;
+  const ul = el('ul', { class: 'recs' });
+  for (const r of recs) ul.appendChild(el('li', {}, r));
+  return ul;
+}
+
+function renderCitations(cites) {
+  if (!cites || !cites.length) return el('div', { class: 'empty-state' }, 'No citations.');
+  const ul = el('ul', { class: 'cites' });
+  for (const c of cites) {
+    const label = c.url
+      ? `<a href="${c.url}" target="_blank" rel="noreferrer">${c.source}</a>`
+      : c.source;
+    const snip = c.snippet ? ` — ${c.snippet}` : '';
+    ul.appendChild(el('li', { html: `${label}${snip}` }));
+  }
+  return ul;
+}
+
+function renderDetail() {
+  const root = document.getElementById('detail');
+  root.innerHTML = '';
+  if (!state.detail) {
+    root.appendChild(el('div', { class: 'detail-empty' }, 'Select a run to see its brief.'));
+    return;
+  }
+  const run = state.detail.run;
+  const artifacts = state.detail.artifacts || [];
+  const logs = state.detail.logs || [];
+
+  root.appendChild(el('h1', {}, `${run.agent_key} — `,
+    el('span', { class: `badge ${run.status}` }, run.status)));
+  root.appendChild(el('div', { class: 'sub' },
+    `${fmtTime(run.created_at)} · ${fmtCost(run.cost_usd)} · trigger: ${run.trigger}`));
+
+  if (run.status === 'failed' && run.error) {
+    root.appendChild(el('div', { class: 'err' }, run.error));
+  }
+
+  if (!artifacts.length) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' },
+        run.status === 'succeeded' ? 'No artifacts on this run.' : 'Waiting for worker…'),
+      el('div', {}, 'Status will refresh automatically.'),
+    ));
+  }
+
+  for (const art of artifacts) {
+    root.appendChild(el('div', { class: 'section' },
+      el('h3', {}, art.title || art.type),
+    ));
+    const body = art.body || {};
+    const structured = body.structured || {};
+
+    if (body.narrative) {
+      const md = marked.parse(body.narrative);
+      root.appendChild(el('div', { class: 'narrative', html: md }));
+    }
+
+    const sizing = renderSizing(structured.sizing);
+    if (sizing) {
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, 'Sizing'), sizing));
+    }
+
+    const targets = renderTargets(structured.top_targets);
+    if (targets) {
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, 'Top targets'), targets));
+    }
+
+    const clusters = renderClusters(structured.keyword_clusters);
+    if (clusters) {
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, 'Keyword clusters by intent'), clusters));
+    }
+
+    const recs = renderRecs(structured.recommendations);
+    if (recs) {
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, 'Recommendations'), recs));
+    }
+
+    root.appendChild(el('div', { class: 'section' },
+      el('h3', {}, 'Citations'), renderCitations(art.citations)));
+  }
+
+  const det = el('details', { class: 'logs' });
+  det.appendChild(el('summary', {}, `Logs (${logs.length})`));
+  det.appendChild(el('pre', {}, logs.length ? logs.join('\n') : '(no logs)'));
+  root.appendChild(det);
+}
+
+// ---- Proposals ------------------------------------------------------------
+function renderProposals() {
+  const root = document.getElementById('proposals');
+  root.innerHTML = '';
+  if (!state.proposals.length) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No actions awaiting review'),
+      el('div', {}, "market_intel is read-only — proposals from action-taking agents will land here."),
+    ));
+    return;
+  }
+  for (const p of state.proposals) {
+    const card = el('div', { class: 'proposal' },
+      el('div', { class: 'row' },
+        el('strong', {}, p.action_type),
+        el('span', { class: `badge ${p.guardrail_status}` }, p.guardrail_status),
+      ),
+      el('div', { class: 'sub', style: 'color: var(--muted); font-size:12px;' },
+        fmtTime(p.created_at)),
+      p.reasoning ? el('div', { style: 'margin: 8px 0;' }, p.reasoning) : null,
+      el('pre', {}, JSON.stringify(p.payload || {}, null, 2)),
+      el('div', { class: 'actions' },
+        el('button', { class: 'approve', onclick: () => decide(p.id, 'approve') }, 'Approve'),
+        el('button', { class: 'reject', onclick: () => decide(p.id, 'reject') }, 'Reject'),
+      ),
+    );
+    root.appendChild(card);
+  }
+}
+
+async function loadProposals() {
+  try {
+    state.proposals = await api('/api/review/proposals?status=pending');
+  } catch (e) {
+    document.getElementById('proposals').innerHTML =
+      `<div class="err">Failed to load proposals: ${e.message}</div>`;
+    return;
+  }
+  renderProposals();
+}
+
+async function decide(id, kind) {
+  const note = prompt(`Optional note for ${kind}:`, '') ?? '';
+  try {
+    await api(`/api/review/proposals/${id}/${kind}`, {
+      method: 'POST',
+      body: JSON.stringify({ note }),
+    });
+    await loadProposals();
+  } catch (e) {
+    alert(`Failed to ${kind}: ${e.message}`);
+  }
+}
+
+// ---- Boot -----------------------------------------------------------------
+async function refreshAll() {
+  await loadMe();
+  await Promise.all([loadRuns(), loadProposals()]);
+  if (state.selectedRunId) await loadDetail(state.selectedRunId);
+}
+
+document.getElementById('trigger-btn').addEventListener('click', triggerRun);
+refreshAll();
+</script>
+</body>
+</html>

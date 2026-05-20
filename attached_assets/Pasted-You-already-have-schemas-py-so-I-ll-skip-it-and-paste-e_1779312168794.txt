@@ -1,0 +1,1400 @@
+You already have schemas.py, so I'll skip it and paste everything else. I'm including a few supporting files you didn't list explicitly (config.py, db.py, queue.py, guardrails.py, agents/base.py, agents/registry.py, agents/synthesis.py, api/admin.py) because the files you did ask for import from them — without those you'd hit the same "guessing at patterns" problem one layer down. This is the complete repo minus schemas.py.
+Let me pull the exact on-disk contents so what I paste matches what's in the zip byte-for-byte (I edited worker.py after first writing it).Orchestrated comprehensive codebase compilation with deliberate file orderingOrchestrated comprehensive codebase compilation with deliberate file orderingHere's the complete repo. Pasting in dependency order (foundational files first) so reading top-to-bottom shows the patterns building up. Every file below matches the zip.
+requirements.txt
+fastapi>=0.110
+uvicorn[standard]>=0.27
+SQLAlchemy>=2.0
+pydantic>=2.6
+pydantic-settings>=2.1
+python-dotenv>=1.0
+httpx>=0.27
+# Optional: only needed when you wire real LLM synthesis. The chassis runs
+# without it (falls back to a deterministic template).
+anthropic>=0.40
+.env.example
+# ---- Core ----
+APP_ENV=dev
+# Dev default is SQLite so it runs with zero setup. On Replit, set this to your
+# Postgres URL (postgresql+psycopg://...) to get real multi-tenant RLS.
+DATABASE_URL=sqlite:///./agenthq.db
+
+# ---- Auth ----
+# In dev we trust a header (X-Dev-User-Email) or fall back to this email.
+# In prod, replace with Google Workspace SSO (see app/auth.py).
+DEV_AUTH_BYPASS=true
+DEV_AUTH_EMAIL=jordan@onit.com
+# Only Google accounts on these domains may sign in (prod SSO).
+ALLOWED_EMAIL_DOMAINS=onit.com
+
+# ---- LLM synthesis (optional) ----
+# If set, the market-intel agent writes its narrative brief with Claude.
+# If unset, it uses a deterministic template so the chassis still runs.
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-sonnet-4-6
+
+# ---- Worker ----
+WORKER_POLL_SECONDS=2
+app/config.py
+pythonfrom functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    app_env: str = "dev"
+    database_url: str = "sqlite:///./agenthq.db"
+
+    dev_auth_bypass: bool = True
+    dev_auth_email: str = "jordan@onit.com"
+    allowed_email_domains: str = "onit.com"
+
+    anthropic_api_key: str = ""
+    anthropic_model: str = "claude-sonnet-4-6"
+
+    worker_poll_seconds: float = 2.0
+
+    @property
+    def allowed_domains(self) -> list[str]:
+        return [d.strip().lower() for d in self.allowed_email_domains.split(",") if d.strip()]
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.database_url.startswith("sqlite")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
+app/db.py
+pythonfrom collections.abc import Iterator
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+from app.config import get_settings
+
+settings = get_settings()
+
+_connect_args = {"check_same_thread": False} if settings.is_sqlite else {}
+engine = create_engine(settings.database_url, connect_args=_connect_args, future=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency: one session per request."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def create_all() -> None:
+    # Dev convenience. In prod, run sql/schema.sql (it also installs RLS policies).
+    from app import models  # noqa: F401  (ensure models are imported/registered)
+
+    Base.metadata.create_all(bind=engine)
+app/models.py
+python"""
+Data model for the Agent HQ chassis.
+
+Tenancy principle: every tenant-scoped table carries `org_id`. Onit is simply
+the first row in `orgs`. App-layer scoping (see app/tenancy.py) is the primary
+isolation guard and works on any database; Postgres RLS (see sql/schema.sql) is
+defense-in-depth you switch on in production.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.db import Base
+
+
+def _uuid() -> str:
+    return uuid.uuid4().hex
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+# ---------------------------------------------------------------------------
+# Tenant root
+# ---------------------------------------------------------------------------
+class Org(Base, TimestampMixin):
+    __tablename__ = "orgs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(200))
+    domain: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+
+
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    role: Mapped[str] = mapped_column(String(20), default="member")  # admin | member
+
+
+# ---------------------------------------------------------------------------
+# Connections to external platforms (ad networks, CRM, data providers)
+# ---------------------------------------------------------------------------
+class Connection(Base, TimestampMixin):
+    __tablename__ = "connections"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(50))  # zoominfo | apollo | google_ads | hubspot ...
+    status: Mapped[str] = mapped_column(String(20), default="disconnected")
+    # NEVER store raw tokens in plaintext in prod. Encrypt at rest; this column
+    # is a placeholder for the encrypted blob.
+    encrypted_token: Mapped[str] = mapped_column(Text, default="")
+    config: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+# ---------------------------------------------------------------------------
+# Agent registry. A row enables/configures an agent for one org. This is the
+# "bring your own agent" seam: today kind="builtin" (maps to a code class);
+# later kind="http" or "mcp" points at a teammate's endpoint with no rewrite.
+# ---------------------------------------------------------------------------
+class AgentRegistration(Base, TimestampMixin):
+    __tablename__ = "agents"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    key: Mapped[str] = mapped_column(String(80))            # e.g. "market_intel"
+    display_name: Mapped[str] = mapped_column(String(200))
+    kind: Mapped[str] = mapped_column(String(20), default="builtin")  # builtin | http | mcp
+    endpoint: Mapped[str] = mapped_column(String(500), default="")    # for http/mcp kinds
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    schedule_cron: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    config: Mapped[dict] = mapped_column(JSON, default=dict)  # brand_guide, icp, agent params
+
+
+# ---------------------------------------------------------------------------
+# Execution records
+# ---------------------------------------------------------------------------
+class Run(Base, TimestampMixin):
+    __tablename__ = "runs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    agent_registration_id: Mapped[str] = mapped_column(ForeignKey("agents.id"))
+    agent_key: Mapped[str] = mapped_column(String(80))
+    trigger: Mapped[str] = mapped_column(String(20), default="manual")  # manual | cron
+    status: Mapped[str] = mapped_column(String(20), default="queued")   # queued|running|succeeded|failed
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logs: Mapped[list] = mapped_column(JSON, default=list)
+
+    artifacts: Mapped[list[Artifact]] = relationship(backref="run")
+    proposals: Mapped[list[Proposal]] = relationship(backref="run")
+
+
+class Artifact(Base, TimestampMixin):
+    __tablename__ = "artifacts"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    type: Mapped[str] = mapped_column(String(50))   # market_brief | email_copy | ad_copy ...
+    title: Mapped[str] = mapped_column(String(300))
+    body: Mapped[dict] = mapped_column(JSON, default=dict)
+    citations: Mapped[list] = mapped_column(JSON, default=list)
+
+
+class Proposal(Base, TimestampMixin):
+    """A side-effect an agent wants to take (spend, publish). Always gated."""
+    __tablename__ = "proposals"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    action_type: Mapped[str] = mapped_column(String(80))  # publish_blog | set_campaign_budget ...
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    guardrail_scope: Mapped[str | None] = mapped_column(String(20), nullable=True)  # spend|publish
+    guardrail_status: Mapped[str] = mapped_column(String(20), default="pending")    # pending|passed|blocked
+    guardrail_detail: Mapped[str] = mapped_column(Text, default="")
+    reasoning: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|approved|rejected|executed
+    approver_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Guardrail(Base, TimestampMixin):
+    __tablename__ = "guardrails"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    scope: Mapped[str] = mapped_column(String(20))  # spend | publish
+    rules: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class AuditLog(Base, TimestampMixin):
+    """Append-only. Never update or delete rows here."""
+    __tablename__ = "audit_log"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    actor: Mapped[str] = mapped_column(String(120))  # user id or "system"
+    action: Mapped[str] = mapped_column(String(120))
+    target_type: Mapped[str] = mapped_column(String(80), default="")
+    target_id: Mapped[str] = mapped_column(String(64), default="")
+    meta: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+# ---------------------------------------------------------------------------
+# Durable job queue (Postgres/SQLite table the worker polls). Swap for a real
+# queue + worker pool later without changing this interface.
+# ---------------------------------------------------------------------------
+class Job(Base, TimestampMixin):
+    __tablename__ = "jobs"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(50), default="run_agent")
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)  # queued|leased|done|error
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+app/tenancy.py
+python"""
+App-layer tenant isolation: the primary guard, works on any database.
+
+Every query against a tenant table must be filtered by org_id. `scoped()` is the
+one helper to use everywhere — it refuses to build a query without an org_id, so
+a forgotten filter fails loudly instead of leaking another org's data. Postgres
+RLS (sql/schema.sql) is defense-in-depth on top of this.
+"""
+from __future__ import annotations
+
+from sqlalchemy import select
+from sqlalchemy.sql import Select
+
+
+def scoped(model, org_id: str) -> Select:
+    if not org_id:
+        raise ValueError("Refusing to query a tenant table without an org_id")
+    return select(model).where(model.org_id == org_id)
+
+
+def assert_same_org(obj, org_id: str) -> None:
+    if obj is None or getattr(obj, "org_id", None) != org_id:
+        raise PermissionError("Object does not belong to the current org")
+app/auth.py
+python"""
+Auth + current-user resolution.
+
+DEV (default): trust the `X-Dev-User-Email` header, or fall back to
+DEV_AUTH_EMAIL. This lets you build without standing up OAuth.
+
+PROD: replace `current_user` with Google Workspace SSO. The flow:
+  1. Google OAuth login.
+  2. Verify the `hd` (hosted domain) claim is in ALLOWED_EMAIL_DOMAINS.
+  3. Look up or create the User; derive `org` from the email domain (so org #2
+     with a different domain just works — no per-tenant code).
+Tenancy is always driven by the *org derived from the verified domain*, never
+by anything the client sends.
+"""
+from __future__ import annotations
+
+from fastapi import Depends, Header, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.db import get_db
+from app.models import User
+
+
+def current_user(
+    db: Session = Depends(get_db),
+    x_dev_user_email: str | None = Header(default=None),
+) -> User:
+    settings = get_settings()
+    if not settings.dev_auth_bypass:
+        # TODO(prod): verify a Google SSO session/token here instead.
+        raise HTTPException(status_code=501, detail="SSO not configured in this build")
+
+    email = (x_dev_user_email or settings.dev_auth_email).lower()
+    domain = email.split("@")[-1]
+    if domain not in settings.allowed_domains:
+        raise HTTPException(status_code=403, detail=f"Domain '{domain}' not allowed")
+
+    user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=401, detail=f"No user for {email} (run scripts/seed.py)")
+    return user
+
+
+def require_admin(user: User = Depends(current_user)) -> User:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
+app/queue.py
+python"""
+Postgres/SQLite-backed job queue. Deliberately boring: a `jobs` table the worker
+polls. Robust and debuggable for a team-sized load. When you outgrow a single
+worker, swap this for a real queue + worker pool — the enqueue/lease interface
+stays the same.
+"""
+from __future__ import annotations
+
+from datetime import timedelta
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.config import get_settings
+from app.models import Job, _now
+
+
+def enqueue(db: Session, org_id: str, kind: str, payload: dict) -> Job:
+    job = Job(org_id=org_id, kind=kind, payload=payload, status="queued")
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def lease_next(db: Session, lease_seconds: int = 120) -> Job | None:
+    """Atomically claim the next queued job. Uses SKIP LOCKED on Postgres so
+    multiple workers never grab the same job; on SQLite (single worker) the
+    immediate transaction is sufficient."""
+    settings = get_settings()
+    stmt = select(Job).where(Job.status == "queued").order_by(Job.created_at).limit(1)
+    if not settings.is_sqlite:
+        stmt = stmt.with_for_update(skip_locked=True)
+
+    job = db.execute(stmt).scalar_one_or_none()
+    if job is None:
+        return None
+    job.status = "leased"
+    job.attempts += 1
+    job.lease_until = _now() + timedelta(seconds=lease_seconds)
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+def complete(db: Session, job: Job, error: str | None = None) -> None:
+    job.status = "error" if error else "done"
+    job.last_error = error
+    db.commit()
+app/guardrails.py
+python"""
+Guardrail evaluation. Every ProposedAction with a guardrail_scope is checked
+against the org's rules BEFORE it can be executed. "passed" means it may be
+auto-approved (within bands); "blocked" means it must escalate to a human.
+
+v1 ships the framework + spend/publish rule shapes. Executors come with the
+action-taking agents (P2); until then proposals simply queue for human review.
+"""
+from __future__ import annotations
+
+from app.schemas import ProposedAction
+
+
+def evaluate(action: ProposedAction, rules_by_scope: dict[str, dict]) -> tuple[str, str]:
+    """Return (status, detail) where status is 'passed' | 'blocked' | 'pending'."""
+    scope = action.guardrail_scope
+    if scope is None:
+        return "passed", "No guardrail scope; informational action."
+
+    rules = rules_by_scope.get(scope)
+    if not rules:
+        return "blocked", f"No '{scope}' guardrails configured — escalating to human."
+
+    if scope == "spend":
+        amount = float(action.payload.get("amount_usd", 0))
+        cap = float(rules.get("max_change_usd", 0))
+        if amount <= cap:
+            return "passed", f"${amount:,.0f} within auto-approve cap ${cap:,.0f}."
+        return "blocked", f"${amount:,.0f} exceeds cap ${cap:,.0f} — needs approval."
+
+    if scope == "publish":
+        if rules.get("require_human_review", True):
+            return "blocked", "Publish requires human review by policy."
+        return "passed", "Auto-publish enabled for this surface."
+
+    return "blocked", f"Unknown scope '{scope}' — escalating."
+app/agents/base.py
+pythonfrom __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+from app.schemas import AgentContext, AgentResult
+
+
+class Agent(ABC):
+    """Base class for all first-party (builtin) agents.
+
+    Subclasses set a unique `key` and implement `run`. The worker resolves the
+    code class by key, builds a tenant-scoped AgentContext, and calls run().
+    Read-only agents return artifacts only. Action-taking agents additionally
+    return proposed_actions, which the platform gates before execution.
+    """
+
+    key: str = ""
+    display_name: str = ""
+
+    @abstractmethod
+    def run(self, ctx: AgentContext) -> AgentResult:
+        ...
+app/agents/registry.py
+pythonfrom __future__ import annotations
+
+from app.agents.base import Agent
+
+_REGISTRY: dict[str, type[Agent]] = {}
+
+
+def register(cls: type[Agent]) -> type[Agent]:
+    if not cls.key:
+        raise ValueError(f"{cls.__name__} must set a non-empty `key`")
+    _REGISTRY[cls.key] = cls
+    return cls
+
+
+def get_agent(key: str) -> Agent:
+    if key not in _REGISTRY:
+        raise KeyError(f"No builtin agent registered for key '{key}'")
+    return _REGISTRY[key]()
+
+
+def list_agent_keys() -> list[str]:
+    return sorted(_REGISTRY)
+
+
+# Import builtin agents so their @register decorators run.
+from app.agents import market_intel  # noqa: E402,F401
+app/agents/synthesis.py
+python"""
+Narrative synthesis. This is where an LLM call slots in. If ANTHROPIC_API_KEY
+is set, we ask Claude to write the brief's narrative from the structured data.
+If not (or the SDK isn't installed), we fall back to a deterministic template
+so the chassis always runs. Either way the agent gets back (narrative, cost).
+"""
+from __future__ import annotations
+
+from app.config import get_settings
+
+
+def synthesize_brief(structured: dict, org_name: str) -> tuple[str, float]:
+    settings = get_settings()
+    if settings.anthropic_api_key:
+        try:
+            return _llm_narrative(structured, org_name, settings)
+        except Exception:  # never let synthesis crash a run; fall back
+            pass
+    return _template_narrative(structured, org_name), 0.0
+
+
+def _llm_narrative(structured: dict, org_name: str, settings) -> tuple[str, float]:
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    prompt = (
+        f"You are a demand-gen analyst writing a weekly market brief for {org_name}. "
+        f"Using ONLY the structured findings below, write a tight, skimmable brief "
+        f"(sizing takeaway, top targets, what the market is searching, recommended "
+        f"channels and content angles). Do not invent numbers.\n\n"
+        f"FINDINGS:\n{structured}"
+    )
+    msg = client.messages.create(
+        model=settings.anthropic_model,
+        max_tokens=1200,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+    # Rough cost estimate; replace with real per-model pricing when you track spend.
+    usage = getattr(msg, "usage", None)
+    cost = 0.0
+    if usage:
+        cost = (usage.input_tokens * 3 + usage.output_tokens * 15) / 1_000_000
+    return text, round(cost, 6)
+
+
+def _template_narrative(s: dict, org_name: str) -> str:
+    sizing = s["sizing"]
+    targets = s["top_targets"][:5]
+    kw = s["keyword_clusters"]
+    lines = [
+        f"# Weekly market brief — {org_name}",
+        "",
+        "## Market size",
+        f"- TAM: {sizing['tam_companies']:,} addressable companies "
+        f"(~${sizing['tam_revenue_usd']/1e9:,.1f}B aggregate revenue)",
+        f"- SAM: {sizing['sam_companies']:,} companies match the addressable ICP filters",
+        f"- SOM (modeled): {sizing['som_companies']:,} realistically winnable this year",
+        "",
+        "## Top target accounts (fit × intent)",
+    ]
+    for t in targets:
+        lines.append(
+            f"- {t['name']} — {t['industry']}, {t['employees']:,} employees · "
+            f"fit {t['fit_score']:.0%}, intent {t['intent_score']:.0%}"
+        )
+    lines += ["", "## What the market is searching"]
+    for cluster, terms in kw.items():
+        head = ", ".join(t["term"] for t in terms[:3])
+        lines.append(f"- {cluster.title()} intent: {head} …")
+    lines += ["", "## Recommended next moves", "- " + "\n- ".join(s["recommendations"])]
+    lines.append("")
+    lines.append("_(Narrative generated by deterministic template — set "
+                 "ANTHROPIC_API_KEY to have Claude write this section.)_")
+    return "\n".join(lines)
+app/data_sources/base.py
+python"""
+MarketDataSource is the interface the market-intel agent depends on. The agent
+NEVER imports ZoomInfo or Apollo directly — it talks to this interface, so the
+stub (today) and the live clients (later) are interchangeable. Wiring real APIs
+becomes a swap behind this seam, not a change to the agent.
+"""
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+
+
+@dataclass
+class CompanyRecord:
+    name: str
+    employees: int
+    revenue_usd: float
+    industry: str
+    fit_score: float        # 0..1, how well it matches the ICP
+    intent_score: float     # 0..1, in-market signal strength
+    source: str = "stub"
+
+
+@dataclass
+class KeywordRecord:
+    term: str
+    monthly_volume: int
+    difficulty: int         # 0..100
+    intent: str             # informational | commercial | transactional
+    source: str = "stub"
+
+
+@dataclass
+class MarketDataSource(ABC):
+    @abstractmethod
+    def find_companies(self, icp: dict, limit: int = 100) -> list[CompanyRecord]: ...
+
+    @abstractmethod
+    def keyword_universe(self, seeds: list[str], limit: int = 50) -> list[KeywordRecord]: ...
+app/data_sources/stub.py
+python"""
+Deterministic stub data source. Produces plausible companies and keywords
+shaped by the org's ICP, so the whole chassis runs end to end with zero API
+credits. Replace with ZoomInfoDataSource / ApolloDataSource later — same
+interface, the agent doesn't change.
+"""
+from __future__ import annotations
+
+import hashlib
+import random
+
+from app.data_sources.base import CompanyRecord, KeywordRecord, MarketDataSource
+
+_FIRST = ["Vertex", "Northwind", "Atlas", "Meridian", "Cobalt", "Summit", "Harbor",
+          "Ironclad", "Beacon", "Lattice", "Granite", "Vantage", "Keystone", "Pinnacle",
+          "Sterling", "Aegis", "Cardinal", "Bedrock", "Equinox", "Halcyon"]
+_LAST = ["Legal", "Industries", "Holdings", "Group", "Partners", "Systems", "Capital",
+         "Global", "Corp", "Solutions"]
+
+
+def _seed(*parts: str) -> random.Random:
+    h = hashlib.sha256("|".join(parts).encode()).hexdigest()
+    return random.Random(int(h[:12], 16))
+
+
+class StubMarketDataSource(MarketDataSource):
+    def find_companies(self, icp: dict, limit: int = 100) -> list[CompanyRecord]:
+        industries = icp.get("industries") or ["Legal Services", "Financial Services",
+                                                "Manufacturing", "Technology", "Healthcare"]
+        min_emp = int(icp.get("min_employees", 200))
+        rng = _seed("companies", str(icp))
+        out: list[CompanyRecord] = []
+        for i in range(limit):
+            name = f"{rng.choice(_FIRST)} {rng.choice(_LAST)}"
+            emp = int(min_emp * rng.uniform(1.0, 25.0))
+            rev = emp * rng.uniform(180_000, 420_000)
+            out.append(CompanyRecord(
+                name=name,
+                employees=emp,
+                revenue_usd=round(rev, -3),
+                industry=rng.choice(industries),
+                fit_score=round(rng.uniform(0.45, 0.99), 3),
+                intent_score=round(rng.betavariate(2, 5), 3),  # most low, a few hot
+            ))
+        return out
+
+    def keyword_universe(self, seeds: list[str], limit: int = 50) -> list[KeywordRecord]:
+        modifiers = ["software", "platform", "tools", "vendors", "pricing", "vs",
+                     "best", "for enterprise", "automation", "ROI", "implementation",
+                     "alternatives", "reviews", "comparison"]
+        intents = {"pricing": "transactional", "vs": "commercial", "best": "commercial",
+                   "alternatives": "commercial", "reviews": "commercial",
+                   "comparison": "commercial", "for enterprise": "commercial"}
+        rng = _seed("keywords", *seeds)
+        out: list[KeywordRecord] = []
+        for seed in seeds:
+            for mod in modifiers:
+                term = f"{seed} {mod}".strip()
+                intent = intents.get(mod, "informational")
+                out.append(KeywordRecord(
+                    term=term,
+                    monthly_volume=int(rng.uniform(40, 8000)),
+                    difficulty=int(rng.uniform(8, 78)),
+                    intent=intent,
+                ))
+        rng.shuffle(out)
+        return out[:limit]
+app/agents/market_intel.py
+python"""
+Market-intelligence agent (Stages 1+2 of the pipeline).
+
+Read-only by design: it produces a cited weekly brief and returns ZERO proposed
+actions, so it exercises the entire runs/artifacts/observability path without
+ever touching the spend or publish gates. This is the wedge — one artifact the
+team wants every week — and the proof that the chassis works before any
+action-taking agent is added.
+"""
+from __future__ import annotations
+
+from collections import defaultdict
+
+from app.agents.base import Agent
+from app.agents.registry import register
+from app.agents.synthesis import synthesize_brief
+from app.data_sources.stub import StubMarketDataSource
+from app.schemas import AgentContext, AgentResult, ArtifactDraft, Citation
+
+
+@register
+class MarketIntelAgent(Agent):
+    key = "market_intel"
+    display_name = "Market intelligence"
+
+    def run(self, ctx: AgentContext) -> AgentResult:
+        log = ctx.log
+        icp = ctx.icp or {}
+        log(f"Starting market-intel run for {ctx.org_name}")
+
+        # Resolve the data source from the worker-injected handle (stub today).
+        ds = ctx.get_market_data() if ctx.get_market_data else StubMarketDataSource()
+
+        # --- Stage 1: sizing + targets ------------------------------------
+        companies = ds.find_companies(icp, limit=int(ctx.config.get("company_limit", 120)))
+        log(f"Pulled {len(companies)} companies from {companies[0].source if companies else 'n/a'}")
+
+        tam_revenue = sum(c.revenue_usd for c in companies)
+        sam_min_fit = float(ctx.config.get("sam_min_fit", 0.6))
+        sam = [c for c in companies if c.fit_score >= sam_min_fit]
+        som_rate = float(ctx.config.get("som_capture_rate", 0.08))
+
+        ranked = sorted(companies, key=lambda c: c.fit_score * 0.5 + c.intent_score * 0.5,
+                        reverse=True)
+        top_targets = [{
+            "name": c.name, "industry": c.industry, "employees": c.employees,
+            "fit_score": c.fit_score, "intent_score": c.intent_score,
+        } for c in ranked[:15]]
+
+        # --- Stage 2: keywords, intent clusters, channel recs -------------
+        seeds = icp.get("keyword_seeds") or [icp.get("category", "legal operations")]
+        keywords = ds.keyword_universe(seeds, limit=int(ctx.config.get("keyword_limit", 60)))
+        clusters: dict[str, list[dict]] = defaultdict(list)
+        for k in keywords:
+            clusters[k.intent].append(
+                {"term": k.term, "volume": k.monthly_volume, "difficulty": k.difficulty})
+        for v in clusters.values():
+            v.sort(key=lambda x: x["volume"], reverse=True)
+
+        recommendations = self._recommend(sam, clusters, icp)
+
+        structured = {
+            "sizing": {
+                "tam_companies": len(companies),
+                "tam_revenue_usd": tam_revenue,
+                "sam_companies": len(sam),
+                "som_companies": int(len(sam) * som_rate),
+            },
+            "top_targets": top_targets,
+            "keyword_clusters": dict(clusters),
+            "recommendations": recommendations,
+        }
+
+        narrative, cost = synthesize_brief(structured, ctx.org_name)
+        log(f"Synthesis complete (cost ${cost:.4f})")
+
+        citations = [
+            Citation(source="ZoomInfo (stub)", snippet="Firmographic + intent data"),
+            Citation(source="Keyword data (stub)", snippet="Search volume + difficulty"),
+        ]
+        artifact = ArtifactDraft(
+            type="market_brief",
+            title=f"Weekly market brief — {ctx.org_name}",
+            body={"narrative": narrative, "structured": structured},
+            citations=citations,
+        )
+        return AgentResult(artifacts=[artifact], proposed_actions=[],
+                           cost_usd=cost, logs=[])
+
+    @staticmethod
+    def _recommend(sam, clusters, icp) -> list[str]:
+        recs = []
+        commercial = clusters.get("commercial", []) + clusters.get("transactional", [])
+        if commercial:
+            top = commercial[0]["term"]
+            recs.append(f"Run search ads against high-intent terms (e.g. '{top}') — "
+                        f"buyers here are comparison-shopping.")
+        if clusters.get("informational"):
+            recs.append("Build top-of-funnel content (guides, frameworks) for "
+                        "informational queries to capture early research.")
+        hot = [c for c in sam if c.intent_score >= 0.5]
+        if hot:
+            recs.append(f"Prioritize ABM outreach to {len(hot)} accounts showing active "
+                        f"in-market intent.")
+        channels = icp.get("channels") or ["LinkedIn", "Google Search", "Email"]
+        recs.append(f"Lead channels for this ICP: {', '.join(channels)}.")
+        return recs
+app/api/runs.py
+pythonfrom __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.auth import current_user
+from app.db import get_db
+from app.models import AgentRegistration, Artifact, Run, User
+from app.queue import enqueue
+from app.schemas import RunOut, TriggerRunIn
+from app.tenancy import scoped
+
+router = APIRouter(prefix="/api/runs", tags=["runs"])
+
+
+@router.post("", response_model=RunOut)
+def trigger_run(body: TriggerRunIn, user: User = Depends(current_user),
+                db: Session = Depends(get_db)):
+    reg = db.execute(
+        scoped(AgentRegistration, user.org_id).where(AgentRegistration.key == body.agent_key)
+    ).scalar_one_or_none()
+    if reg is None or not reg.enabled:
+        raise HTTPException(404, f"Agent '{body.agent_key}' not enabled for this org")
+
+    run = Run(org_id=user.org_id, agent_registration_id=reg.id, agent_key=reg.key,
+              trigger="manual", status="queued", created_by=user.id)
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    enqueue(db, user.org_id, "run_agent", {"run_id": run.id})
+    return RunOut.of(run)
+
+
+@router.get("", response_model=list[RunOut])
+def list_runs(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    runs = db.execute(scoped(Run, user.org_id).order_by(Run.created_at.desc())).scalars().all()
+    return [RunOut.of(r) for r in runs]
+
+
+@router.get("/{run_id}")
+def get_run(run_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    run = db.execute(scoped(Run, user.org_id).where(Run.id == run_id)).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(404, "Run not found")
+    artifacts = db.execute(
+        scoped(Artifact, user.org_id).where(Artifact.run_id == run_id)
+    ).scalars().all()
+    return {
+        "run": RunOut.of(run).model_dump(),
+        "logs": run.logs,
+        "artifacts": [
+            {"id": a.id, "type": a.type, "title": a.title, "body": a.body,
+             "citations": a.citations} for a in artifacts
+        ],
+    }
+app/api/review.py
+python"""
+The approval queue — the screen the team lives in. Everything upstream is
+plumbing; this is the product. v1 exposes the queue + approve/reject with full
+audit logging. (Execution of approved actions arrives with the action-taking
+agents in P2; until then approval just records the human decision.)
+"""
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.auth import current_user
+from app.db import get_db
+from app.models import AuditLog, Proposal, User, _now
+from app.schemas import ProposalDecisionIn
+from app.tenancy import scoped
+
+router = APIRouter(prefix="/api/review", tags=["review"])
+
+
+def _serialize(p: Proposal) -> dict:
+    return {
+        "id": p.id, "run_id": p.run_id, "action_type": p.action_type,
+        "payload": p.payload, "reasoning": p.reasoning,
+        "guardrail_scope": p.guardrail_scope, "guardrail_status": p.guardrail_status,
+        "guardrail_detail": p.guardrail_detail, "status": p.status,
+        "created_at": p.created_at.isoformat(),
+    }
+
+
+@router.get("/proposals")
+def list_proposals(status: str = "pending", user: User = Depends(current_user),
+                   db: Session = Depends(get_db)):
+    q = scoped(Proposal, user.org_id).where(Proposal.status == status) \
+        .order_by(Proposal.created_at.desc())
+    return [_serialize(p) for p in db.execute(q).scalars().all()]
+
+
+def _decide(db: Session, user: User, proposal_id: str, decision: str, note: str):
+    p = db.execute(
+        scoped(Proposal, user.org_id).where(Proposal.id == proposal_id)
+    ).scalar_one_or_none()
+    if p is None:
+        raise HTTPException(404, "Proposal not found")
+    if p.status != "pending":
+        raise HTTPException(409, f"Proposal already {p.status}")
+    p.status = decision
+    p.approver_id = user.id
+    p.decided_at = _now()
+    db.add(AuditLog(org_id=user.org_id, actor=user.id, action=f"proposal.{decision}",
+                    target_type="proposal", target_id=p.id,
+                    meta={"note": note, "action_type": p.action_type}))
+    db.commit()
+    return _serialize(p)
+
+
+@router.post("/proposals/{proposal_id}/approve")
+def approve(proposal_id: str, body: ProposalDecisionIn, user: User = Depends(current_user),
+            db: Session = Depends(get_db)):
+    return _decide(db, user, proposal_id, "approved", body.note)
+
+
+@router.post("/proposals/{proposal_id}/reject")
+def reject(proposal_id: str, body: ProposalDecisionIn, user: User = Depends(current_user),
+           db: Session = Depends(get_db)):
+    return _decide(db, user, proposal_id, "rejected", body.note)
+app/api/admin.py
+pythonfrom __future__ import annotations
+
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.auth import current_user, require_admin
+from app.db import get_db
+from app.models import AgentRegistration, Org, User
+from app.tenancy import scoped
+
+router = APIRouter(prefix="/api", tags=["admin"])
+
+
+@router.get("/me")
+def whoami(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    org = db.get(Org, user.org_id)
+    return {"user": {"email": user.email, "name": user.name, "role": user.role},
+            "org": {"id": org.id, "name": org.name, "domain": org.domain}}
+
+
+@router.get("/agents")
+def list_agents(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    regs = db.execute(scoped(AgentRegistration, user.org_id)).scalars().all()
+    return [{"key": r.key, "display_name": r.display_name, "kind": r.kind,
+             "enabled": r.enabled, "schedule_cron": r.schedule_cron} for r in regs]
+
+
+class RegisterAgentIn(BaseModel):
+    key: str
+    display_name: str
+    kind: str = "builtin"            # builtin | http | mcp  (BYO seam)
+    endpoint: str = ""
+    schedule_cron: str | None = None
+    config: dict = Field(default_factory=dict)
+
+
+@router.post("/agents")
+def register_agent(body: RegisterAgentIn, user: User = Depends(require_admin),
+                   db: Session = Depends(get_db)):
+    reg = AgentRegistration(org_id=user.org_id, key=body.key, display_name=body.display_name,
+                            kind=body.kind, endpoint=body.endpoint,
+                            schedule_cron=body.schedule_cron, config=body.config, enabled=True)
+    db.add(reg)
+    db.commit()
+    db.refresh(reg)
+    return {"id": reg.id, "key": reg.key, "kind": reg.kind, "enabled": reg.enabled}
+app/main.py
+pythonfrom fastapi import FastAPI
+
+from app.api import admin, review, runs
+from app.config import get_settings
+from app.db import create_all
+
+settings = get_settings()
+app = FastAPI(title="Agent HQ", version="0.1.0")
+
+app.include_router(runs.router)
+app.include_router(review.router)
+app.include_router(admin.router)
+
+
+@app.on_event("startup")
+def _startup():
+    if settings.is_sqlite:  # dev convenience; prod runs sql/schema.sql explicitly
+        create_all()
+
+
+@app.get("/healthz")
+def healthz():
+    return {"ok": True, "env": settings.app_env}
+app/worker.py
+python"""
+The worker. Polls the job queue, runs one agent per job inside a tenant-scoped
+AgentContext, and persists everything (artifacts, gated proposals, cost, logs,
+audit trail). This is where the five usability fundamentals live: observability,
+idempotency, guardrails, cost capture, and graceful failure.
+
+Run as a separate process:  python -m app.worker
+"""
+from __future__ import annotations
+
+import time
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app import guardrails
+from app.agents.registry import get_agent
+from app.config import get_settings
+from app.data_sources.stub import StubMarketDataSource
+from app.db import SessionLocal
+from app.models import AgentRegistration, Artifact, AuditLog, Guardrail, Org, Proposal, Run, _now
+from app.queue import complete, lease_next
+from app.schemas import AgentContext
+
+
+def _resolve_market_data(db: Session, org_id: str):
+    """Pick a data source for this org. Stub today; later, inspect connections
+    and return ZoomInfoDataSource / ApolloDataSource. Same interface either way."""
+    return StubMarketDataSource()
+
+
+def _audit(db: Session, org_id: str, actor: str, action: str, target_type: str,
+           target_id: str, meta: dict | None = None) -> None:
+    db.add(AuditLog(org_id=org_id, actor=actor, action=action,
+                    target_type=target_type, target_id=target_id, meta=meta or {}))
+
+
+def process_run(db: Session, run: Run) -> None:
+    reg = db.get(AgentRegistration, run.agent_registration_id)
+    if reg is None or not reg.enabled:
+        raise RuntimeError("Agent registration missing or disabled")
+
+    run.status = "running"
+    run.started_at = _now()
+    db.commit()
+
+    org = db.get(Org, run.org_id)
+    org_name = org.name if org else run.org_id
+    logs: list[str] = []
+    ctx = AgentContext(
+        org_id=run.org_id,
+        org_name=org_name,
+        agent_key=run.agent_key,
+        registration_id=reg.id,
+        run_id=run.id,
+        trigger=run.trigger,
+        task=reg.config.get("default_task", {}),
+        brand_guide=reg.config.get("brand_guide", {}),
+        icp=reg.config.get("icp", {}),
+        config=reg.config,
+        get_market_data=lambda: _resolve_market_data(db, run.org_id),
+        log=logs.append,
+    )
+
+    agent = get_agent(run.agent_key)        # builtin resolution (http/mcp kinds: P3)
+    result = agent.run(ctx)
+
+    # Persist artifacts
+    for a in result.artifacts:
+        db.add(Artifact(org_id=run.org_id, run_id=run.id, type=a.type, title=a.title,
+                        body=a.body, citations=[c.model_dump() for c in a.citations]))
+
+    # Persist proposals, each gated before it could ever execute
+    rules_by_scope = {
+        g.scope: g.rules
+        for g in db.execute(select(Guardrail).where(Guardrail.org_id == run.org_id)).scalars()
+    }
+    for p in result.proposed_actions:
+        status, detail = guardrails.evaluate(p, rules_by_scope)
+        db.add(Proposal(
+            org_id=run.org_id, run_id=run.id, action_type=p.action_type, payload=p.payload,
+            guardrail_scope=p.guardrail_scope, guardrail_status=status, guardrail_detail=detail,
+            reasoning=p.reasoning, status="pending",
+        ))
+
+    run.status = "succeeded"
+    run.cost_usd = result.cost_usd
+    run.finished_at = _now()
+    run.logs = logs + result.logs
+    _audit(db, run.org_id, "system", "run.succeeded", "run", run.id,
+           {"agent": run.agent_key, "artifacts": len(result.artifacts),
+            "proposals": len(result.proposed_actions), "cost_usd": result.cost_usd})
+    db.commit()
+
+
+def run_once(db: Session | None = None) -> bool:
+    """Process at most one job. Returns True if a job was handled."""
+    own = db is None
+    db = db or SessionLocal()
+    try:
+        job = lease_next(db)
+        if job is None:
+            return False
+        run = db.get(Run, job.payload.get("run_id"))
+        try:
+            if run is None:
+                raise RuntimeError(f"Run {job.payload.get('run_id')} not found")
+            process_run(db, run)
+            complete(db, job)
+        except Exception as exc:  # graceful failure: mark run + job, never crash loop
+            db.rollback()
+            if run is not None:
+                run.status = "failed"
+                run.error = str(exc)
+                run.finished_at = _now()
+                _audit(db, run.org_id, "system", "run.failed", "run", run.id, {"error": str(exc)})
+                db.commit()
+            complete(db, job, error=str(exc))
+        return True
+    finally:
+        if own:
+            db.close()
+
+
+def run_forever() -> None:
+    settings = get_settings()
+    print(f"[worker] polling every {settings.worker_poll_seconds}s "
+          f"(env={settings.app_env}, db={'sqlite' if settings.is_sqlite else 'postgres'})")
+    while True:
+        worked = run_once()
+        if not worked:
+            time.sleep(settings.worker_poll_seconds)
+
+
+if __name__ == "__main__":
+    run_forever()
+scripts/seed.py
+python"""
+Seed org #1 = Onit. Run once:  python -m scripts.seed
+Idempotent: safe to re-run.
+"""
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from app.db import SessionLocal, create_all
+from app.models import AgentRegistration, Guardrail, Org, User
+
+ONIT_ICP = {
+    "category": "legal operations software",
+    "industries": ["Legal Services", "Financial Services", "Insurance",
+                   "Manufacturing", "Technology", "Healthcare"],
+    "min_employees": 500,
+    "keyword_seeds": ["legal operations", "matter management", "contract lifecycle",
+                      "legal spend management", "enterprise legal management"],
+    "channels": ["LinkedIn", "Google Search", "Email", "Webinars"],
+}
+
+
+def main() -> None:
+    create_all()
+    db = SessionLocal()
+    try:
+        org = db.execute(select(Org).where(Org.domain == "onit.com")).scalar_one_or_none()
+        if org is None:
+            org = Org(name="Onit", domain="onit.com")
+            db.add(org)
+            db.commit()
+            db.refresh(org)
+            print(f"Created org Onit ({org.id})")
+
+        user = db.execute(select(User).where(User.email == "jordan@onit.com")).scalar_one_or_none()
+        if user is None:
+            db.add(User(org_id=org.id, email="jordan@onit.com", name="Jordan", role="admin"))
+            db.commit()
+            print("Created admin user jordan@onit.com")
+
+        reg = db.execute(
+            select(AgentRegistration).where(
+                AgentRegistration.org_id == org.id, AgentRegistration.key == "market_intel")
+        ).scalar_one_or_none()
+        if reg is None:
+            db.add(AgentRegistration(
+                org_id=org.id, key="market_intel", display_name="Market intelligence",
+                kind="builtin", enabled=True, schedule_cron="0 7 * * 1",  # Mondays 7am
+                config={"icp": ONIT_ICP, "company_limit": 120, "keyword_limit": 60,
+                        "sam_min_fit": 0.6, "som_capture_rate": 0.08},
+            ))
+            db.commit()
+            print("Registered market_intel agent for Onit (weekly Monday cron)")
+
+        for scope, rules in [("spend", {"max_change_usd": 250}),
+                             ("publish", {"require_human_review": True})]:
+            exists = db.execute(
+                select(Guardrail).where(Guardrail.org_id == org.id, Guardrail.scope == scope)
+            ).scalar_one_or_none()
+            if exists is None:
+                db.add(Guardrail(org_id=org.id, scope=scope, rules=rules))
+        db.commit()
+        print("Seed complete.")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
+scripts/smoke.py
+python"""
+End-to-end smoke test of the chassis. Proves:
+  1. trigger -> queue -> worker -> run -> cited artifact (the whole spine)
+  2. tenant isolation: a second org cannot see org #1's runs
+
+Run:  python -m scripts.smoke
+"""
+from __future__ import annotations
+
+from sqlalchemy import select
+
+from app.db import SessionLocal, create_all
+from app.models import AgentRegistration, Org, Run, User
+from app.queue import enqueue
+from app.tenancy import scoped
+from app.worker import run_once
+from scripts.seed import main as seed_main
+
+
+def main() -> None:
+    create_all()
+    seed_main()
+    db = SessionLocal()
+    try:
+        onit = db.execute(select(Org).where(Org.domain == "onit.com")).scalar_one()
+        reg = db.execute(
+            scoped(AgentRegistration, onit.id).where(AgentRegistration.key == "market_intel")
+        ).scalar_one()
+
+        run = Run(org_id=onit.id, agent_registration_id=reg.id, agent_key="market_intel",
+                  trigger="manual", status="queued")
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        enqueue(db, onit.id, "run_agent", {"run_id": run.id})
+
+        assert run_once() is True, "worker did not pick up the job"
+        db.refresh(run)
+        print(f"\nRun status: {run.status}  cost=${run.cost_usd:.4f}")
+        assert run.status == "succeeded", f"run failed: {run.error}"
+
+        from app.models import Artifact
+        art = db.execute(scoped(Artifact, onit.id).where(Artifact.run_id == run.id)).scalar_one()
+        print(f"Artifact: {art.title}\nCitations: {[c['source'] for c in art.citations]}")
+        print("\n--- BRIEF (first 900 chars) ---")
+        print(art.body["narrative"][:900])
+
+        # Tenant isolation check
+        other = Org(name="Acme", domain="acme.com")
+        db.add(other)
+        db.commit()
+        leaked = db.execute(scoped(Run, other.id)).scalars().all()
+        assert leaked == [], "TENANT LEAK: another org could see Onit's runs!"
+        print("\n[OK] Tenant isolation holds — Acme sees 0 of Onit's runs.")
+        print("[OK] Smoke test passed.")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
+sql/schema.sql
+sql-- Agent HQ — Postgres schema with Row-Level Security (defense-in-depth).
+--
+-- App-layer scoping (app/tenancy.py) is the PRIMARY tenant guard and runs on
+-- any database. This file adds RLS so that even a buggy or forgotten WHERE
+-- clause cannot leak across orgs at the database level.
+--
+-- Usage in production (Replit Postgres):
+--   1. Run this file once.
+--   2. Per request/worker job, set the tenant before querying:
+--        SET app.current_org = '<org_id>';
+--      (Wrap this in your DB session setup so it's automatic.)
+--
+-- This is reference DDL mirroring app/models.py. SQLAlchemy create_all() is for
+-- dev/SQLite; in prod, run this instead.
+
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+CREATE TABLE orgs (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    domain      TEXT UNIQUE NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE users (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id),
+    email       TEXT UNIQUE NOT NULL,
+    name        TEXT NOT NULL DEFAULT '',
+    role        TEXT NOT NULL DEFAULT 'member',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE connections (
+    id              TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL REFERENCES orgs(id),
+    provider        TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'disconnected',
+    encrypted_token TEXT NOT NULL DEFAULT '',
+    config          JSONB NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE agents (
+    id            TEXT PRIMARY KEY,
+    org_id        TEXT NOT NULL REFERENCES orgs(id),
+    key           TEXT NOT NULL,
+    display_name  TEXT NOT NULL,
+    kind          TEXT NOT NULL DEFAULT 'builtin',
+    endpoint      TEXT NOT NULL DEFAULT '',
+    enabled       BOOLEAN NOT NULL DEFAULT true,
+    schedule_cron TEXT,
+    config        JSONB NOT NULL DEFAULT '{}',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE runs (
+    id                    TEXT PRIMARY KEY,
+    org_id                TEXT NOT NULL REFERENCES orgs(id),
+    agent_registration_id TEXT NOT NULL REFERENCES agents(id),
+    agent_key             TEXT NOT NULL,
+    trigger               TEXT NOT NULL DEFAULT 'manual',
+    status                TEXT NOT NULL DEFAULT 'queued',
+    cost_usd              DOUBLE PRECISION NOT NULL DEFAULT 0,
+    created_by            TEXT,
+    started_at            TIMESTAMPTZ,
+    finished_at           TIMESTAMPTZ,
+    error                 TEXT,
+    logs                  JSONB NOT NULL DEFAULT '[]',
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE artifacts (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id),
+    run_id      TEXT NOT NULL REFERENCES runs(id),
+    type        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    body        JSONB NOT NULL DEFAULT '{}',
+    citations   JSONB NOT NULL DEFAULT '[]',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE proposals (
+    id               TEXT PRIMARY KEY,
+    org_id           TEXT NOT NULL REFERENCES orgs(id),
+    run_id           TEXT NOT NULL REFERENCES runs(id),
+    action_type      TEXT NOT NULL,
+    payload          JSONB NOT NULL DEFAULT '{}',
+    guardrail_scope  TEXT,
+    guardrail_status TEXT NOT NULL DEFAULT 'pending',
+    guardrail_detail TEXT NOT NULL DEFAULT '',
+    reasoning        TEXT NOT NULL DEFAULT '',
+    status           TEXT NOT NULL DEFAULT 'pending',
+    approver_id      TEXT,
+    decided_at       TIMESTAMPTZ,
+    executed_at      TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE guardrails (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id),
+    scope       TEXT NOT NULL,
+    rules       JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE audit_log (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id),
+    actor       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    target_type TEXT NOT NULL DEFAULT '',
+    target_id   TEXT NOT NULL DEFAULT '',
+    meta        JSONB NOT NULL DEFAULT '{}',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE jobs (
+    id          TEXT PRIMARY KEY,
+    org_id      TEXT NOT NULL REFERENCES orgs(id),
+    kind        TEXT NOT NULL DEFAULT 'run_agent',
+    payload     JSONB NOT NULL DEFAULT '{}',
+    status      TEXT NOT NULL DEFAULT 'queued',
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    lease_until TIMESTAMPTZ,
+    last_error  TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_users_org      ON users(org_id);
+CREATE INDEX idx_runs_org       ON runs(org_id);
+CREATE INDEX idx_artifacts_run  ON artifacts(run_id);
+CREATE INDEX idx_proposals_org  ON proposals(org_id, status);
+CREATE INDEX idx_jobs_status    ON jobs(status, created_at);
+
+-- ---- Row-Level Security -------------------------------------------------
+-- Enable on every tenant table and bind reads/writes to the current org GUC.
+DO $$
+DECLARE t TEXT;
+BEGIN
+  FOREACH t IN ARRAY ARRAY['users','connections','agents','runs','artifacts',
+                           'proposals','guardrails','audit_log','jobs']
+  LOOP
+    EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
+    EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', t);
+    EXECUTE format($p$
+      CREATE POLICY tenant_isolation ON %I
+      USING (org_id = current_setting('app.current_org', true))
+      WITH CHECK (org_id = current_setting('app.current_org', true));
+    $p$, t);
+  END LOOP;
+END $$;
+That's the whole thing except schemas.py (which you have) and the trivial empty __init__.py files in app/, app/agents/, app/api/, app/data_sources/, and scripts/ — those just need to exist as empty files so the packages import.
+Two patterns worth locking in deliberately as you plan, since they're the ones everything else hangs off:
+The scoped() helper in tenancy.py is the load-bearing isolation pattern — note that every API read goes through scoped(Model, user.org_id) rather than a bare select(Model), and it raises if org_id is falsy. That's intentional: a forgotten tenant filter throws instead of silently leaking. If you add endpoints, keep them on that rail and never hand-roll a select() against a tenant table.
+The RLS in schema.sql depends on SET app.current_org = '<org_id>' being run on every connection before any query — that's the one wiring step that isn't automatic in the paste. In FastAPI you'd do it in the get_db dependency (after resolving the user) and in the worker you'd do it right after lease_next resolves the job's org_id. App-layer scoped() protects you even if you forget; RLS only protects you once that SET is wired. Don't treat the schema's RLS as live until that's in place.
+When you're ready, the review UI is still the highest-value next build, and app/api/admin.py's register_agent endpoint is where the http/mcp "bring your own agent" path will eventually plug in — both are clean to extend from here.

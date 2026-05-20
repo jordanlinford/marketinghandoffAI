@@ -1,0 +1,62 @@
+This is a faithful, well-scoped plan — I'd green-light it. It preserves all four load-bearing constraints correctly (the scoped() rail, the AgentContext/AgentResult contract as the only agent interface, the guardrail framework in from day one even though market_intel exercises it with zero proposals, and the worker as a separate process), it scopes P0 sensibly, and the decision to leave the TS app and [deployment] block untouched while only swapping the dev workflow is the right call. The acceptance criteria are all reachable — I tested the spine end to end earlier and it's green.
+But there's one thing in here that will bite you on the first run, and it comes directly from a change the plan makes that we hadn't stress-tested: running the API and the worker as two separate processes against the same SQLite file. Let me verify and fix it before you hand this to the Replit agent.Verifying fixes and validating acceptance criteria complianceVerifying fixes and validating acceptance criteria complianceConfirmed — the default SQLite config errors immediately when a second process tries to write while one holds the lock. The worker polling + the API enqueuing against one file will produce intermittent database is locked errors. Here's the fix, applied and tested:Verified fix efficacy and identified remaining test coverage gapsVerified fix efficacy and identified remaining test coverage gapsThe second writer now waits and succeeds instead of erroring. Now confirm no regression on the full spine, WAL is actually on, and the one acceptance-criterion endpoint I hadn't yet exercised (/api/review/proposals):The user prompt is empty, so I cannot determine the primary language. However, based on the thinking block being in English, here is my summary:
+
+Verified system functionality and consolidated documentation updatesThe user prompt is empty, so I cannot determine the primary language. However, based on the thinking block being in English, here is my summary:
+
+Verified system functionality and consolidated documentation updatesAll green: WAL is on, the full spine still works, and /api/review/proposals returns [] exactly as your acceptance criteria require. Let me sync the patched file to the deliverable.Sync patched db.py into outputs and refresh the zipSync patched db.py into outputs and refresh the zipHere's the corrected db.py — it's a drop-in replacement for the one in your skeleton, so step 3 of the plan ("drop in db.py verbatim") just uses this version instead. Everything else in the skeleton is unchanged.
+pythonfrom collections.abc import Iterator
+
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+
+from app.config import get_settings
+
+settings = get_settings()
+
+# SQLite + two processes (API + worker) needs WAL and a busy timeout, or
+# concurrent writes raise "database is locked". `timeout` makes the driver wait
+# for the lock; the PRAGMAs below let one writer + many readers coexist.
+if settings.is_sqlite:
+    _connect_args = {"check_same_thread": False, "timeout": 30}
+else:
+    _connect_args = {}
+
+engine = create_engine(settings.database_url, connect_args=_connect_args, future=True)
+
+if settings.is_sqlite:
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        cur = dbapi_conn.cursor()
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA busy_timeout=5000")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.close()
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI dependency: one session per request."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def create_all() -> None:
+    # Dev convenience. In prod, run sql/schema.sql (it also installs RLS policies).
+    from app import models  # noqa: F401  (ensure models are imported/registered)
+
+    Base.metadata.create_all(bind=engine)
+The honest framing on this: WAL + busy_timeout makes the two-process setup fine for you poking at it solo in dev. But once your team is hitting it, the right answer is to point DATABASE_URL at Replit's Postgres — SQLite with a separate writer process is always going to be a little fiddly, and Postgres is the real target anyway (it's what schema.sql and RLS are for). So: ship P0 on the patched SQLite, but flip to Postgres before the team logs in, not after.
+Then a short punch-list of smaller things to watch — none are blockers, but a few will trip a literal-minded executor (including the Replit agent) if nobody flags them:
+The scoped()-everywhere rule has two legitimate exceptions already in the code, and they're correct. auth.py does a raw select(User).where(User.email == email) because it has to resolve who the user is before it knows their org — you can't scope by org_id during the bootstrap lookup. And seed.py/smoke.py use raw selects because they run as system-level setup, not as a tenant request. If the Replit agent "tidies" auth.py to route through scoped(), it'll create a chicken-and-egg break. Tell it those two are intentional.
+The task field is silently dropped today. TriggerRunIn accepts a task dict, but trigger_run doesn't persist it on the Run and the worker reads ctx.task from the registration's default_task, not from the trigger. For P0 this is harmless (market_intel ignores task), but it's a latent gap — the first agent that needs per-run input won't receive it. When you get there, persist task on the Run (or in the job payload) and have the worker load it into ctx.task.
+Confirm the [deployment] block runs the TS app explicitly. Your "the published site stays up, untouched" guarantee holds only if the deployment block has its own explicit build/run commands for the TS app rather than inheriting whatever the dev workflow is. If it implicitly follows the workflow you're about to repoint at uvicorn, the next publish could ship the Python app or break the deploy. Worth eyeballing .replit before you trust the decoupling.
+Make sure seed runs before the worker on a fresh DB. Only the API (on SQLite startup) and seed.py call create_all() — the worker process doesn't. The plan's step order runs seed first, so this is fine as written; just don't reorder it, or a cold worker against a non-existent DB will error on its first query.
+None of those change the plan's shape — it's sound. Swap in the patched db.py, keep the four constraints on their rails, move to Postgres before the team arrives, and P0 is good to build.

@@ -19,8 +19,9 @@ from sqlalchemy import select
 from app.data_sources.csv import CsvMarketDataSource
 from app.db import SessionLocal, create_all
 from app.main import app
-from app.models import AgentRegistration, Artifact, Org, Run, Upload, User
+from app.models import AgentRegistration, Artifact, Org, OrgProfile, Run, Upload, User
 from app.queue import enqueue
+from app.setup import crawl as crawl_mod
 from app.tenancy import scoped
 from app.worker import run_once
 from scripts.seed import main as seed_main
@@ -225,6 +226,142 @@ def main() -> None:
         assert "name" in detail and "company" in detail, \
             f"name-alias hint missing from 400 detail: {detail}"
         print("[OK] CSV ingest: missing-name CSV returns 400 listing the seen headers.")
+
+        # ---------------------------------------------------------------------
+        # Setup stage (org profile) — three checks:
+        #   (1) PUT then GET round-trips and confirmed=true; tenant isolation
+        #       holds (Acme can't see Onit's profile).
+        #   (2) /crawl with a monkeypatched fetch (no real network) returns a
+        #       draft with confirmed=false.
+        #   (3) /from-csv with a small customer sample returns a draft ICP
+        #       whose industries reflect the sample.
+        # ---------------------------------------------------------------------
+        # (1) PUT /api/profile -> GET round-trip + cross-org isolation.
+        profile_body = {
+            "product_summary": "Legal ops platform for in-house teams.",
+            "value_prop": "Cut matter-management overhead.",
+            "website_url": "https://onit.com",
+            "icp": {"industries": ["Legal Services", "Financial Services"],
+                    "min_employees": 500, "min_revenue_usd": 100_000_000.0,
+                    "regions": ["NA"], "titles": ["GC", "Head of Legal Ops"],
+                    "notes": "Enterprise legal teams"},
+            "competitors": [{"name": "SimpleLegal", "url": "https://simplelegal.com"}],
+            "keywords": ["legal operations", "matter management"],
+            "brand_voice": "Plain, confident, no jargon.",
+            "banned_claims": ["#1 in the world"],
+            "conversion_goal": "book a demo",
+            "conversion_event": "demo_requested",
+            "crawl_summary": "",
+            "source": {},
+        }
+        put_resp = client.put(
+            "/api/profile",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json=profile_body,
+        )
+        assert put_resp.status_code == 200, f"PUT /api/profile failed: {put_resp.text}"
+        put_json = put_resp.json()
+        assert put_json["confirmed"] is True, "PUT must flip confirmed=true"
+        assert put_json["icp"]["industries"] == ["Legal Services", "Financial Services"]
+
+        get_resp = client.get("/api/profile",
+                              headers={"X-Dev-User-Email": "jordan@onit.com"})
+        assert get_resp.status_code == 200, get_resp.text
+        got = get_resp.json()
+        assert got["exists"] is True and got["confirmed"] is True
+        assert got["product_summary"] == profile_body["product_summary"]
+        assert got["icp"]["min_employees"] == 500
+        assert got["competitors"][0]["name"] == "SimpleLegal"
+
+        # Cross-tenant isolation. The DB-layer `scoped()` is the canonical
+        # guard (CLAUDE.md: "app-layer scoping is the primary isolation guard"),
+        # so it's the ground truth: Acme sees zero OrgProfile rows even though
+        # Onit just wrote one. The API boundary is the secondary check — same
+        # pattern as the existing /api/runs isolation test, where the domain
+        # allowlist (acme.com not allowed) returns 403 before the org can ever
+        # look at the data. Either way, Acme cannot read Onit's profile.
+        leaked_profiles = db.execute(scoped(OrgProfile, other.id)).scalars().all()
+        assert leaked_profiles == [], \
+            f"TENANT LEAK at DB layer: Acme can read Onit's profile! got={leaked_profiles}"
+        acme_resp = client.get("/api/profile",
+                               headers={"X-Dev-User-Email": "ops@acme.com"})
+        assert acme_resp.status_code in (403, 404), \
+            f"cross-org /api/profile MUST be denied, got {acme_resp.status_code}: {acme_resp.text}"
+        print("[OK] Profile PUT/GET round-trip + tenant isolation holds.")
+
+        # (2) /crawl with a fake fetch — no real network. We swap out the
+        # module-level _fetch so the test is hermetic and fast. The endpoint
+        # must return a draft with confirmed=false even when the LLM key is
+        # absent (the deterministic fallback path).
+        canned_html = """
+        <html><head>
+          <title>Acme Robotics — autonomous warehouse picking</title>
+          <meta name="description" content="Warehouse robots that pick and pack.">
+        </head><body>
+          <nav>nav junk we should strip</nav>
+          <h1>Pick faster with autonomous robots</h1>
+          <h2>For 3PL operators and ecommerce brands</h2>
+          <p>Drop-in robots for your existing warehouse, no rip-and-replace.</p>
+        </body></html>
+        """
+        original_fetch = crawl_mod._fetch
+        crawl_mod._fetch = lambda _client, url: (canned_html, None)
+        try:
+            crawl_resp = client.post(
+                "/api/profile/crawl",
+                headers={"X-Dev-User-Email": "jordan@onit.com",
+                         "Content-Type": "application/json"},
+                json={"url": "https://example.com"},
+            )
+        finally:
+            crawl_mod._fetch = original_fetch
+        assert crawl_resp.status_code == 200, crawl_resp.text
+        crawl_json = crawl_resp.json()
+        assert crawl_json["crawl_status"] == "ok", crawl_json
+        assert crawl_json["confirmed"] is False, "crawl must return a DRAFT only"
+        draft = crawl_json["draft"]
+        assert draft["confirmed"] is False
+        assert "Acme Robotics" in (draft["product_summary"] or ""), \
+            f"draft should pull from title/meta; got {draft['product_summary']!r}"
+        # Crawling must not have persisted anything — the on-file profile is
+        # still the one we PUT above, untouched.
+        on_file = db.execute(scoped(OrgProfile, onit.id)).scalars().all()
+        assert len(on_file) == 1 and on_file[0].confirmed is True, \
+            "crawl draft must not write to org_profiles"
+        print("[OK] /api/profile/crawl returns a confirmed=false draft "
+              "without touching the saved profile.")
+
+        # (3) /from-csv with a small customer sample. The inferred ICP's
+        # industries must reflect what's IN the sample (here: "SaaS" is the
+        # majority, "Insurance" is a singleton — both should appear, "SaaS"
+        # should be ranked first since it's most common).
+        sample_csv = (
+            "name,industry,employees,revenue\n"
+            "BetaCo,SaaS,800,80000000\n"
+            "GammaCo,SaaS,1200,150000000\n"
+            "DeltaCo,SaaS,500,40000000\n"
+            "EpsilonCo,Insurance,2000,500000000\n"
+        )
+        from_csv = client.post(
+            "/api/profile/from-csv",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("customers.csv", sample_csv.encode("utf-8"), "text/csv")},
+        )
+        assert from_csv.status_code == 200, from_csv.text
+        fc = from_csv.json()
+        assert fc["sample_rows"] == 4, fc
+        assert fc["confirmed"] is False
+        icp = fc["draft"]["icp"]
+        assert icp["industries"][0] == "SaaS", \
+            f"most-common industry should rank first; got {icp['industries']}"
+        assert "Insurance" in icp["industries"]
+        # Median employees of [500, 800, 1200, 2000] = 1000.
+        assert icp["min_employees"] == 1000, f"median employees wrong: {icp}"
+        assert fc["draft"]["source"].get("icp") == "csv", \
+            "csv-inferred icp must be tagged source=csv"
+        print(f"[OK] /api/profile/from-csv inferred ICP "
+              f"industries={icp['industries']} min_employees={icp['min_employees']}.")
 
         print("[OK] Smoke test passed.")
     finally:

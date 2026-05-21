@@ -185,16 +185,76 @@
   .upload-status { font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 14px; }
   .preview-table { margin-top: 6px; font-size: 11px; }
   .preview-table th, .preview-table td { padding: 3px 6px; }
+
+  /* ---- Top-bar view toggle (Runs <-> Setup) -------------------------- */
+  .view-tabs { display: flex; gap: 4px; margin-right: 14px; }
+  .view-tabs button {
+    background: transparent; color: var(--muted); border: 1px solid transparent;
+    padding: 5px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .8px;
+  }
+  .view-tabs button:hover { color: var(--text); }
+  .view-tabs button.active {
+    background: var(--panel-2); color: var(--text); border-color: var(--border);
+  }
+
+  /* ---- Setup view ---------------------------------------------------- */
+  .setup-main { padding: 16px; max-width: 980px; margin: 0 auto; }
+  .setup-main .panel { padding: 18px; }
+  .setup-paths { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 800px) { .setup-paths { grid-template-columns: 1fr; } }
+  .setup-path {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px;
+  }
+  .setup-path h4 { margin: 0 0 6px; font-size: 13px; }
+  .setup-path p { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
+  .setup-path .row { gap: 6px; }
+  .setup-path input[type=text] { min-width: 0; flex: 1; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+  @media (max-width: 800px) { .form-grid { grid-template-columns: 1fr; } }
+  .form-grid .full { grid-column: 1 / -1; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label {
+    font-size: 11px; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .8px; font-weight: 600;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .field input[type=text], .field input[type=number], .field textarea {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font: inherit; min-width: 0; width: 100%;
+  }
+  .field textarea { min-height: 60px; resize: vertical; }
+  .field.suggested input, .field.suggested textarea { border-color: #6b5a2b; }
+  .badge.suggested {
+    background: #3a2e15; color: #f5d99a;
+  }
+  .badge.confirmed { background: #143a26; color: #7ce0a3; }
+  .badge.draft { background: #3a2e15; color: #f5d99a; }
+  .setup-actions {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border);
+  }
+  .setup-status { color: var(--muted); font-size: 12px; }
+  .draft-banner {
+    background: #3a2e15; color: #f5d99a; padding: 10px 12px; border-radius: 6px;
+    border: 1px solid #6b5a2b; font-size: 13px; margin-bottom: 12px;
+  }
 </style>
 </head>
 <body>
 <header class="bar">
   <div class="brand">Agent <span class="dot">●</span> HQ</div>
+  <div class="view-tabs" role="tablist">
+    <button id="tab-runs"  class="active" role="tab">Runs</button>
+    <button id="tab-setup" role="tab">Setup</button>
+  </div>
   <div class="who" id="who">
     <span>loading…</span>
   </div>
 </header>
-<main>
+<main id="runs-view">
   <!-- LEFT: Runs -->
   <section class="panel" aria-label="Runs">
     <div class="row">
@@ -232,6 +292,58 @@
   </section>
 </main>
 
+<!-- ============================ Setup view ============================== -->
+<!-- Org-level config: ICP, product, voice, conversion goal. Reused by every
+     later stage. Three entry paths (manual / crawl / customer CSV) feed the
+     same editable form. Drafts are obviously not-yet-saved until Save. -->
+<main id="setup-view" class="setup-main" style="display:none;">
+  <section class="panel">
+    <div class="row" style="margin-bottom:14px;">
+      <div>
+        <h2 style="margin:0">Setup — Org profile</h2>
+        <div class="setup-status" id="profile-status">loading…</div>
+      </div>
+      <span id="profile-state-badge" class="badge"></span>
+    </div>
+
+    <div id="draft-banner" class="draft-banner" style="display:none;"></div>
+
+    <div class="setup-paths">
+      <div class="setup-path">
+        <h4>Fill in manually</h4>
+        <p>Edit the form below and Save. Always available, even with no crawl + no key.</p>
+        <button class="ghost" id="path-manual">Use this</button>
+      </div>
+      <div class="setup-path">
+        <h4>Crawl my website</h4>
+        <p>Paste a URL. We fetch ~5 pages, then draft a profile you can correct.</p>
+        <div class="row">
+          <input type="text" id="crawl-url" placeholder="https://example.com" />
+          <button id="crawl-btn">Crawl</button>
+        </div>
+      </div>
+      <div class="setup-path">
+        <h4>Upload customer sample</h4>
+        <p>CSV of existing customers — we infer a draft ICP (industries, size, revenue).</p>
+        <div class="row">
+          <input type="file" id="sample-file" accept=".csv,text/csv" />
+          <button id="sample-btn">Infer ICP</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>Profile</h3>
+      <div class="form-grid" id="profile-form"></div>
+
+      <div class="setup-actions">
+        <div class="setup-status" id="save-status"></div>
+        <button id="save-profile-btn">Save profile</button>
+      </div>
+    </div>
+  </section>
+</main>
+
 <script>
 // ---- TODO(prod): replace dev email header with the SSO session cookie. ----
 // In dev, the page holds the current email in memory and sends it on every
@@ -246,6 +358,10 @@ const state = {
   pollTimer: null,
   uploads: [],
   selectedUploadId: '',  // '' = stub
+  // Setup view:
+  profile: null,         // server-confirmed profile (or empty skeleton)
+  profileDraft: null,    // unsaved draft from crawl / from-csv / edits
+  isDirty: false,        // set whenever a draft is loaded or user edits
 };
 
 async function api(path, opts = {}) {
@@ -725,6 +841,295 @@ async function decide(id, kind) {
   }
 }
 
+// ---- Setup view -----------------------------------------------------------
+// The form's field schema. Each entry: {key, label, kind, full?, hint?}
+//   kind: 'text' | 'textarea' | 'number' | 'csv' | 'lines' | 'competitors'
+//     csv     = comma-separated string <-> string[]
+//     lines   = newline-separated string <-> string[]
+//     competitors = newline of "Name | https://url" <-> [{name, url}]
+// `full` makes the row span both columns.
+const PROFILE_FIELDS = [
+  { key: 'product_summary', label: 'Product summary', kind: 'textarea', full: true,
+    hint: 'One or two sentences. What does it do?' },
+  { key: 'value_prop',      label: 'Value proposition', kind: 'textarea', full: true,
+    hint: 'Why a buyer picks you over the alternative.' },
+  { key: 'website_url',     label: 'Website URL', kind: 'text' },
+  { key: 'conversion_goal', label: 'Conversion goal', kind: 'text',
+    hint: 'e.g. "book a demo"' },
+  { key: 'conversion_event', label: 'Conversion event', kind: 'text',
+    hint: 'Analytics event name, if any.' },
+  { key: 'brand_voice',     label: 'Brand voice', kind: 'textarea', full: true,
+    hint: 'Tone/style rules. What writing should sound like.' },
+  // ICP — flattened into individual fields for the form, re-nested on save.
+  { key: 'icp.industries',      label: 'ICP — industries', kind: 'csv' },
+  { key: 'icp.min_employees',   label: 'ICP — min employees', kind: 'number' },
+  { key: 'icp.min_revenue_usd', label: 'ICP — min revenue (USD)', kind: 'number' },
+  { key: 'icp.regions',         label: 'ICP — regions', kind: 'csv' },
+  { key: 'icp.titles',          label: 'ICP — target titles', kind: 'csv' },
+  { key: 'icp.notes',           label: 'ICP — notes', kind: 'textarea', full: true },
+  { key: 'keywords',      label: 'Keywords', kind: 'csv', full: true,
+    hint: 'Comma-separated terms a buyer might search.' },
+  { key: 'competitors',   label: 'Competitors', kind: 'competitors', full: true,
+    hint: 'One per line: "Name | https://url"' },
+  { key: 'banned_claims', label: 'Banned claims', kind: 'lines', full: true,
+    hint: 'One per line. Things copy must NOT say.' },
+];
+
+function _get(obj, dotted) {
+  return dotted.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
+}
+function _set(obj, dotted, value) {
+  const parts = dotted.split('.');
+  let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur[parts[i]] = cur[parts[i]] || {};
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+function _sourceKeyOf(field) {
+  // source[] keys are top-level field names (the whole icp object is "icp").
+  return field.key.split('.')[0];
+}
+function _toFieldValue(field, raw) {
+  if (raw == null) return '';
+  if (field.kind === 'csv') return Array.isArray(raw) ? raw.join(', ') : String(raw);
+  if (field.kind === 'lines') return Array.isArray(raw) ? raw.join('\n') : String(raw);
+  if (field.kind === 'competitors') {
+    return (raw || []).map(c =>
+      c.url ? `${c.name} | ${c.url}` : (c.name || '')).join('\n');
+  }
+  if (field.kind === 'number') return raw === '' || raw == null ? '' : String(raw);
+  return String(raw);
+}
+function _fromFieldValue(field, str) {
+  const s = (str || '').trim();
+  if (field.kind === 'csv')
+    return s ? s.split(',').map(x => x.trim()).filter(Boolean) : [];
+  if (field.kind === 'lines')
+    return s ? s.split(/\r?\n/).map(x => x.trim()).filter(Boolean) : [];
+  if (field.kind === 'competitors')
+    return s ? s.split(/\r?\n/).map(line => {
+      const [name, url] = line.split('|').map(x => (x || '').trim());
+      return name ? { name, url: url || '' } : null;
+    }).filter(Boolean) : [];
+  if (field.kind === 'number') {
+    if (!s) return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  return s;
+}
+
+function renderProfileForm() {
+  const root = document.getElementById('profile-form');
+  root.innerHTML = '';
+  const data = state.profileDraft || state.profile || {};
+  const source = data.source || {};
+
+  for (const field of PROFILE_FIELDS) {
+    const wrap = el('div', { class: 'field' + (field.full ? ' full' : '') });
+    const sourceTag = source[_sourceKeyOf(field)];
+    const isSuggested = !!sourceTag && sourceTag !== 'form';
+    if (isSuggested) wrap.classList.add('suggested');
+
+    const labelKids = [field.label];
+    if (isSuggested) {
+      labelKids.push(el('span', { class: 'badge suggested',
+        title: `Source: ${sourceTag}. Review and Save to confirm.` },
+        `suggested · ${sourceTag}`));
+    }
+    if (field.hint) {
+      labelKids.push(el('span', { style: 'color:var(--muted); font-weight:400; ' +
+        'text-transform:none; letter-spacing:0; margin-left:auto;' }, field.hint));
+    }
+    wrap.appendChild(el('label', {}, ...labelKids));
+
+    const val = _toFieldValue(field, _get(data, field.key));
+    let input;
+    if (field.kind === 'textarea' || field.kind === 'lines' || field.kind === 'competitors') {
+      input = el('textarea', {}, val);
+    } else if (field.kind === 'number') {
+      input = el('input', { type: 'number', value: val });
+    } else {
+      input = el('input', { type: 'text', value: val });
+    }
+    input.dataset.key = field.key;
+    input.dataset.kind = field.kind;
+    input.addEventListener('input', () => { state.isDirty = true; updateSaveStatus(); });
+    wrap.appendChild(input);
+    root.appendChild(wrap);
+  }
+  updateSaveStatus();
+}
+
+function collectFormValues() {
+  const out = {
+    icp: { industries: [], min_employees: null, min_revenue_usd: null,
+           regions: [], titles: [], notes: '' },
+  };
+  // Preserve fields the form doesn't surface (crawl_summary, source) from
+  // whichever payload the form was built from.
+  const base = state.profileDraft || state.profile || {};
+  out.crawl_summary = base.crawl_summary || '';
+  out.source = Object.assign({}, base.source || {});
+  // Anything the user actually edited turns into a "form" source mark so the
+  // UI stops flagging it as suggested next time around.
+  const inputs = document.querySelectorAll('#profile-form [data-key]');
+  for (const inp of inputs) {
+    const key = inp.dataset.key;
+    const field = { key, kind: inp.dataset.kind };
+    const value = _fromFieldValue(field, inp.value);
+    _set(out, key, value);
+    if (state.isDirty) out.source[_sourceKeyOf(field)] = 'form';
+  }
+  return out;
+}
+
+function updateSaveStatus() {
+  const s = document.getElementById('save-status');
+  const p = state.profile;
+  if (state.profileDraft) {
+    s.textContent = 'Draft loaded — not saved yet. Review fields, then Save.';
+  } else if (state.isDirty) {
+    s.textContent = 'Unsaved changes.';
+  } else if (p && p.exists) {
+    const when = p.updated_at ? fmtTime(p.updated_at) : '';
+    s.textContent = `Last saved ${when}.`;
+  } else {
+    s.textContent = 'No profile saved yet.';
+  }
+}
+
+function renderProfileHeader() {
+  const status = document.getElementById('profile-status');
+  const badge = document.getElementById('profile-state-badge');
+  const draftBanner = document.getElementById('draft-banner');
+
+  if (state.profileDraft) {
+    badge.textContent = 'draft';
+    badge.className = 'badge draft';
+    status.textContent = 'Reviewing a draft. Nothing saved until you click Save.';
+    draftBanner.style.display = '';
+    const tag = state.profileDraft._origin || 'draft';
+    draftBanner.textContent =
+      `Draft from ${tag}. Fields marked "suggested" came from the system — review and Save to confirm.`;
+  } else if (state.profile && state.profile.exists) {
+    badge.textContent = state.profile.confirmed ? 'confirmed' : 'unconfirmed';
+    badge.className = 'badge ' + (state.profile.confirmed ? 'confirmed' : 'draft');
+    status.textContent = state.profile.confirmed
+      ? 'A confirmed profile is on file. Edit any field and Save to update.'
+      : 'Profile exists but is not confirmed.';
+    draftBanner.style.display = 'none';
+  } else {
+    badge.textContent = 'empty';
+    badge.className = 'badge pending';
+    status.textContent = 'No profile yet. Fill the form manually, crawl your site, or upload a customer sample.';
+    draftBanner.style.display = 'none';
+  }
+}
+
+async function loadProfile() {
+  try {
+    state.profile = await api('/api/profile');
+  } catch (e) {
+    document.getElementById('profile-status').innerHTML =
+      `<span class="err">Failed to load profile: ${e.message}</span>`;
+    return;
+  }
+  state.profileDraft = null;
+  state.isDirty = false;
+  renderProfileHeader();
+  renderProfileForm();
+}
+
+async function crawlAndDraft() {
+  const url = document.getElementById('crawl-url').value.trim();
+  if (!url) { alert('Enter a URL first.'); return; }
+  const btn = document.getElementById('crawl-btn');
+  btn.disabled = true; btn.textContent = 'Crawling…';
+  try {
+    const res = await api('/api/profile/crawl', {
+      method: 'POST', body: JSON.stringify({ url }),
+    });
+    res.draft._origin = `crawl of ${url} (${res.crawl_status})`;
+    state.profileDraft = res.draft;
+    state.isDirty = false;
+    renderProfileHeader();
+    renderProfileForm();
+  } catch (e) {
+    alert(`Crawl failed: ${e.message}`);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Crawl';
+  }
+}
+
+async function sampleAndDraft() {
+  const input = document.getElementById('sample-file');
+  if (!input.files || !input.files[0]) { alert('Choose a CSV first.'); return; }
+  const btn = document.getElementById('sample-btn');
+  btn.disabled = true; btn.textContent = 'Inferring…';
+  try {
+    const form = new FormData();
+    form.append('file', input.files[0]);
+    const res = await fetch('/api/profile/from-csv', {
+      method: 'POST',
+      headers: { 'X-Dev-User-Email': state.email },
+      body: form,
+    });
+    if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+    const json = await res.json();
+    json.draft._origin = `customer sample (${json.sample_rows} rows)`;
+    state.profileDraft = json.draft;
+    state.isDirty = false;
+    renderProfileHeader();
+    renderProfileForm();
+    input.value = '';
+  } catch (e) {
+    alert(`CSV inference failed: ${e.message}`);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Infer ICP';
+  }
+}
+
+async function saveProfile() {
+  const btn = document.getElementById('save-profile-btn');
+  const body = collectFormValues();
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    state.profile = await api('/api/profile', {
+      method: 'PUT', body: JSON.stringify(body),
+    });
+    state.profileDraft = null;
+    state.isDirty = false;
+    renderProfileHeader();
+    renderProfileForm();
+  } catch (e) {
+    alert(`Save failed: ${e.message}`);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save profile';
+  }
+}
+
+function switchView(view) {
+  const runs = document.getElementById('runs-view');
+  const setup = document.getElementById('setup-view');
+  const tabRuns = document.getElementById('tab-runs');
+  const tabSetup = document.getElementById('tab-setup');
+  if (view === 'setup') {
+    runs.style.display = 'none';
+    setup.style.display = '';
+    tabRuns.classList.remove('active');
+    tabSetup.classList.add('active');
+    if (!state.profile) loadProfile();
+  } else {
+    runs.style.display = '';
+    setup.style.display = 'none';
+    tabSetup.classList.remove('active');
+    tabRuns.classList.add('active');
+  }
+}
+
 // ---- Boot -----------------------------------------------------------------
 async function refreshAll() {
   await loadMe();
@@ -737,6 +1142,18 @@ document.getElementById('upload-btn').addEventListener('click', uploadCsv);
 document.getElementById('upload-select').addEventListener('change', (ev) => {
   state.selectedUploadId = ev.target.value;
 });
+document.getElementById('tab-runs').addEventListener('click', () => switchView('runs'));
+document.getElementById('tab-setup').addEventListener('click', () => switchView('setup'));
+document.getElementById('path-manual').addEventListener('click', () => {
+  // Discard any pending draft, start from the saved profile (or empty).
+  state.profileDraft = null;
+  state.isDirty = false;
+  renderProfileHeader();
+  renderProfileForm();
+});
+document.getElementById('crawl-btn').addEventListener('click', crawlAndDraft);
+document.getElementById('sample-btn').addEventListener('click', sampleAndDraft);
+document.getElementById('save-profile-btn').addEventListener('click', saveProfile);
 refreshAll();
 </script>
 </body>

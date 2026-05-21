@@ -147,6 +147,46 @@ class Proposal(Base, TimestampMixin):
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+# ---------------------------------------------------------------------------
+# Setup stage — durable, org-level profile (ICP, product, brand voice, etc).
+# Filled three ways: manual form, derived from a website crawl, or sampled
+# from a customer CSV. `confirmed` distinguishes a draft (returned by crawl /
+# from-csv) from the user's saved truth (PUT /api/profile). Every downstream
+# stage reasons from THIS object — keep it stable.
+#
+# CampaignBrief (future, separate, per-campaign object) will reference
+# org_profiles.id. Do NOT build it here, but don't block it either —
+# OrgProfile stays org-level config; per-campaign payloads belong elsewhere.
+# ---------------------------------------------------------------------------
+class OrgProfile(Base, TimestampMixin):
+    __tablename__ = "org_profiles"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True, unique=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now)
+
+    product_summary: Mapped[str] = mapped_column(Text, default="")
+    value_prop: Mapped[str] = mapped_column(Text, default="")
+    # icp shape: {industries:[], min_employees:int|None, min_revenue_usd:float|None,
+    #             regions:[], titles:[], notes:str}
+    icp: Mapped[dict] = mapped_column(JSON, default=dict)
+    # list of {name, url?}
+    competitors: Mapped[list] = mapped_column(JSON, default=list)
+    keywords: Mapped[list] = mapped_column(JSON, default=list)
+    brand_voice: Mapped[str] = mapped_column(Text, default="")
+    banned_claims: Mapped[list] = mapped_column(JSON, default=list)
+    conversion_goal: Mapped[str] = mapped_column(Text, default="")
+    conversion_event: Mapped[str] = mapped_column(Text, default="")
+    website_url: Mapped[str] = mapped_column(Text, default="")
+    crawl_summary: Mapped[str] = mapped_column(Text, default="")
+    # {field_name: "form"|"crawl"|"llm"|"csv"} — transparency over which fields
+    # the user typed vs. which the system proposed. The UI flags non-"form"
+    # fields as "suggested — confirm" until the user re-saves.
+    source: Mapped[dict] = mapped_column(JSON, default=dict)
+    # False on every draft; only PUT /api/profile flips it true.
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Guardrail(Base, TimestampMixin):
     __tablename__ = "guardrails"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)

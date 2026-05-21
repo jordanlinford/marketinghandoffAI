@@ -64,6 +64,28 @@ CREATE TABLE uploads (
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Setup stage: durable org-level profile. CampaignBrief (per-campaign, future)
+-- will reference org_profiles.id — kept separate on purpose.
+CREATE TABLE org_profiles (
+    id                TEXT PRIMARY KEY,
+    org_id            TEXT NOT NULL UNIQUE REFERENCES orgs(id),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    product_summary   TEXT NOT NULL DEFAULT '',
+    value_prop        TEXT NOT NULL DEFAULT '',
+    icp               JSONB NOT NULL DEFAULT '{}',
+    competitors       JSONB NOT NULL DEFAULT '[]',
+    keywords          JSONB NOT NULL DEFAULT '[]',
+    brand_voice       TEXT NOT NULL DEFAULT '',
+    banned_claims     JSONB NOT NULL DEFAULT '[]',
+    conversion_goal   TEXT NOT NULL DEFAULT '',
+    conversion_event  TEXT NOT NULL DEFAULT '',
+    website_url       TEXT NOT NULL DEFAULT '',
+    crawl_summary     TEXT NOT NULL DEFAULT '',
+    source            JSONB NOT NULL DEFAULT '{}',
+    confirmed         BOOLEAN NOT NULL DEFAULT false,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE runs (
     id                    TEXT PRIMARY KEY,
     org_id                TEXT NOT NULL REFERENCES orgs(id),
@@ -147,6 +169,7 @@ CREATE INDEX idx_artifacts_run  ON artifacts(run_id);
 CREATE INDEX idx_proposals_org  ON proposals(org_id, status);
 CREATE INDEX idx_jobs_status    ON jobs(status, created_at);
 CREATE INDEX idx_uploads_org    ON uploads(org_id);
+CREATE INDEX idx_org_profiles_org ON org_profiles(org_id);
 
 -- ---- Row-Level Security -------------------------------------------------
 -- Enable on every tenant table and bind reads/writes to the current org GUC.
@@ -154,7 +177,8 @@ DO $$
 DECLARE t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY['users','connections','agents','runs','artifacts',
-                           'proposals','guardrails','audit_log','jobs','uploads']
+                           'proposals','guardrails','audit_log','jobs','uploads',
+                           'org_profiles']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', t);

@@ -71,6 +71,9 @@ class AgentContext:
 class TriggerRunIn(BaseModel):
     agent_key: str
     task: dict[str, Any] = Field(default_factory=dict)
+    # Optional: bind this run to a previously uploaded account list. Validated
+    # against the caller's org via scoped() before the run is created.
+    upload_id: str | None = None
 
 
 class RunOut(BaseModel):
@@ -80,13 +83,15 @@ class RunOut(BaseModel):
     trigger: str
     cost_usd: float
     error: str | None = None
+    upload_id: str | None = None
     created_at: str
 
     @classmethod
     def of(cls, r) -> "RunOut":
         return cls(
             id=r.id, agent_key=r.agent_key, status=r.status, trigger=r.trigger,
-            cost_usd=r.cost_usd, error=r.error, created_at=r.created_at.isoformat(),
+            cost_usd=r.cost_usd, error=r.error, upload_id=r.upload_id,
+            created_at=r.created_at.isoformat(),
         )
 
 

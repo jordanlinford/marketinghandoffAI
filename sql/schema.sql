@@ -54,6 +54,16 @@ CREATE TABLE agents (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE uploads (
+    id           TEXT PRIMARY KEY,
+    org_id       TEXT NOT NULL REFERENCES orgs(id),
+    filename     TEXT NOT NULL,
+    uploaded_by  TEXT,
+    row_count    INTEGER NOT NULL DEFAULT 0,
+    rows         JSONB NOT NULL DEFAULT '[]',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE runs (
     id                    TEXT PRIMARY KEY,
     org_id                TEXT NOT NULL REFERENCES orgs(id),
@@ -63,6 +73,7 @@ CREATE TABLE runs (
     status                TEXT NOT NULL DEFAULT 'queued',
     cost_usd              DOUBLE PRECISION NOT NULL DEFAULT 0,
     created_by            TEXT,
+    upload_id             TEXT REFERENCES uploads(id),
     started_at            TIMESTAMPTZ,
     finished_at           TIMESTAMPTZ,
     error                 TEXT,
@@ -135,6 +146,7 @@ CREATE INDEX idx_runs_org       ON runs(org_id);
 CREATE INDEX idx_artifacts_run  ON artifacts(run_id);
 CREATE INDEX idx_proposals_org  ON proposals(org_id, status);
 CREATE INDEX idx_jobs_status    ON jobs(status, created_at);
+CREATE INDEX idx_uploads_org    ON uploads(org_id);
 
 -- ---- Row-Level Security -------------------------------------------------
 -- Enable on every tenant table and bind reads/writes to the current org GUC.
@@ -142,7 +154,7 @@ DO $$
 DECLARE t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY['users','connections','agents','runs','artifacts',
-                           'proposals','guardrails','audit_log','jobs']
+                           'proposals','guardrails','audit_log','jobs','uploads']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', t);

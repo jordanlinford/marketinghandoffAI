@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import current_user
 from app.db import get_db
-from app.models import AgentRegistration, Artifact, Run, User
+from app.models import AgentRegistration, Artifact, Run, Upload, User
 from app.queue import enqueue
 from app.schemas import RunOut, TriggerRunIn
 from app.tenancy import scoped
@@ -22,8 +22,21 @@ def trigger_run(body: TriggerRunIn, user: User = Depends(current_user),
     if reg is None or not reg.enabled:
         raise HTTPException(404, f"Agent '{body.agent_key}' not enabled for this org")
 
+    # If the caller bound this run to an uploaded list, the upload MUST belong
+    # to their org. scoped() is the only safe way to check — never trust a
+    # client-supplied id without the tenant filter.
+    upload_id: str | None = None
+    if body.upload_id:
+        up = db.execute(
+            scoped(Upload, user.org_id).where(Upload.id == body.upload_id)
+        ).scalar_one_or_none()
+        if up is None:
+            raise HTTPException(404, f"Upload '{body.upload_id}' not found for this org")
+        upload_id = up.id
+
     run = Run(org_id=user.org_id, agent_registration_id=reg.id, agent_key=reg.key,
-              trigger="manual", status="queued", created_by=user.id)
+              trigger="manual", status="queued", created_by=user.id,
+              upload_id=upload_id)
     db.add(run)
     db.commit()
     db.refresh(run)

@@ -169,6 +169,22 @@
     background: #3a1a1a; color: #ffb3b3; padding: 8px 10px; border-radius: 6px;
     border: 1px solid #5a2424; font-size: 13px;
   }
+  .note {
+    background: #1a2a3a; color: #b8d4ff; padding: 8px 10px; border-radius: 6px;
+    border: 1px solid #2b4a6f; font-size: 13px; margin: 0 0 12px;
+  }
+  .upload-block {
+    margin-top: 12px; padding: 10px; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px;
+  }
+  .upload-select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 8px; font: inherit; flex: 1; min-width: 0;
+  }
+  input[type=file] { color: var(--muted); font-size: 12px; flex: 1; min-width: 0; }
+  .upload-status { font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 14px; }
+  .preview-table { margin-top: 6px; font-size: 11px; }
+  .preview-table th, .preview-table td { padding: 3px 6px; }
 </style>
 </head>
 <body>
@@ -185,6 +201,21 @@
       <h2 style="margin:0">Runs</h2>
       <button id="trigger-btn">Run market intelligence</button>
     </div>
+
+    <div class="upload-block">
+      <div class="row" style="gap:6px;">
+        <label for="upload-select" style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1px;">Account list</label>
+        <select id="upload-select" class="upload-select">
+          <option value="">Stub data (default)</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:6px; gap:6px;">
+        <input type="file" id="upload-file" accept=".csv,text/csv" />
+        <button id="upload-btn" class="ghost">Upload CSV</button>
+      </div>
+      <div id="upload-status" class="upload-status"></div>
+    </div>
+
     <div id="runs-error"></div>
     <div class="runs-list" id="runs-list"></div>
   </section>
@@ -213,6 +244,8 @@ const state = {
   detail: null,
   proposals: [],
   pollTimer: null,
+  uploads: [],
+  selectedUploadId: '',  // '' = stub
 };
 
 async function api(path, opts = {}) {
@@ -221,6 +254,22 @@ async function api(path, opts = {}) {
     opts.headers || {},
   );
   const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`${res.status} ${res.statusText}: ${text}`);
+  }
+  return res.json();
+}
+
+// Multipart upload — let the browser set Content-Type with the boundary.
+async function apiUpload(path, file) {
+  const form = new FormData();
+  form.append('file', file);
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'X-Dev-User-Email': state.email },
+    body: form,
+  });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status} ${res.statusText}: ${text}`);
@@ -323,10 +372,9 @@ async function triggerRun() {
   btn.disabled = true;
   btn.textContent = 'Enqueueing…';
   try {
-    const run = await api('/api/runs', {
-      method: 'POST',
-      body: JSON.stringify({ agent_key: 'market_intel' }),
-    });
+    const body = { agent_key: 'market_intel' };
+    if (state.selectedUploadId) body.upload_id = state.selectedUploadId;
+    const run = await api('/api/runs', { method: 'POST', body: JSON.stringify(body) });
     await loadRuns();
     selectRun(run.id);
   } catch (e) {
@@ -334,6 +382,75 @@ async function triggerRun() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Run market intelligence';
+  }
+}
+
+// ---- Uploads --------------------------------------------------------------
+function renderUploadSelect() {
+  const sel = document.getElementById('upload-select');
+  sel.innerHTML = '';
+  sel.appendChild(el('option', { value: '' }, 'Stub data (default)'));
+  for (const u of state.uploads) {
+    sel.appendChild(el('option', { value: u.id },
+      `${u.filename} (${u.row_count} rows)`));
+  }
+  sel.value = state.selectedUploadId || '';
+}
+
+async function loadUploads() {
+  try {
+    state.uploads = await api('/api/uploads');
+  } catch (e) {
+    document.getElementById('upload-status').textContent = `List failed: ${e.message}`;
+    return;
+  }
+  renderUploadSelect();
+}
+
+function renderPreview(preview) {
+  const status = document.getElementById('upload-status');
+  status.innerHTML = '';
+  if (!preview || !preview.length) return;
+  status.appendChild(el('div', {}, `Preview (${preview.length} of upload):`));
+  const tbody = el('tbody');
+  for (const r of preview) {
+    tbody.appendChild(el('tr', {},
+      el('td', {}, r.name || ''),
+      el('td', {}, String(r.employees ?? '')),
+      el('td', {}, r.industry || ''),
+    ));
+  }
+  status.appendChild(el('table', { class: 'preview-table' },
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Name'), el('th', {}, 'Emp'), el('th', {}, 'Industry'))),
+    tbody,
+  ));
+}
+
+async function uploadCsv() {
+  const input = document.getElementById('upload-file');
+  const status = document.getElementById('upload-status');
+  if (!input.files || !input.files[0]) {
+    status.textContent = 'Choose a .csv file first.';
+    return;
+  }
+  const btn = document.getElementById('upload-btn');
+  btn.disabled = true;
+  status.textContent = 'Uploading…';
+  try {
+    const up = await apiUpload('/api/uploads', input.files[0]);
+    await loadUploads();
+    state.selectedUploadId = up.id;
+    renderUploadSelect();
+    status.innerHTML = '';
+    status.appendChild(el('div', {},
+      `Uploaded ${up.filename} · ${up.row_count} rows · selected for next run.`));
+    renderPreview(up.preview);
+    input.value = '';
+  } catch (e) {
+    status.innerHTML = `<span class="err">${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -386,16 +503,20 @@ function renderSizing(s) {
   );
 }
 
-function renderTargets(targets) {
+function renderTargets(targets, opts = {}) {
   if (!targets || !targets.length) return null;
+  const fromCsv = !!opts.fromCsv;
   const tbody = el('tbody');
   for (const t of targets) {
+    const intentCell = fromCsv
+      ? '—'
+      : (t.intent_score != null ? Math.round(t.intent_score * 100) + '%' : '');
     tbody.appendChild(el('tr', {},
       el('td', {}, t.name),
       el('td', {}, t.industry || ''),
       el('td', {}, String(t.employees ?? '')),
       el('td', {}, t.fit_score != null ? Math.round(t.fit_score * 100) + '%' : ''),
-      el('td', {}, t.intent_score != null ? Math.round(t.intent_score * 100) + '%' : ''),
+      el('td', {}, intentCell),
     ));
   }
   return el('table', {},
@@ -463,8 +584,19 @@ function renderDetail() {
 
   root.appendChild(el('h1', {}, `${run.agent_key} — `,
     el('span', { class: `badge ${run.status}` }, run.status)));
+  const fromCsv = !!run.upload_id;
+  const upload = fromCsv ? state.uploads.find(u => u.id === run.upload_id) : null;
+  const source = fromCsv
+    ? `uploaded list: ${upload ? upload.filename : run.upload_id}`
+    : 'stub data';
   root.appendChild(el('div', { class: 'sub' },
-    `${fmtTime(run.created_at)} · ${fmtCost(run.cost_usd)} · trigger: ${run.trigger}`));
+    `${fmtTime(run.created_at)} · ${fmtCost(run.cost_usd)} · trigger: ${run.trigger} · source: ${source}`));
+
+  if (fromCsv) {
+    root.appendChild(el('div', { class: 'note' },
+      'Intent unavailable for uploaded lists — a static CSV carries no live intent signal. ' +
+      'Connect a live source (ZoomInfo / Apollo) to populate intent.'));
+  }
 
   if (run.status === 'failed' && run.error) {
     root.appendChild(el('div', { class: 'err' }, run.error));
@@ -496,7 +628,7 @@ function renderDetail() {
         el('h3', {}, 'Sizing'), sizing));
     }
 
-    const targets = renderTargets(structured.top_targets);
+    const targets = renderTargets(structured.top_targets, { fromCsv });
     if (targets) {
       root.appendChild(el('div', { class: 'section' },
         el('h3', {}, 'Top targets'), targets));
@@ -581,11 +713,15 @@ async function decide(id, kind) {
 // ---- Boot -----------------------------------------------------------------
 async function refreshAll() {
   await loadMe();
-  await Promise.all([loadRuns(), loadProposals()]);
+  await Promise.all([loadRuns(), loadProposals(), loadUploads()]);
   if (state.selectedRunId) await loadDetail(state.selectedRunId);
 }
 
 document.getElementById('trigger-btn').addEventListener('click', triggerRun);
+document.getElementById('upload-btn').addEventListener('click', uploadCsv);
+document.getElementById('upload-select').addEventListener('change', (ev) => {
+  state.selectedUploadId = ev.target.value;
+});
 refreshAll();
 </script>
 </body>

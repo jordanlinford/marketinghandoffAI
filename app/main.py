@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
-from app.api import admin, review, runs
+from app.api import admin, review, runs, uploads
 from app.config import get_settings
 from app.db import create_all
 
@@ -13,6 +13,7 @@ app = FastAPI(title="Agent HQ", version="0.1.0")
 app.include_router(runs.router)
 app.include_router(review.router)
 app.include_router(admin.router)
+app.include_router(uploads.router)
 
 _UI_FILE = Path(__file__).parent / "static" / "ui.html"
 

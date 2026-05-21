@@ -92,6 +92,9 @@ class Run(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), default="queued")
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     created_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # null => stub source (preserves prior behavior). Set when the trigger binds
+    # this run to a user-uploaded account list (the CSV data-source seam).
+    upload_id: Mapped[str | None] = mapped_column(ForeignKey("uploads.id"), nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -99,6 +102,20 @@ class Run(Base, TimestampMixin):
 
     artifacts: Mapped[list["Artifact"]] = relationship(backref="run")
     proposals: Mapped[list["Proposal"]] = relationship(backref="run")
+
+
+class Upload(Base, TimestampMixin):
+    """A user-uploaded account list (CSV). Tenant-scoped. Rows are stored
+    parsed-and-normalized as JSON — the raw text is not retained (the mapped
+    fields are what every consumer needs; storing both is duplicative)."""
+    __tablename__ = "uploads"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(300))
+    uploaded_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    # list of {name, employees, revenue_usd, industry} dicts after header mapping
+    rows: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class Artifact(Base, TimestampMixin):

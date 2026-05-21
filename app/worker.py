@@ -15,17 +15,29 @@ from sqlalchemy.orm import Session
 from app import guardrails
 from app.agents.registry import get_agent
 from app.config import get_settings
+from app.data_sources.csv import CsvMarketDataSource
 from app.data_sources.stub import StubMarketDataSource
 from app.db import SessionLocal
-from app.models import AgentRegistration, Artifact, AuditLog, Guardrail, Org, Proposal, Run, _now
+from app.models import (AgentRegistration, Artifact, AuditLog, Guardrail, Org,
+                        Proposal, Run, Upload, _now)
 from app.queue import complete, lease_next
 from app.schemas import AgentContext
 from app.tenancy import assert_same_org, scoped
 
 
-def _resolve_market_data(db: Session, org_id: str):
-    """Pick a data source for this org. Stub today; later, inspect connections
-    and return ZoomInfoDataSource / ApolloDataSource. Same interface either way."""
+def _resolve_market_data(db: Session, org_id: str, upload_id: str | None):
+    """Pick a data source for this run.
+      * upload_id set → CsvMarketDataSource(uploaded rows) — the real-accounts path.
+      * upload_id None → StubMarketDataSource — unchanged from P0.
+    Later: inspect connections and return ZoomInfoDataSource / ApolloDataSource.
+    Same interface either way; the agent does not change."""
+    if upload_id:
+        up = db.execute(
+            scoped(Upload, org_id).where(Upload.id == upload_id)
+        ).scalar_one_or_none()
+        if up is None:
+            raise RuntimeError(f"Upload {upload_id} not found for org {org_id}")
+        return CsvMarketDataSource(up.rows)
     return StubMarketDataSource()
 
 
@@ -60,7 +72,7 @@ def process_run(db: Session, run: Run) -> None:
         brand_guide=reg.config.get("brand_guide", {}),
         icp=reg.config.get("icp", {}),
         config=reg.config,
-        get_market_data=lambda: _resolve_market_data(db, run.org_id),
+        get_market_data=lambda: _resolve_market_data(db, run.org_id, run.upload_id),
         log=logs.append,
     )
 

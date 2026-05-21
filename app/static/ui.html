@@ -1012,14 +1012,21 @@ function renderProfileHeader() {
     status.textContent = 'Reviewing a draft. Nothing saved until you click Save.';
     draftBanner.style.display = '';
     const tag = state.profileDraft._origin || 'draft';
-    // For a successful crawl / CSV inference, keep the "suggested — confirm"
-    // copy. For a failed crawl, _origin already explains the specific reason
-    // and the next move, so we don't add the "suggested" tail (nothing was
-    // actually suggested).
-    const tail = state.profileDraft._crawlOk === false
-      ? ''
-      : ' Fields marked "suggested" came from the system — review and Save to confirm.';
-    draftBanner.textContent = `Draft from ${tag}.${tail}`;
+    const kind = state.profileDraft._draftKind;
+    // Three banner shapes:
+    //  - crawl / csv: there ARE real suggestions to review.
+    //  - knowledge:   the banner already explains origin + next step; the
+    //                 "suggested — confirm" tail still applies (LLM-from-
+    //                 knowledge guesses are suggestions, just honestly labeled).
+    //  - skeleton:    no suggestions at all; don't pretend otherwise.
+    let tail = ' Fields marked "suggested" came from the system — review and Save to confirm.';
+    if (kind === 'skeleton') tail = '';
+    if (kind === 'knowledge' || kind === 'skeleton') {
+      // The origin string is a full sentence; don't prefix "Draft from".
+      draftBanner.textContent = `${tag}${tail}`;
+    } else {
+      draftBanner.textContent = `Draft from ${tag}.${tail}`;
+    }
   } else if (state.profile && state.profile.exists) {
     badge.textContent = state.profile.confirmed ? 'confirmed' : 'unconfirmed';
     badge.className = 'badge ' + (state.profile.confirmed ? 'confirmed' : 'draft');
@@ -1081,11 +1088,31 @@ async function crawlAndDraft() {
       method: 'POST', body: JSON.stringify({ url }),
     });
     const reason = crawlFailureReason(res);
-    res.draft._origin = reason
-      ? `crawl of ${url} — couldn't read the site: ${reason} ` +
-        `Edit the form below or try another URL (a press page or docs subdomain often works).`
-      : `crawl of ${url}`;
-    res.draft._crawlOk = !reason;
+    // The API tells us which drafter actually produced this: the real crawl,
+    // the LLM-from-knowledge fallback, or a blank skeleton when the model
+    // didn't recognize the company. Each one gets a distinct banner sentence
+    // so the user knows what they're looking at and what to do next.
+    const src = res.draft_source || (res.crawl_status === 'ok' ? 'crawl' : 'skeleton');
+    let origin, kind;
+    if (src === 'crawl') {
+      origin = `crawl of ${url}`;
+      kind = 'crawl';
+    } else if (src === 'knowledge') {
+      origin = `couldn't read ${url} directly` +
+        (reason ? ` (${reason})` : '') +
+        ' — drafted this from what we already know about the company. ' +
+        'Review carefully and Save to confirm.';
+      kind = 'knowledge';
+    } else {
+      // skeleton: crawl failed AND the LLM didn't recognize the company (or no key).
+      origin = `couldn't read ${url}` +
+        (reason ? ` (${reason})` : '') +
+        " — and we don't have enough on this company to draft anything useful. " +
+        'Fill the form manually.';
+      kind = 'skeleton';
+    }
+    res.draft._origin = origin;
+    res.draft._draftKind = kind;
     state.profileDraft = res.draft;
     state.isDirty = false;
     renderProfileHeader();

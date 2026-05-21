@@ -1,18 +1,25 @@
 """
-Draft OrgProfile builder for the Setup stage. Two entry paths:
+Draft OrgProfile builder for the Setup stage. Three entry paths:
 
   * `draft_from_crawl(crawl_result)` — turn the cleaned website text into a
     proposed profile (product, value prop, ICP guess, competitors, keywords,
     conversion goal). When ANTHROPIC_API_KEY is set we ask Claude for a
     structured JSON proposal; otherwise we synthesize a minimal draft from
     title/meta/headings so the flow still works.
+  * `draft_from_knowledge(domain, name=...)` — used when we COULDN'T read the
+    site (Cloudflare 403, DNS miss, JS-only page). Asks Claude to draft the
+    same structured profile FROM ITS OWN KNOWLEDGE of the company at that
+    domain, with explicit instructions to leave fields blank rather than
+    invent details for companies it doesn't recognize. Tags source="knowledge"
+    so the UI labels it honestly.
   * `draft_from_csv_rows(rows)` — infer ICP fields from an uploaded customer
     sample (most-common industries, median size/revenue).
 
-Both return a DRAFT, never a saved profile. `confirmed` is always False, and
-every field the system proposed is tagged in `source` ("llm" | "crawl" | "csv")
-so the UI can render "we guessed this — confirm it" instead of presenting a
-draft as fact. Same honesty rule as the CSV intent column.
+All three return a DRAFT, never a saved profile. `confirmed` is always False,
+and every field the system proposed is tagged in `source` ("llm" | "crawl" |
+"knowledge" | "csv") so the UI can render "we guessed this — confirm it"
+instead of presenting a draft as fact. Same honesty rule as the CSV intent
+column.
 
 LLM-or-template fallback pattern is the same one used by
 `app.agents.synthesis.synthesize_brief` — see that module for the reference
@@ -53,7 +60,9 @@ def draft_from_crawl(crawl_result: dict) -> dict:
 
     # Merge LLM proposal over the minimal base. We trust the LLM only for the
     # fields it actually returned and that pass shape validation; everything
-    # else keeps the deterministic fallback.
+    # else keeps the deterministic fallback. Empty values (the model's signal
+    # for "I don't know") get the value but NOT the source tag — the UI uses
+    # source to mark "suggested", and a blank field shouldn't pose as a suggestion.
     merged = dict(base)
     source = dict(base.get("source") or {})
     for field in _LLM_FIELDS:
@@ -63,7 +72,49 @@ def draft_from_crawl(crawl_result: dict) -> dict:
         if value is None:
             continue
         merged[field] = value
-        source[field] = "llm"
+        if not _is_empty(value):
+            source[field] = "llm"
+    merged["source"] = source
+    return merged
+
+
+def draft_from_knowledge(domain: str, name: str = "") -> dict:
+    """Draft a profile from what the LLM already knows about the company at
+    this domain — used when the crawl could NOT read the site (Cloudflare,
+    DNS, JS-only). Never raises.
+
+    Honesty discipline: the prompt explicitly tells the model to return empty
+    fields rather than confabulate. A mostly-blank result is the correct
+    outcome for an unknown company; the API surfaces that as
+    draft_source="skeleton" and the UI nudges the user to manual entry.
+
+    With no API key (or on any LLM failure), returns the same minimal skeleton
+    the no-key crawl path returns — the form is still the always-works fallback."""
+    settings = get_settings()
+    base = _minimal_from_domain(domain, name)
+    if not settings.anthropic_api_key:
+        return base
+
+    try:
+        proposal = _llm_propose_from_knowledge(domain, name, settings)
+    except Exception:
+        return base  # silent fallback — same discipline as synthesis.py
+
+    merged = dict(base)
+    source = dict(base.get("source") or {})
+    for field in _LLM_FIELDS:
+        if field not in proposal:
+            continue
+        value = _coerce_field(field, proposal[field])
+        if value is None:
+            continue
+        merged[field] = value
+        # Only tag non-empty values. An empty list / empty string from the
+        # model is its honest "I don't know" answer for that field — we keep
+        # the blank but do NOT mark it "suggested," so the UI shows it as an
+        # empty field the user fills, not as a hollow suggestion.
+        if not _is_empty(value):
+            source[field] = "knowledge"
     merged["source"] = source
     return merged
 
@@ -194,33 +245,71 @@ def _phrases(text: str) -> list[str]:
     return out
 
 
-def _llm_propose(text: str, settings) -> dict:
-    """Ask Claude for a strict-JSON proposal. Returns a dict; raises on any
-    transport or parse failure so the caller can fall back."""
-    import anthropic
+# Shared JSON schema spec for both LLM prompts (crawl-text and from-knowledge).
+# Whatever the input source, the OUTPUT shape is identical so the merge logic
+# in `draft_from_*` doesn't have to branch on input mode.
+_PROFILE_JSON_SPEC = (
+    "Return ONLY a single JSON object, no prose, with these exact keys:\n"
+    '  "product_summary": string  (1-2 sentences, what the product does)\n'
+    '  "value_prop":      string  (1 sentence, why a buyer would pick it)\n'
+    '  "icp": {\n'
+    '     "industries":      [string],\n'
+    '     "min_employees":   integer or null,\n'
+    '     "min_revenue_usd": number or null,\n'
+    '     "regions":         [string],\n'
+    '     "titles":          [string],\n'
+    '     "notes":           string\n'
+    '  }\n'
+    '  "competitors":     [{"name": string, "url": string (optional)}]\n'
+    '  "keywords":        [string]  (5-15 search terms a buyer might use)\n'
+    '  "conversion_goal": string    (e.g. "book a demo", "start free trial")'
+)
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+
+def _llm_propose(text: str, settings) -> dict:
+    """Ask Claude for a strict-JSON proposal from crawled website text.
+    Returns a dict; raises on any transport or parse failure so the caller
+    can fall back."""
     prompt = (
         "You are helping a B2B marketing team set up their account profile. "
         "Based ONLY on the website content below, propose a draft profile. "
         "Do NOT invent facts you cannot ground in the text. If a field is "
         "unclear, return an empty string / empty list rather than guessing.\n\n"
-        "Return ONLY a single JSON object, no prose, with these exact keys:\n"
-        '  "product_summary": string  (1-2 sentences, what the product does)\n'
-        '  "value_prop":      string  (1 sentence, why a buyer would pick it)\n'
-        '  "icp": {\n'
-        '     "industries":      [string],\n'
-        '     "min_employees":   integer or null,\n'
-        '     "min_revenue_usd": number or null,\n'
-        '     "regions":         [string],\n'
-        '     "titles":          [string],\n'
-        '     "notes":           string\n'
-        '  }\n'
-        '  "competitors":     [{"name": string, "url": string (optional)}]\n'
-        '  "keywords":        [string]  (5-15 search terms a buyer might use)\n'
-        '  "conversion_goal": string    (e.g. "book a demo", "start free trial")\n\n'
+        f"{_PROFILE_JSON_SPEC}\n\n"
         f"WEBSITE CONTENT:\n{text[:_LLM_INPUT_CAP]}"
     )
+    return _llm_json_call(prompt, settings)
+
+
+def _llm_propose_from_knowledge(domain: str, name: str, settings) -> dict:
+    """Ask Claude for a strict-JSON proposal from its own knowledge of the
+    company at this domain — used when we COULD NOT read the site. The
+    instructions explicitly allow (and require) blank fields for companies
+    the model doesn't recognize. Returns a dict; raises on any transport or
+    parse failure so the caller can fall back to the minimal skeleton."""
+    prompt = (
+        "You are helping a B2B marketing team set up their account profile. "
+        "We could NOT read the company's website (it is blocked by anti-bot "
+        "protection, JS-only, or otherwise unreachable). Using ONLY your "
+        "existing knowledge of the company at the domain below, propose a "
+        "draft profile.\n\n"
+        "CRITICAL HONESTY RULE: if you do NOT actually recognize this company, "
+        "return an empty string / empty list / null for every field. Do NOT "
+        "invent details, do NOT guess based on the domain name's resemblance "
+        "to other companies, and do NOT confabulate. A blank draft the user "
+        "fills in is the correct outcome; a confabulated draft presented as "
+        "fact is the failure mode we are avoiding. Same rule applies field-"
+        "by-field: leave specific fields blank if you don't know that part.\n\n"
+        f"{_PROFILE_JSON_SPEC}\n\n"
+        f"COMPANY:\n  domain: {domain}\n  name guess: {name or '(unknown)'}"
+    )
+    return _llm_json_call(prompt, settings)
+
+
+def _llm_json_call(prompt: str, settings) -> dict:
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     msg = client.messages.create(
         model=settings.anthropic_model,
         max_tokens=1500,
@@ -228,6 +317,70 @@ def _llm_propose(text: str, settings) -> dict:
     )
     raw = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
     return _parse_json_blob(raw)
+
+
+def _minimal_from_domain(domain: str, name: str) -> dict:
+    """No-key / LLM-failed fallback for the knowledge path. The user gets a
+    blank form with the domain prefilled — same skeleton the no-key crawl
+    path returns, so the always-works-manually rule holds."""
+    return {
+        "product_summary": "",
+        "value_prop": "",
+        "icp": {"industries": [], "min_employees": None, "min_revenue_usd": None,
+                "regions": [], "titles": [], "notes": ""},
+        "competitors": [],
+        "keywords": [],
+        "brand_voice": "",
+        "banned_claims": [],
+        "conversion_goal": "",
+        "conversion_event": "",
+        "website_url": _domain_to_url(domain),
+        "crawl_summary": "",
+        "source": {},
+        "confirmed": False,
+    }
+
+
+def _domain_to_url(domain: str) -> str:
+    d = (domain or "").strip()
+    if not d:
+        return ""
+    if d.startswith(("http://", "https://")):
+        return d
+    return "https://" + d.lstrip("/")
+
+
+def name_from_domain(domain: str) -> str:
+    """Cheap heuristic so the LLM has a name to anchor to: drop scheme, drop
+    leading 'www.', take the host's first label, replace '-/_' with spaces,
+    title-case. 'www.acme-corp.io' -> 'Acme Corp'. Best-effort only; the LLM
+    is given the domain too and will correct obviously-wrong guesses."""
+    from urllib.parse import urlparse
+    d = (domain or "").strip()
+    if d.startswith(("http://", "https://")):
+        d = urlparse(d).netloc
+    d = d.lower().lstrip(".")
+    if d.startswith("www."):
+        d = d[4:]
+    first = d.split(".", 1)[0] if d else ""
+    cleaned = re.sub(r"[-_]+", " ", first).strip()
+    return cleaned.title()
+
+
+def _is_empty(value) -> bool:
+    """True when a value is the model's honest 'I don't know' answer. We use
+    this to decide whether to mark a field as 'suggested' in source — a blank
+    field should NOT pose as a suggestion in the UI."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, list):
+        return len(value) == 0
+    if isinstance(value, dict):
+        # An icp dict counts as empty only if EVERY sub-value is itself empty.
+        return all(_is_empty(v) for v in value.values())
+    return False
 
 
 def _parse_json_blob(raw: str) -> dict:

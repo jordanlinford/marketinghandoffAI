@@ -22,6 +22,8 @@ from app.main import app
 from app.models import AgentRegistration, Artifact, Org, OrgProfile, Run, Upload, User
 from app.queue import enqueue
 from app.setup import crawl as crawl_mod
+from app.setup import draft as draft_mod
+from app.setup.draft import draft_from_knowledge
 from app.tenancy import scoped
 from app.worker import run_once
 from scripts.seed import main as seed_main
@@ -305,8 +307,22 @@ def main() -> None:
           <p>Drop-in robots for your existing warehouse, no rip-and-replace.</p>
         </body></html>
         """
+        # Patch the LLM call too — when ANTHROPIC_API_KEY is loaded, the crawl
+        # path otherwise makes a real Anthropic request (slow + costs money +
+        # flaky for CI). We stub it with a canned proposal that still carries
+        # "Acme Robotics" through, so the downstream assertion is unchanged.
         original_fetch = crawl_mod._fetch
+        original_llm = draft_mod._llm_propose
         crawl_mod._fetch = lambda _client, url: (canned_html, None)
+        draft_mod._llm_propose = lambda text, settings: {
+            "product_summary": "Acme Robotics builds autonomous warehouse pickers.",
+            "value_prop": "Drop-in robots, no rip-and-replace.",
+            "icp": {"industries": ["3PL", "Ecommerce"], "min_employees": 100,
+                    "min_revenue_usd": None, "regions": [], "titles": [],
+                    "notes": ""},
+            "competitors": [], "keywords": ["warehouse robots", "pick automation"],
+            "conversion_goal": "book a demo",
+        }
         try:
             crawl_resp = client.post(
                 "/api/profile/crawl",
@@ -316,21 +332,112 @@ def main() -> None:
             )
         finally:
             crawl_mod._fetch = original_fetch
+            draft_mod._llm_propose = original_llm
         assert crawl_resp.status_code == 200, crawl_resp.text
         crawl_json = crawl_resp.json()
         assert crawl_json["crawl_status"] == "ok", crawl_json
+        assert crawl_json["draft_source"] == "crawl", crawl_json
         assert crawl_json["confirmed"] is False, "crawl must return a DRAFT only"
         draft = crawl_json["draft"]
         assert draft["confirmed"] is False
         assert "Acme Robotics" in (draft["product_summary"] or ""), \
-            f"draft should pull from title/meta; got {draft['product_summary']!r}"
+            f"draft should carry the LLM proposal through; got {draft['product_summary']!r}"
         # Crawling must not have persisted anything — the on-file profile is
         # still the one we PUT above, untouched.
         on_file = db.execute(scoped(OrgProfile, onit.id)).scalars().all()
         assert len(on_file) == 1 and on_file[0].confirmed is True, \
             "crawl draft must not write to org_profiles"
         print("[OK] /api/profile/crawl returns a confirmed=false draft "
-              "without touching the saved profile.")
+              "without touching the saved profile (draft_source=crawl).")
+
+        # ---------------------------------------------------------------------
+        # Knowledge-fallback drafting — the LLM-from-knowledge path used when
+        # the crawl can't read the site (Cloudflare 403, DNS, JS-only).
+        # ---------------------------------------------------------------------
+
+        # (Knowledge-1) direct draft_from_knowledge() with a stubbed LLM call.
+        # Confirms shape, source tagging, confirmed=false. No real API call.
+        original_kllm = draft_mod._llm_propose_from_knowledge
+        draft_mod._llm_propose_from_knowledge = lambda domain, name, settings: {
+            "product_summary": "Onit is enterprise legal-ops software.",
+            "value_prop": "One source of truth for in-house legal work.",
+            "icp": {"industries": ["Legal Services", "Financial Services"],
+                    "min_employees": 500, "min_revenue_usd": None,
+                    "regions": [], "titles": ["GC", "Head of Legal Ops"],
+                    "notes": "Enterprise legal teams."},
+            "competitors": [{"name": "SimpleLegal", "url": "https://simplelegal.com"}],
+            "keywords": ["legal operations", "matter management"],
+            "conversion_goal": "book a demo",
+        }
+        try:
+            kn_draft = draft_from_knowledge("onit.com", "Onit")
+        finally:
+            draft_mod._llm_propose_from_knowledge = original_kllm
+        assert kn_draft["confirmed"] is False
+        assert kn_draft["product_summary"].startswith("Onit "), kn_draft
+        assert kn_draft["website_url"] == "https://onit.com", kn_draft
+        assert kn_draft["icp"]["industries"][0] == "Legal Services"
+        # Every populated field must be tagged source="knowledge", and no
+        # field should claim a different source (e.g. "llm" or "crawl").
+        sources = set(kn_draft["source"].values())
+        assert sources == {"knowledge"}, \
+            f"knowledge draft must tag fields source='knowledge' only, got {sources}"
+        assert "product_summary" in kn_draft["source"]
+        assert "icp" in kn_draft["source"]
+        print("[OK] draft_from_knowledge() with stubbed LLM tags source=knowledge.")
+
+        # (Knowledge-2) /api/profile/crawl with a fetch that FAILS (Cloudflare-
+        # style http_403). The endpoint must fall back to the knowledge path,
+        # return draft_source="knowledge", confirmed=false, and MUST NOT write
+        # to org_profiles. We patch both _fetch (so we don't hit the net) and
+        # _llm_propose_from_knowledge (so we don't hit the LLM).
+        original_fetch = crawl_mod._fetch
+        original_kllm = draft_mod._llm_propose_from_knowledge
+        fake_403 = {
+            "kind": "http_status", "exception_type": None,
+            "exception_message": "HTTP 403: '<title>Just a moment...</title>'",
+            "http_status": 403, "url": "https://onit.com",
+        }
+        crawl_mod._fetch = lambda _client, url: ("", fake_403)
+        draft_mod._llm_propose_from_knowledge = lambda domain, name, settings: {
+            "product_summary": "Onit is enterprise legal-ops software.",
+            "value_prop": "One source of truth for in-house legal work.",
+            "icp": {"industries": ["Legal Services"], "min_employees": 500,
+                    "min_revenue_usd": None, "regions": [], "titles": [],
+                    "notes": ""},
+            "competitors": [],
+            "keywords": ["legal operations"],
+            "conversion_goal": "book a demo",
+        }
+        try:
+            blocked = client.post(
+                "/api/profile/crawl",
+                headers={"X-Dev-User-Email": "jordan@onit.com",
+                         "Content-Type": "application/json"},
+                json={"url": "https://onit.com"},
+            )
+        finally:
+            crawl_mod._fetch = original_fetch
+            draft_mod._llm_propose_from_knowledge = original_kllm
+        assert blocked.status_code == 200, blocked.text
+        bj = blocked.json()
+        assert bj["crawl_status"] == "http_error", bj
+        assert bj["crawl_error"]["http_status"] == 403, bj
+        assert bj["draft_source"] == "knowledge", \
+            f"403 must fall back to knowledge, got draft_source={bj.get('draft_source')!r}"
+        assert bj["confirmed"] is False, "knowledge draft must be confirmed=false"
+        assert bj["draft"]["confirmed"] is False
+        assert bj["draft"]["product_summary"].startswith("Onit "), bj["draft"]
+        assert set(bj["draft"]["source"].values()) == {"knowledge"}
+        # And the saved profile is still the one Onit PUT earlier — the
+        # fallback must not have persisted the draft.
+        on_file = db.execute(scoped(OrgProfile, onit.id)).scalars().all()
+        assert len(on_file) == 1 and on_file[0].confirmed is True, \
+            "knowledge-fallback draft must not write to org_profiles"
+        assert "Legal ops platform" in on_file[0].product_summary, \
+            f"saved profile got mutated by the draft path! got={on_file[0].product_summary!r}"
+        print("[OK] /api/profile/crawl on http_403 falls back to knowledge "
+              "(draft_source=knowledge, confirmed=false, nothing persisted).")
 
         # (3) /from-csv with a small customer sample. The inferred ICP's
         # industries must reflect what's IN the sample (here: "SaaS" is the

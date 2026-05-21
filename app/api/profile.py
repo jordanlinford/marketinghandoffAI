@@ -28,7 +28,9 @@ from app.auth import current_user
 from app.db import get_db
 from app.models import OrgProfile, User, _now
 from app.setup.crawl import crawl as crawl_site
-from app.setup.draft import draft_from_crawl, draft_from_csv_rows
+from app.setup.draft import (
+    draft_from_crawl, draft_from_csv_rows, draft_from_knowledge, name_from_domain,
+)
 from app.tenancy import scoped
 
 router = APIRouter(prefix="/api/profile", tags=["profile"])
@@ -128,7 +130,24 @@ def crawl_profile(body: CrawlIn, user: User = Depends(current_user)):
     if not (body.url or "").strip():
         raise HTTPException(400, "url is required")
     result = crawl_site(body.url)
-    draft = draft_from_crawl(result)
+    if result.get("status") == "ok":
+        # Happy path: real HTML available, LLM proposes from crawl text.
+        draft = draft_from_crawl(result)
+        draft_source = "crawl"
+    else:
+        # Crawl failed (Cloudflare 403, DNS miss, JS-only, timeout...). Fall
+        # back to "what we know about this company" via the LLM — same draft
+        # shape, source tagged "knowledge". With no API key (or on any LLM
+        # error), this returns the minimal skeleton, so the manual form path
+        # remains the always-works fallback.
+        from urllib.parse import urlparse
+        parsed = urlparse(result.get("url") or "")
+        domain = (parsed.netloc or "").lower() or (body.url or "").strip()
+        draft = draft_from_knowledge(domain, name_from_domain(domain))
+        # "knowledge" if the LLM actually contributed something; "skeleton"
+        # if every field is blank (model didn't recognize the company OR
+        # there's no API key). The UI uses this to pick the right banner.
+        draft_source = "knowledge" if (draft.get("source") or {}) else "skeleton"
     return {
         "draft": draft,
         "crawl_status": result.get("status"),
@@ -136,6 +155,9 @@ def crawl_profile(body: CrawlIn, user: User = Depends(current_user)):
         # Structured error for the UI to render a specific, actionable reason
         # ("HTTP 403 — Cloudflare", "DNS lookup failed", ...). None on success.
         "crawl_error": result.get("error"),
+        # Which drafter produced this: "crawl" | "knowledge" | "skeleton".
+        # Drives the banner copy in ui.html (honest labeling — see CLAUDE.md).
+        "draft_source": draft_source,
         "confirmed": False,  # explicit — the caller must PUT to save
     }
 

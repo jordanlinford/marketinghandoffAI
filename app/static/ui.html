@@ -294,9 +294,14 @@ function el(tag, attrs = {}, ...kids) {
 
 function fmtTime(iso) {
   if (!iso) return '';
-  const d = new Date(iso);
+  // The API serializes datetimes via .isoformat() WITHOUT a TZ suffix, but
+  // they're UTC (see app/models.py `_now`). JS treats unsuffixed ISO strings
+  // as LOCAL time, which produces negative ages for any non-UTC viewer —
+  // append 'Z' when no offset is present so it parses as UTC.
+  const hasTz = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso);
+  const d = new Date(hasTz ? iso : iso + 'Z');
   const now = new Date();
-  const diff = (now - d) / 1000;
+  const diff = Math.max(0, (now - d) / 1000);  // clamp tiny clock-skew dips
   if (diff < 60) return `${Math.floor(diff)}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
@@ -505,10 +510,10 @@ function renderSizing(s) {
 
 function renderTargets(targets, opts = {}) {
   if (!targets || !targets.length) return null;
-  const fromCsv = !!opts.fromCsv;
+  const dashIntent = !!opts.dashIntent;
   const tbody = el('tbody');
   for (const t of targets) {
-    const intentCell = fromCsv
+    const intentCell = dashIntent
       ? '—'
       : (t.intent_score != null ? Math.round(t.intent_score * 100) + '%' : '');
     tbody.appendChild(el('tr', {},
@@ -592,10 +597,20 @@ function renderDetail() {
   root.appendChild(el('div', { class: 'sub' },
     `${fmtTime(run.created_at)} · ${fmtCost(run.cost_usd)} · trigger: ${run.trigger} · source: ${source}`));
 
-  if (fromCsv) {
+  // Intent availability is derived from the artifact, not from fromCsv alone:
+  // a CSV with an intent column flips CsvMarketDataSource to source="csv+intent"
+  // and the agent surfaces real per-row scores. We treat any positive intent
+  // value in the targets as proof the source carried intent; an all-zero CSV
+  // (no intent column) keeps the honest "unavailable" banner + "—" cells.
+  const firstStruct = (artifacts[0] && artifacts[0].body && artifacts[0].body.structured) || {};
+  const csvHasIntent = fromCsv && (firstStruct.top_targets || [])
+    .some(t => Number(t.intent_score) > 0);
+  const intentMissing = fromCsv && !csvHasIntent;
+
+  if (intentMissing) {
     root.appendChild(el('div', { class: 'note' },
-      'Intent unavailable for uploaded lists — a static CSV carries no live intent signal. ' +
-      'Connect a live source (ZoomInfo / Apollo) to populate intent.'));
+      'Intent unavailable for this upload — the CSV did not include an intent column. ' +
+      'Add an "intent" / "intent_score" column, or connect a live source (ZoomInfo / Apollo).'));
   }
 
   if (run.status === 'failed' && run.error) {
@@ -628,7 +643,7 @@ function renderDetail() {
         el('h3', {}, 'Sizing'), sizing));
     }
 
-    const targets = renderTargets(structured.top_targets, { fromCsv });
+    const targets = renderTargets(structured.top_targets, { dashIntent: intentMissing });
     if (targets) {
       root.appendChild(el('div', { class: 'section' },
         el('h3', {}, 'Top targets'), targets));

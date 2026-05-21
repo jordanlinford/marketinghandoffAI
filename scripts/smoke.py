@@ -160,6 +160,72 @@ def main() -> None:
         assert "Upload CSV" in ui.text, "/ui body missing upload control"
         print("[OK] /ui returns 200 with the review + upload shell.")
 
+        # ---------------------------------------------------------------------
+        # CSV ingest: real-world headers (business_name, revenue_range,
+        # intent_score). Revenue range must collapse to a midpoint number,
+        # intent must populate per-row, and the data source must advertise
+        # "csv+intent". The honesty rule still holds — see the no-intent
+        # CSV case below, which stays source="csv" with intent_score=0.
+        # ---------------------------------------------------------------------
+        intent_csv = (
+            "business_name,revenue_range,intent_score,Industry\n"
+            "AcmeCo Legal,$1M-$5M,75,Legal Services\n"
+            "MegaFi Holdings,\"1,000,000-5,000,000\",0.42,Financial Services\n"
+            "TinyShop,$500K,12,Retail\n"
+        )
+        up_resp = client.post(
+            "/api/uploads",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("targets.csv", intent_csv.encode("utf-8"), "text/csv")},
+        )
+        assert up_resp.status_code == 200, f"upload failed: {up_resp.status_code} {up_resp.text}"
+        up_json = up_resp.json()
+        assert up_json["row_count"] == 3, up_json
+        preview = up_json["preview"]
+        by_name = {r["name"]: r for r in preview}
+        # $1M-$5M midpoint = $3M
+        assert by_name["AcmeCo Legal"]["revenue_usd"] == 3_000_000.0, by_name["AcmeCo Legal"]
+        # 1,000,000-5,000,000 midpoint = 3,000,000
+        assert by_name["MegaFi Holdings"]["revenue_usd"] == 3_000_000.0, by_name["MegaFi Holdings"]
+        # $500K single value
+        assert by_name["TinyShop"]["revenue_usd"] == 500_000.0, by_name["TinyShop"]
+        # 75 -> 0.75 (looked like 0-100 scale); 0.42 stays; 12 -> 0.12
+        assert by_name["AcmeCo Legal"]["intent_score"] == 0.75, by_name["AcmeCo Legal"]
+        assert by_name["MegaFi Holdings"]["intent_score"] == 0.42, by_name["MegaFi Holdings"]
+        assert by_name["TinyShop"]["intent_score"] == 0.12, by_name["TinyShop"]
+        # The data source must now self-label as csv+intent and pass scores through.
+        intent_up = db.get(Upload, up_json["id"])
+        intent_src = CsvMarketDataSource(intent_up.rows)
+        intent_recs = intent_src.find_companies(icp, limit=10)
+        assert {r.source for r in intent_recs} == {"csv+intent"}, \
+            f"csv with intent column must label source=csv+intent, got {[r.source for r in intent_recs]}"
+        intent_by_name = {r.name: r for r in intent_recs}
+        assert intent_by_name["AcmeCo Legal"].intent_score == 0.75
+        assert intent_by_name["MegaFi Holdings"].intent_score == 0.42
+        print("[OK] CSV ingest: business_name + revenue_range + intent_score "
+              "parsed (midpoints + per-row intent), source=csv+intent.")
+
+        # ---------------------------------------------------------------------
+        # CSV ingest: a CSV with no name column must 400 with the actual
+        # headers listed, so the user can fix it. This is the fixable-error rule.
+        # ---------------------------------------------------------------------
+        bad_csv = "domain,revenue_range,headcount\nexample.com,$1M-$5M,500\n"
+        bad_resp = client.post(
+            "/api/uploads",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("bad.csv", bad_csv.encode("utf-8"), "text/csv")},
+        )
+        assert bad_resp.status_code == 400, f"expected 400, got {bad_resp.status_code}: {bad_resp.text}"
+        detail = bad_resp.json()["detail"]
+        assert "No name column" in detail, detail
+        # The headers actually seen must be echoed back, verbatim, so the user
+        # can spot the typo (the message is the only signal the API gives).
+        for header in ("domain", "revenue_range", "headcount"):
+            assert header in detail, f"header {header!r} missing from 400 detail: {detail}"
+        assert "name" in detail and "company" in detail, \
+            f"name-alias hint missing from 400 detail: {detail}"
+        print("[OK] CSV ingest: missing-name CSV returns 400 listing the seen headers.")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

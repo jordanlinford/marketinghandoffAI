@@ -133,6 +133,9 @@ def crawl_profile(body: CrawlIn, user: User = Depends(current_user)):
         "draft": draft,
         "crawl_status": result.get("status"),
         "crawl_message": result.get("message"),
+        # Structured error for the UI to render a specific, actionable reason
+        # ("HTTP 403 — Cloudflare", "DNS lookup failed", ...). None on success.
+        "crawl_error": result.get("error"),
         "confirmed": False,  # explicit — the caller must PUT to save
     }
 

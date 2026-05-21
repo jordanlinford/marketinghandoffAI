@@ -16,11 +16,15 @@ Scope on purpose:
 """
 from __future__ import annotations
 
+import logging
 import re
+import traceback
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
 
 import httpx
+
+log = logging.getLogger(__name__)
 
 USER_AGENT = "AgentHQ-SetupCrawler/0.1 (+https://github.com/agenthq)"
 PAGE_TIMEOUT_S = 8.0
@@ -147,22 +151,46 @@ def _discover(root_url: str, homepage_links: list[str]) -> list[str]:
     return out
 
 
-def _fetch(client: httpx.Client, url: str) -> tuple[str, str | None]:
-    """Return (html, error). Either error is None and html is content, or
-    error is a short string. Never raises."""
+def _fetch(client: httpx.Client, url: str) -> tuple[str, dict | None]:
+    """Return (html, error). On success `error` is None and `html` is content.
+    On failure `html` is "" and `error` is a structured dict so callers (and
+    the UI) can see the real cause instead of a generic label:
+        {"kind": "timeout"|"transport"|"http_status"|"not_html",
+         "exception_type": str,      # python class name, if any
+         "exception_message": str,   # str(exc) — the actual reason
+         "http_status": int | None,  # set when the server responded
+         "url": str}
+    Never raises. We also log the traceback for transport errors so the dev
+    seeing the UI message can grep the worker/uvicorn logs for the cause."""
     try:
         resp = client.get(url, follow_redirects=True, timeout=PAGE_TIMEOUT_S)
-    except httpx.TimeoutException:
-        return "", "timeout"
+    except httpx.TimeoutException as exc:
+        log.warning("crawl timeout url=%s: %s", url, exc)
+        return "", {"kind": "timeout", "exception_type": exc.__class__.__name__,
+                    "exception_message": str(exc), "http_status": None, "url": url}
     except httpx.HTTPError as exc:
-        return "", f"http_error: {exc.__class__.__name__}"
+        log.warning("crawl httpx error url=%s: %s: %s\n%s",
+                    url, exc.__class__.__name__, exc, traceback.format_exc())
+        return "", {"kind": "transport", "exception_type": exc.__class__.__name__,
+                    "exception_message": str(exc), "http_status": None, "url": url}
     except Exception as exc:  # any other transport error — still must not raise
-        return "", f"error: {exc.__class__.__name__}"
+        log.warning("crawl unexpected error url=%s: %s: %s\n%s",
+                    url, exc.__class__.__name__, exc, traceback.format_exc())
+        return "", {"kind": "transport", "exception_type": exc.__class__.__name__,
+                    "exception_message": str(exc), "http_status": None, "url": url}
     if resp.status_code != 200:
-        return "", f"http_{resp.status_code}"
+        # Capture a snippet of the body too — Cloudflare-style challenges
+        # respond with HTTP 403 + an HTML "Just a moment..." page, and seeing
+        # that snippet is what tells you "bot-protected, not a code bug."
+        body_snip = (resp.text or "")[:200].strip()
+        return "", {"kind": "http_status", "exception_type": None,
+                    "exception_message": f"HTTP {resp.status_code}: {body_snip!r}",
+                    "http_status": resp.status_code, "url": url}
     ctype = resp.headers.get("content-type", "")
     if "html" not in ctype.lower() and "<html" not in resp.text.lower()[:200]:
-        return "", "not_html"
+        return "", {"kind": "not_html", "exception_type": None,
+                    "exception_message": f"content-type={ctype!r}, body did not look like HTML",
+                    "http_status": resp.status_code, "url": url}
     return resp.text, None
 
 
@@ -202,8 +230,14 @@ def crawl(url: str, *, client: httpx.Client | None = None) -> dict:
     try:
         home_html, err = _fetch(client, norm)
         if err:
-            return {"status": "timeout" if err == "timeout" else "http_error",
-                    "url": norm, "message": f"Homepage fetch failed ({err})",
+            # `err` is now a structured dict (see _fetch) — pass its detail
+            # through to the API result so the UI / dev logs can show the
+            # real cause (exception type + message + status) instead of a
+            # generic label.
+            status = "timeout" if err["kind"] == "timeout" else "http_error"
+            return {"status": status, "url": norm,
+                    "message": _format_err("Homepage fetch failed", err),
+                    "error": err,
                     "pages": [], "title": "", "meta_description": "",
                     "headings": [], "text": ""}
         home = _extract(home_html)
@@ -234,6 +268,17 @@ def crawl(url: str, *, client: httpx.Client | None = None) -> dict:
     finally:
         if owns_client:
             client.close()
+
+
+def _format_err(prefix: str, err: dict) -> str:
+    bits = [err.get("kind") or "?"]
+    if err.get("exception_type"):
+        bits.append(err["exception_type"])
+    if err.get("http_status"):
+        bits.append(f"HTTP {err['http_status']}")
+    msg = err.get("exception_message") or ""
+    head = ", ".join(bits)
+    return f"{prefix} ({head}): {msg}" if msg else f"{prefix} ({head})"
 
 
 def _page_payload(url: str, p: _TextExtractor) -> dict:

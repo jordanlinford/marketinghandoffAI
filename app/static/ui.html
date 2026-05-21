@@ -1012,8 +1012,14 @@ function renderProfileHeader() {
     status.textContent = 'Reviewing a draft. Nothing saved until you click Save.';
     draftBanner.style.display = '';
     const tag = state.profileDraft._origin || 'draft';
-    draftBanner.textContent =
-      `Draft from ${tag}. Fields marked "suggested" came from the system — review and Save to confirm.`;
+    // For a successful crawl / CSV inference, keep the "suggested — confirm"
+    // copy. For a failed crawl, _origin already explains the specific reason
+    // and the next move, so we don't add the "suggested" tail (nothing was
+    // actually suggested).
+    const tail = state.profileDraft._crawlOk === false
+      ? ''
+      : ' Fields marked "suggested" came from the system — review and Save to confirm.';
+    draftBanner.textContent = `Draft from ${tag}.${tail}`;
   } else if (state.profile && state.profile.exists) {
     badge.textContent = state.profile.confirmed ? 'confirmed' : 'unconfirmed';
     badge.className = 'badge ' + (state.profile.confirmed ? 'confirmed' : 'draft');
@@ -1043,6 +1049,28 @@ async function loadProfile() {
   renderProfileForm();
 }
 
+// Map the structured `crawl_error` payload (kind, exception_type, http_status,
+// exception_message) into a single human sentence. Returns null when the
+// crawl succeeded; the banner uses null to render the cheerful-path copy.
+function crawlFailureReason(res) {
+  const status = res && res.crawl_status;
+  if (!status || status === 'ok') return null;
+  const err = (res.crawl_error) || {};
+  if (status === 'invalid_url') return 'URL is empty or malformed.';
+  if (status === 'timeout') return 'site timed out before responding.';
+  if (status === 'empty')
+    return 'site responded but had no extractable text (likely a JS-only page).';
+  if (err.http_status === 403)
+    return 'HTTP 403 — the site blocked the crawler (Cloudflare or similar bot challenge).';
+  if (err.http_status === 404) return 'HTTP 404 — page not found at that URL.';
+  if (err.http_status) return `HTTP ${err.http_status} — the site refused the request.`;
+  if (err.exception_type === 'ConnectError')
+    return `couldn't connect (${err.exception_message || 'DNS / network error'}).`;
+  if (err.exception_type)
+    return `${err.exception_type}: ${err.exception_message || 'unknown error'}.`;
+  return res.crawl_message || `unknown crawl error (${status}).`;
+}
+
 async function crawlAndDraft() {
   const url = document.getElementById('crawl-url').value.trim();
   if (!url) { alert('Enter a URL first.'); return; }
@@ -1052,7 +1080,12 @@ async function crawlAndDraft() {
     const res = await api('/api/profile/crawl', {
       method: 'POST', body: JSON.stringify({ url }),
     });
-    res.draft._origin = `crawl of ${url} (${res.crawl_status})`;
+    const reason = crawlFailureReason(res);
+    res.draft._origin = reason
+      ? `crawl of ${url} — couldn't read the site: ${reason} ` +
+        `Edit the form below or try another URL (a press page or docs subdomain often works).`
+      : `crawl of ${url}`;
+    res.draft._crawlOk = !reason;
     state.profileDraft = res.draft;
     state.isDirty = false;
     renderProfileHeader();

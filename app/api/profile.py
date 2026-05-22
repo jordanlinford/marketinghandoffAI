@@ -148,6 +148,11 @@ def crawl_profile(body: CrawlIn, user: User = Depends(current_user)):
         # if every field is blank (model didn't recognize the company OR
         # there's no API key). The UI uses this to pick the right banner.
         draft_source = "knowledge" if (draft.get("source") or {}) else "skeleton"
+    # Lift any LLM failure reason out of the draft and onto the response, so
+    # the UI can say "AI drafting unavailable: credit balance too low" instead
+    # of silently showing a blank skeleton. Keeps the draft itself clean
+    # (profile-shaped). None when the LLM succeeded or wasn't relevant.
+    llm_error = draft.pop("llm_error", None)
     return {
         "draft": draft,
         "crawl_status": result.get("status"),
@@ -158,6 +163,9 @@ def crawl_profile(body: CrawlIn, user: User = Depends(current_user)):
         # Which drafter produced this: "crawl" | "knowledge" | "skeleton".
         # Drives the banner copy in ui.html (honest labeling — see CLAUDE.md).
         "draft_source": draft_source,
+        # {type, message, friendly} when the LLM call failed or was skipped
+        # (no key); None otherwise. friendly is a UI-ready one-liner.
+        "llm_error": llm_error,
         "confirmed": False,  # explicit — the caller must PUT to save
     }
 

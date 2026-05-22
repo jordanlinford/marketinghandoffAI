@@ -439,6 +439,49 @@ def main() -> None:
         print("[OK] /api/profile/crawl on http_403 falls back to knowledge "
               "(draft_source=knowledge, confirmed=false, nothing persisted).")
 
+        # (Knowledge-3) When the LLM call itself FAILS (e.g. Anthropic 400
+        # "credit balance too low"), the endpoint must NOT silently return a
+        # blank skeleton — it must surface the reason in `llm_error` so the UI
+        # can explain it. draft_source falls to "skeleton" (nothing usable),
+        # but llm_error.friendly carries the actionable message.
+        class _FakeLLMError(Exception):
+            pass
+
+        original_fetch = crawl_mod._fetch
+        original_kllm = draft_mod._llm_propose_from_knowledge
+
+        def _raise_credit_error(domain, name, settings):
+            raise _FakeLLMError(
+                "Error code: 400 - Your credit balance is too low to access "
+                "the Anthropic API. Please go to Plans & Billing.")
+
+        crawl_mod._fetch = lambda _client, url: ("", fake_403)
+        draft_mod._llm_propose_from_knowledge = _raise_credit_error
+        try:
+            errd = client.post(
+                "/api/profile/crawl",
+                headers={"X-Dev-User-Email": "jordan@onit.com",
+                         "Content-Type": "application/json"},
+                json={"url": "https://onit.com"},
+            )
+        finally:
+            crawl_mod._fetch = original_fetch
+            draft_mod._llm_propose_from_knowledge = original_kllm
+        assert errd.status_code == 200, errd.text
+        ej = errd.json()
+        assert ej["draft_source"] == "skeleton", \
+            f"LLM failure should yield a skeleton, got {ej.get('draft_source')!r}"
+        assert ej["confirmed"] is False
+        assert ej["llm_error"] is not None, "LLM failure MUST be surfaced, not swallowed"
+        assert ej["llm_error"]["type"] == "_FakeLLMError", ej["llm_error"]
+        assert "credit balance" in ej["llm_error"]["friendly"].lower(), \
+            f"friendly reason should mention the credit balance: {ej['llm_error']}"
+        # Skeleton draft is blank (no source tags) but the website_url is filled.
+        assert ej["draft"]["source"] == {}, ej["draft"]
+        assert ej["draft"]["website_url"] == "https://onit.com", ej["draft"]
+        print("[OK] /api/profile/crawl surfaces llm_error when the LLM call "
+              f"fails ({ej['llm_error']['type']}: credit balance) instead of a silent skeleton.")
+
         # (3) /from-csv with a small customer sample. The inferred ICP's
         # industries must reflect what's IN the sample (here: "SaaS" is the
         # majority, "Insurance" is a singleton — both should appear, "SaaS"

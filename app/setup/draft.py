@@ -50,13 +50,21 @@ def draft_from_crawl(crawl_result: dict) -> dict:
     settings = get_settings()
     base = _minimal_from_crawl(crawl_result)
 
-    if not crawl_result.get("text") or not settings.anthropic_api_key:
+    if not settings.anthropic_api_key:
+        base["llm_error"] = _no_key_note()
         return base
+    if not crawl_result.get("text"):
+        return base  # nothing to send the LLM; not an LLM failure
 
     try:
         proposal = _llm_propose(crawl_result["text"], settings)
-    except Exception:
-        return base  # silent fallback — same discipline as synthesis.py
+    except Exception as exc:
+        # Fall back to the deterministic draft, but DON'T swallow the reason —
+        # surface it so the UI can say "AI enrichment unavailable: <why>"
+        # instead of silently presenting a thinner draft. (See onit.com /
+        # "credit balance too low" incident.)
+        base["llm_error"] = _llm_error_payload(exc)
+        return base
 
     # Merge LLM proposal over the minimal base. We trust the LLM only for the
     # fields it actually returned and that pass shape validation; everything
@@ -93,12 +101,18 @@ def draft_from_knowledge(domain: str, name: str = "") -> dict:
     settings = get_settings()
     base = _minimal_from_domain(domain, name)
     if not settings.anthropic_api_key:
+        base["llm_error"] = _no_key_note()
         return base
 
     try:
         proposal = _llm_propose_from_knowledge(domain, name, settings)
-    except Exception:
-        return base  # silent fallback — same discipline as synthesis.py
+    except Exception as exc:
+        # Surface the real reason. Without this, an account-level failure
+        # (credit balance too low, bad key, rate limit) is indistinguishable
+        # from "the model didn't recognize the company" — both produce a blank
+        # skeleton, and the user can't tell which.
+        base["llm_error"] = _llm_error_payload(exc)
+        return base
 
     merged = dict(base)
     source = dict(base.get("source") or {})
@@ -304,6 +318,36 @@ def _llm_propose_from_knowledge(domain: str, name: str, settings) -> dict:
         f"COMPANY:\n  domain: {domain}\n  name guess: {name or '(unknown)'}"
     )
     return _llm_json_call(prompt, settings)
+
+
+def _no_key_note() -> dict:
+    return {
+        "type": "NoApiKey",
+        "message": "ANTHROPIC_API_KEY is not set",
+        "friendly": "AI drafting is off (no ANTHROPIC_API_KEY) — fill the form manually.",
+    }
+
+
+def _llm_error_payload(exc: Exception) -> dict:
+    """Turn an LLM exception into a structured, surfaceable reason. `friendly`
+    is a one-liner the UI can show directly; `type`/`message` are kept for the
+    dev. We special-case the common operational failures so the user gets an
+    actionable sentence instead of a raw SDK traceback string."""
+    msg = str(exc) or exc.__class__.__name__
+    name = exc.__class__.__name__
+    low = msg.lower()
+    if "credit balance is too low" in low:
+        friendly = ("Anthropic credit balance is too low — add credits at "
+                    "console.anthropic.com to enable AI drafting.")
+    elif name == "RateLimitError" or "rate limit" in low:
+        friendly = "Anthropic rate limit hit — try again in a moment."
+    elif name == "AuthenticationError" or "authentication" in low or "invalid x-api-key" in low:
+        friendly = "Anthropic rejected the API key (authentication failed)."
+    elif name in ("APITimeoutError", "APIConnectionError") or "timeout" in low:
+        friendly = "Couldn't reach the Anthropic API (network/timeout) — try again."
+    else:
+        friendly = f"AI drafting failed ({name}). Fill the form manually."
+    return {"type": name, "message": msg, "friendly": friendly}
 
 
 def _llm_json_call(prompt: str, settings) -> dict:

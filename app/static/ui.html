@@ -1088,14 +1088,23 @@ async function crawlAndDraft() {
       method: 'POST', body: JSON.stringify({ url }),
     });
     const reason = crawlFailureReason(res);
+    // friendly, UI-ready reason the LLM call failed (credit balance, bad key,
+    // rate limit, no key configured) — null when the LLM succeeded. Strip a
+    // trailing period so it inlines cleanly into the banner sentence.
+    const llmReason = res.llm_error && res.llm_error.friendly
+      ? res.llm_error.friendly.replace(/\s*\.\s*$/, '')
+      : null;
     // The API tells us which drafter actually produced this: the real crawl,
-    // the LLM-from-knowledge fallback, or a blank skeleton when the model
-    // didn't recognize the company. Each one gets a distinct banner sentence
-    // so the user knows what they're looking at and what to do next.
+    // the LLM-from-knowledge fallback, or a blank skeleton. Each gets a
+    // distinct banner sentence so the user knows what they're looking at and
+    // what to do next.
     const src = res.draft_source || (res.crawl_status === 'ok' ? 'crawl' : 'skeleton');
     let origin, kind;
     if (src === 'crawl') {
-      origin = `crawl of ${url}`;
+      // Crawl read the HTML. If the LLM enrichment ALSO failed, the draft is
+      // the deterministic title/meta extraction only — say so honestly.
+      origin = `crawl of ${url}` +
+        (llmReason ? ` (AI enrichment unavailable: ${llmReason} — drafted from page text only)` : '');
       kind = 'crawl';
     } else if (src === 'knowledge') {
       origin = `couldn't read ${url} directly` +
@@ -1104,11 +1113,17 @@ async function crawlAndDraft() {
         'Review carefully and Save to confirm.';
       kind = 'knowledge';
     } else {
-      // skeleton: crawl failed AND the LLM didn't recognize the company (or no key).
-      origin = `couldn't read ${url}` +
-        (reason ? ` (${reason})` : '') +
-        " — and we don't have enough on this company to draft anything useful. " +
-        'Fill the form manually.';
+      // skeleton: crawl failed AND there's no usable draft. Distinguish the
+      // two causes — an LLM/account failure is NOT the same as "the model
+      // didn't recognize the company," and conflating them sent us chasing
+      // the wrong thing once already.
+      origin = `couldn't read ${url}` + (reason ? ` (${reason})` : '');
+      if (llmReason) {
+        origin += ` and AI drafting is unavailable: ${llmReason}. Fill the form manually.`;
+      } else {
+        origin += " — and we don't have enough on this company to draft anything useful. " +
+          'Fill the form manually.';
+      }
       kind = 'skeleton';
     }
     res.draft._origin = origin;

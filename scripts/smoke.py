@@ -24,6 +24,7 @@ from app.queue import enqueue
 from app.setup import crawl as crawl_mod
 from app.setup import draft as draft_mod
 from app.setup.draft import draft_from_knowledge
+from app.setup.merge import apply_accepted, merge_profiles
 from app.tenancy import scoped
 from app.worker import run_once
 from scripts.seed import main as seed_main
@@ -512,6 +513,118 @@ def main() -> None:
             "csv-inferred icp must be tagged source=csv"
         print(f"[OK] /api/profile/from-csv inferred ICP "
               f"industries={icp['industries']} min_employees={icp['min_employees']}.")
+
+        # ---------------------------------------------------------------------
+        # Additive merge engine + enrichment diff.
+        # ---------------------------------------------------------------------
+
+        # (Merge-1) Precedence: a knowledge draft layered with a CSV draft.
+        # CSV's real icp.min_employees overrides the knowledge guess; the
+        # knowledge product_summary survives (CSV provided none); a blank CSV
+        # value never wipes an existing non-blank one (icp.titles).
+        knowledge_draft = {
+            "product_summary": "Onit is enterprise legal-ops software.",
+            "value_prop": "One source of truth for in-house legal.",
+            "icp": {"industries": ["Legal Services"], "min_employees": 500,
+                    "min_revenue_usd": None, "regions": [],
+                    "titles": ["General Counsel", "Head of Legal Ops"], "notes": "enterprise"},
+            "competitors": [], "keywords": ["legal operations"], "brand_voice": "",
+            "banned_claims": [], "conversion_goal": "book a demo", "conversion_event": "",
+            "website_url": "https://onit.com", "crawl_summary": "",
+            "source": {"product_summary": "knowledge", "value_prop": "knowledge",
+                       "icp": "knowledge", "keywords": "knowledge", "conversion_goal": "knowledge"},
+        }
+        csv_draft = {
+            "product_summary": "", "value_prop": "",
+            "icp": {"industries": ["Financial Services", "Healthcare"], "min_employees": 1200,
+                    "min_revenue_usd": 250_000_000.0, "regions": [], "titles": [],
+                    "notes": "Inferred from 40 customer accounts."},
+            "competitors": [], "keywords": [], "brand_voice": "", "banned_claims": [],
+            "conversion_goal": "", "conversion_event": "", "website_url": "", "crawl_summary": "",
+            "source": {"icp": "csv"},
+        }
+        merged = merge_profiles(knowledge_draft, csv_draft)["merged"]
+        assert merged["icp"]["min_employees"] == 1200, \
+            f"csv real data must override knowledge guess; got {merged['icp']['min_employees']}"
+        assert merged["icp"]["industries"] == ["Financial Services", "Healthcare"], \
+            "csv industries should win over knowledge"
+        assert merged["icp"]["titles"] == ["General Counsel", "Head of Legal Ops"], \
+            "blank csv titles must NOT wipe knowledge titles"
+        assert merged["product_summary"].startswith("Onit "), \
+            "knowledge product_summary must survive (csv provided none)"
+        assert merged["source"]["icp.min_employees"] == "csv", merged["source"]
+        assert merged["source"]["icp.titles"] == "knowledge", merged["source"]
+        print("[OK] Merge precedence: csv ICP beats knowledge guess; "
+              "knowledge qualitative survives; blank never overwrites.")
+
+        # (Merge-2) Manual is sacred: a field marked source="manual" is NOT
+        # auto-overwritten by a later crawl/csv merge — it becomes a conflict.
+        manual_base = {
+            "product_summary": "My hand-written summary.", "icp": {},
+            "source": {"product_summary": "manual"},
+        }
+        crawl_incoming = {
+            "product_summary": "Crawled/LLM summary.", "icp": {},
+            "source": {"product_summary": "crawl"},
+        }
+        m2 = merge_profiles(manual_base, crawl_incoming)
+        assert m2["merged"]["product_summary"] == "My hand-written summary.", \
+            "manual field must NOT be auto-overwritten"
+        ps_change = [c for c in m2["changes"] if c["field"] == "product_summary"][0]
+        assert ps_change["applied"] is False and ps_change["conflict"] is True, \
+            f"manual override must surface as an un-applied conflict; got {ps_change}"
+        print("[OK] Manual-sacred: later crawl/csv becomes a conflict, not a silent overwrite.")
+
+        # (Merge-3) Enrichment diff against a SAVED profile via the API.
+        # preview-merge returns a per-field changelist; applying only the
+        # ACCEPTED fields updates saved truth, rejected fields stay; confirmed
+        # remains true; tenant isolation holds.
+        #
+        # Onit already has a saved profile (from the PUT round-trip test above:
+        # min_employees=500, product_summary="Legal ops platform...").
+        enrich_incoming = {
+            "icp": {"industries": [], "min_employees": 2500, "min_revenue_usd": None,
+                    "regions": [], "titles": [], "notes": ""},
+            "product_summary": "A totally different summary we will REJECT.",
+            "source": {"icp": "csv", "product_summary": "knowledge"},
+        }
+        pm = client.post(
+            "/api/profile/preview-merge",
+            headers={"X-Dev-User-Email": "jordan@onit.com", "Content-Type": "application/json"},
+            json={"incoming": enrich_incoming, "against": "saved"},
+        )
+        assert pm.status_code == 200, pm.text
+        pmj = pm.json()
+        assert pmj["base_exists"] is True, "preview-merge should see Onit's saved profile"
+        change_fields = {c["field"] for c in pmj["changes"]}
+        assert "icp.min_employees" in change_fields, change_fields
+        assert "product_summary" in change_fields, change_fields
+        # preview-merge must NOT have written anything.
+        still = db.execute(scoped(OrgProfile, onit.id)).scalars().all()
+        assert len(still) == 1 and still[0].icp.get("min_employees") == 500, \
+            "preview-merge must be read-only"
+
+        # Accept ONLY icp.min_employees; reject the product_summary change.
+        saved_now = client.get("/api/profile",
+                               headers={"X-Dev-User-Email": "jordan@onit.com"}).json()
+        final = apply_accepted(saved_now, pmj["changes"], {"icp.min_employees"})
+        applied = client.put(
+            "/api/profile",
+            headers={"X-Dev-User-Email": "jordan@onit.com", "Content-Type": "application/json"},
+            json=final,
+        )
+        assert applied.status_code == 200, applied.text
+        aj = applied.json()
+        assert aj["confirmed"] is True, "saved profile must stay confirmed"
+        assert aj["icp"]["min_employees"] == 2500, \
+            f"accepted change must apply; got {aj['icp']['min_employees']}"
+        assert aj["product_summary"].startswith("Legal ops platform"), \
+            f"rejected change must NOT apply; got {aj['product_summary']!r}"
+        # Tenant isolation: Acme still can't read Onit's (now-enriched) profile.
+        leaked = db.execute(scoped(OrgProfile, other.id)).scalars().all()
+        assert leaked == [], "TENANT LEAK: Acme can read Onit's profile after enrichment"
+        print("[OK] Enrichment diff: accepted field applied, rejected field unchanged, "
+              "confirmed stays true, read-only preview, tenant isolation holds.")
 
         print("[OK] Smoke test passed.")
     finally:

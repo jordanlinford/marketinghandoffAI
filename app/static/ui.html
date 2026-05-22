@@ -241,6 +241,34 @@
     background: #3a2e15; color: #f5d99a; padding: 10px 12px; border-radius: 6px;
     border: 1px solid #6b5a2b; font-size: 13px; margin-bottom: 12px;
   }
+  /* per-field source chips */
+  .badge.src-manual    { background: #14323a; color: #8fe0f5; }
+  .badge.src-csv       { background: #143a26; color: #7ce0a3; }
+  .badge.src-knowledge { background: #3a2e15; color: #f5d99a; }
+  .badge.src-crawl     { background: #3a2e15; color: #f5d99a; }
+  .field .conflict-note {
+    font-size: 11px; color: #f5a623; margin-top: 2px;
+  }
+  .field.conflict input, .field.conflict textarea { border-color: #8a5a1a; }
+  /* enrichment diff panel */
+  .diff-panel {
+    background: #1a2230; border: 1px solid var(--accent); border-radius: 8px;
+    padding: 14px; margin: 12px 0;
+  }
+  .diff-panel h3 { margin: 0 0 4px; font-size: 14px; color: var(--text);
+    text-transform: none; letter-spacing: 0; }
+  .diff-panel .warn-line { color: var(--warn); font-size: 12px; margin-bottom: 10px; }
+  .diff-row {
+    display: grid; grid-template-columns: 28px 1fr; gap: 8px; align-items: start;
+    padding: 8px 0; border-top: 1px solid var(--border);
+  }
+  .diff-row .field-name { font-weight: 600; font-size: 13px; }
+  .diff-row .vals { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .diff-row .vals .old { color: #d99; text-decoration: line-through; }
+  .diff-row .vals .new { color: #7ce0a3; }
+  .diff-row.is-conflict { background: #2a2212; border-radius: 6px; }
+  .diff-actions { display: flex; align-items: center; justify-content: space-between;
+    margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
 </style>
 </head>
 <body>
@@ -307,6 +335,7 @@
     </div>
 
     <div id="draft-banner" class="draft-banner" style="display:none;"></div>
+    <div id="diff-panel" class="diff-panel" style="display:none;"></div>
 
     <div class="setup-paths">
       <div class="setup-path">
@@ -359,9 +388,11 @@ const state = {
   uploads: [],
   selectedUploadId: '',  // '' = stub
   // Setup view:
-  profile: null,         // server-confirmed profile (or empty skeleton)
-  profileDraft: null,    // unsaved draft from crawl / from-csv / edits
-  isDirty: false,        // set whenever a draft is loaded or user edits
+  profile: null,         // server-saved profile (or empty skeleton)
+  working: null,         // the working profile being edited (layered drafts + edits)
+  conflicts: {},         // {dottedField: change} surfaced inline in flow 1 (no saved profile)
+  diff: null,            // {changes, accepted:Set, draftLabel} for the flow-2 enrichment panel
+  isDirty: false,        // working differs from the saved profile
 };
 
 async function api(path, opts = {}) {
@@ -887,9 +918,14 @@ function _set(obj, dotted, value) {
   }
   cur[parts[parts.length - 1]] = value;
 }
-function _sourceKeyOf(field) {
-  // source[] keys are top-level field names (the whole icp object is "icp").
-  return field.key.split('.')[0];
+// Read a field's source tag. The merge engine emits per-subfield icp keys
+// ("icp.min_employees"); the draft endpoints emit a single umbrella "icp".
+// Try the dotted key first, then fall back to the top-level segment.
+function _readSource(sourceMap, fieldKey) {
+  const m = sourceMap || {};
+  if (fieldKey in m) return m[fieldKey];
+  if (fieldKey.includes('.')) return m[fieldKey.split('.')[0]];
+  return m[fieldKey];
 }
 function _toFieldValue(field, raw) {
   if (raw == null) return '';
@@ -921,23 +957,30 @@ function _fromFieldValue(field, str) {
   return s;
 }
 
+const SOURCE_LABEL = { manual: 'manual', form: 'manual', csv: 'csv',
+  knowledge: 'knowledge', crawl: 'knowledge', llm: 'knowledge' };
+
+function _fmtVal(field, v) {
+  const s = _toFieldValue(field, v);
+  return s === '' ? '(blank)' : s;
+}
+
 function renderProfileForm() {
   const root = document.getElementById('profile-form');
   root.innerHTML = '';
-  const data = state.profileDraft || state.profile || {};
+  const data = state.working || state.profile || {};
   const source = data.source || {};
 
   for (const field of PROFILE_FIELDS) {
     const wrap = el('div', { class: 'field' + (field.full ? ' full' : '') });
-    const sourceTag = source[_sourceKeyOf(field)];
-    const isSuggested = !!sourceTag && sourceTag !== 'form';
-    if (isSuggested) wrap.classList.add('suggested');
+    const rawTag = _readSource(source, field.key);
+    const tagClass = SOURCE_LABEL[(rawTag || '').toLowerCase()];
+    const conflict = state.conflicts[field.key];
 
     const labelKids = [field.label];
-    if (isSuggested) {
-      labelKids.push(el('span', { class: 'badge suggested',
-        title: `Source: ${sourceTag}. Review and Save to confirm.` },
-        `suggested · ${sourceTag}`));
+    if (tagClass) {
+      labelKids.push(el('span', { class: `badge src-${tagClass}`,
+        title: `Current value source: ${tagClass}` }, tagClass));
     }
     if (field.hint) {
       labelKids.push(el('span', { style: 'color:var(--muted); font-weight:400; ' +
@@ -956,88 +999,82 @@ function renderProfileForm() {
     }
     input.dataset.key = field.key;
     input.dataset.kind = field.kind;
-    input.addEventListener('input', () => { state.isDirty = true; updateSaveStatus(); });
+    // Edits go straight into the working profile and claim source="manual"
+    // (manual is sacred — a later crawl/CSV won't silently overwrite it).
+    input.addEventListener('input', () => {
+      _set(state.working, field.key, _fromFieldValue(field, input.value));
+      state.working.source = state.working.source || {};
+      state.working.source[field.key] = 'manual';
+      delete state.conflicts[field.key];
+      state.isDirty = true;
+      // Refresh just this field's chip/conflict styling without losing focus.
+      wrap.classList.remove('conflict');
+      const note = wrap.querySelector('.conflict-note');
+      if (note) note.remove();
+      const chip = wrap.querySelector('.badge');
+      if (chip) { chip.className = 'badge src-manual'; chip.textContent = 'manual';
+        chip.title = 'Current value source: manual'; }
+      updateSaveStatus();
+    });
     wrap.appendChild(input);
+
+    // Flow-1 conflict surfaced inline: "knowledge: 500 → csv: 1,200".
+    if (conflict) {
+      wrap.classList.add('conflict');
+      const oldS = SOURCE_LABEL[(conflict.old_source || '').toLowerCase()] || 'current';
+      const newS = SOURCE_LABEL[(conflict.new_source || '').toLowerCase()] || 'new';
+      wrap.appendChild(el('div', { class: 'conflict-note' },
+        `${oldS}: ${_fmtVal(field, conflict.old_value)} → ${newS}: ${_fmtVal(field, conflict.new_value)} ` +
+        '(kept your value — edit to take the new one)'));
+    }
     root.appendChild(wrap);
   }
   updateSaveStatus();
 }
 
-function collectFormValues() {
-  const out = {
-    icp: { industries: [], min_employees: null, min_revenue_usd: null,
-           regions: [], titles: [], notes: '' },
-  };
-  // Preserve fields the form doesn't surface (crawl_summary, source) from
-  // whichever payload the form was built from.
-  const base = state.profileDraft || state.profile || {};
-  out.crawl_summary = base.crawl_summary || '';
-  out.source = Object.assign({}, base.source || {});
-  // Anything the user actually edited turns into a "form" source mark so the
-  // UI stops flagging it as suggested next time around.
-  const inputs = document.querySelectorAll('#profile-form [data-key]');
-  for (const inp of inputs) {
-    const key = inp.dataset.key;
-    const field = { key, kind: inp.dataset.kind };
-    const value = _fromFieldValue(field, inp.value);
-    _set(out, key, value);
-    if (state.isDirty) out.source[_sourceKeyOf(field)] = 'form';
-  }
-  return out;
-}
-
 function updateSaveStatus() {
   const s = document.getElementById('save-status');
   const p = state.profile;
-  if (state.profileDraft) {
-    s.textContent = 'Draft loaded — not saved yet. Review fields, then Save.';
+  const nConflicts = Object.keys(state.conflicts).length;
+  if (nConflicts) {
+    s.textContent = `${nConflicts} field conflict(s) shown inline — edit to resolve, then Save.`;
   } else if (state.isDirty) {
     s.textContent = 'Unsaved changes.';
   } else if (p && p.exists) {
-    const when = p.updated_at ? fmtTime(p.updated_at) : '';
-    s.textContent = `Last saved ${when}.`;
+    s.textContent = `Last saved ${p.updated_at ? fmtTime(p.updated_at) : ''}.`;
   } else {
     s.textContent = 'No profile saved yet.';
   }
 }
 
-function renderProfileHeader() {
+// Deep-ish clone good enough for our plain-JSON profile shape.
+function _cloneProfile(p) { return JSON.parse(JSON.stringify(p || {})); }
+
+function renderProfileHeader(bannerText) {
   const status = document.getElementById('profile-status');
   const badge = document.getElementById('profile-state-badge');
   const draftBanner = document.getElementById('draft-banner');
+  const saved = state.profile;
+  const savedExists = saved && saved.exists && saved.confirmed;
 
-  if (state.profileDraft) {
-    badge.textContent = 'draft';
-    badge.className = 'badge draft';
-    status.textContent = 'Reviewing a draft. Nothing saved until you click Save.';
-    draftBanner.style.display = '';
-    const tag = state.profileDraft._origin || 'draft';
-    const kind = state.profileDraft._draftKind;
-    // Three banner shapes:
-    //  - crawl / csv: there ARE real suggestions to review.
-    //  - knowledge:   the banner already explains origin + next step; the
-    //                 "suggested — confirm" tail still applies (LLM-from-
-    //                 knowledge guesses are suggestions, just honestly labeled).
-    //  - skeleton:    no suggestions at all; don't pretend otherwise.
-    let tail = ' Fields marked "suggested" came from the system — review and Save to confirm.';
-    if (kind === 'skeleton') tail = '';
-    if (kind === 'knowledge' || kind === 'skeleton') {
-      // The origin string is a full sentence; don't prefix "Draft from".
-      draftBanner.textContent = `${tag}${tail}`;
-    } else {
-      draftBanner.textContent = `Draft from ${tag}.${tail}`;
-    }
-  } else if (state.profile && state.profile.exists) {
-    badge.textContent = state.profile.confirmed ? 'confirmed' : 'unconfirmed';
-    badge.className = 'badge ' + (state.profile.confirmed ? 'confirmed' : 'draft');
-    status.textContent = state.profile.confirmed
-      ? 'A confirmed profile is on file. Edit any field and Save to update.'
-      : 'Profile exists but is not confirmed.';
-    draftBanner.style.display = 'none';
+  if (savedExists) {
+    badge.textContent = 'confirmed';
+    badge.className = 'badge confirmed';
+    status.textContent = state.isDirty
+      ? 'Editing a confirmed profile — Save to update saved truth. New inputs open an accept/reject diff.'
+      : 'A confirmed profile is on file. Edit a field, or run a new input to enrich it (you\'ll review changes).';
   } else {
-    badge.textContent = 'empty';
-    badge.className = 'badge pending';
-    status.textContent = 'No profile yet. Fill the form manually, crawl your site, or upload a customer sample.';
+    badge.textContent = state.isDirty ? 'draft' : 'empty';
+    badge.className = 'badge ' + (state.isDirty ? 'draft' : 'pending');
+    status.textContent = state.isDirty
+      ? 'Working draft — stack more inputs or edit, then Save once. Nothing is saved yet.'
+      : 'No profile yet. Stack inputs (crawl, customer CSV) and/or fill the form, then Save.';
+  }
+
+  if (bannerText) {
+    draftBanner.style.display = '';
+    draftBanner.textContent = bannerText;
+  } else {
     draftBanner.style.display = 'none';
   }
 }
@@ -1050,8 +1087,13 @@ async function loadProfile() {
       `<span class="err">Failed to load profile: ${e.message}</span>`;
     return;
   }
-  state.profileDraft = null;
+  // The working profile starts as a copy of saved truth (or the empty
+  // skeleton). Inputs layer onto THIS; Save PUTs it back.
+  state.working = _cloneProfile(state.profile);
+  state.conflicts = {};
+  state.diff = null;
   state.isDirty = false;
+  closeDiffPanel();
   renderProfileHeader();
   renderProfileForm();
 }
@@ -1088,50 +1130,26 @@ async function crawlAndDraft() {
       method: 'POST', body: JSON.stringify({ url }),
     });
     const reason = crawlFailureReason(res);
-    // friendly, UI-ready reason the LLM call failed (credit balance, bad key,
-    // rate limit, no key configured) — null when the LLM succeeded. Strip a
-    // trailing period so it inlines cleanly into the banner sentence.
     const llmReason = res.llm_error && res.llm_error.friendly
       ? res.llm_error.friendly.replace(/\s*\.\s*$/, '')
       : null;
-    // The API tells us which drafter actually produced this: the real crawl,
-    // the LLM-from-knowledge fallback, or a blank skeleton. Each gets a
-    // distinct banner sentence so the user knows what they're looking at and
-    // what to do next.
     const src = res.draft_source || (res.crawl_status === 'ok' ? 'crawl' : 'skeleton');
-    let origin, kind;
+    let label;
     if (src === 'crawl') {
-      // Crawl read the HTML. If the LLM enrichment ALSO failed, the draft is
-      // the deterministic title/meta extraction only — say so honestly.
-      origin = `crawl of ${url}` +
-        (llmReason ? ` (AI enrichment unavailable: ${llmReason} — drafted from page text only)` : '');
-      kind = 'crawl';
+      label = `crawl of ${url}` +
+        (llmReason ? ` (AI enrichment unavailable: ${llmReason} — page text only)` : '');
     } else if (src === 'knowledge') {
-      origin = `couldn't read ${url} directly` +
-        (reason ? ` (${reason})` : '') +
-        ' — drafted this from what we already know about the company. ' +
-        'Review carefully and Save to confirm.';
-      kind = 'knowledge';
+      label = `knowledge draft for ${url}` + (reason ? ` (couldn't read site: ${reason})` : '');
     } else {
-      // skeleton: crawl failed AND there's no usable draft. Distinguish the
-      // two causes — an LLM/account failure is NOT the same as "the model
-      // didn't recognize the company," and conflating them sent us chasing
-      // the wrong thing once already.
-      origin = `couldn't read ${url}` + (reason ? ` (${reason})` : '');
-      if (llmReason) {
-        origin += ` and AI drafting is unavailable: ${llmReason}. Fill the form manually.`;
-      } else {
-        origin += " — and we don't have enough on this company to draft anything useful. " +
-          'Fill the form manually.';
-      }
-      kind = 'skeleton';
+      label = `crawl of ${url}` + (reason ? ` (${reason})` : '') +
+        (llmReason ? ` — AI drafting unavailable: ${llmReason}` : ' — nothing usable returned');
     }
-    res.draft._origin = origin;
-    res.draft._draftKind = kind;
-    state.profileDraft = res.draft;
-    state.isDirty = false;
-    renderProfileHeader();
-    renderProfileForm();
+    if (src === 'skeleton') {
+      // Nothing to layer — just inform; keep the working profile as-is.
+      renderProfileHeader(`Couldn't enrich from ${url}: ${label}. Fill the form manually.`);
+      return;
+    }
+    await applyIncoming(res.draft, label);
   } catch (e) {
     alert(`Crawl failed: ${e.message}`);
   } finally {
@@ -1154,11 +1172,7 @@ async function sampleAndDraft() {
     });
     if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
     const json = await res.json();
-    json.draft._origin = `customer sample (${json.sample_rows} rows)`;
-    state.profileDraft = json.draft;
-    state.isDirty = false;
-    renderProfileHeader();
-    renderProfileForm();
+    await applyIncoming(json.draft, `customer sample (${json.sample_rows} rows)`);
     input.value = '';
   } catch (e) {
     alert(`CSV inference failed: ${e.message}`);
@@ -1167,17 +1181,135 @@ async function sampleAndDraft() {
   }
 }
 
+// Layer a new draft onto the working profile (flow 1) OR, if a confirmed
+// profile already exists, open the per-field accept/reject diff (flow 2).
+// Both go through the SAME server merge engine (/preview-merge).
+async function applyIncoming(incoming, label) {
+  const savedExists = state.profile && state.profile.exists && state.profile.confirmed;
+  if (savedExists) {
+    const res = await api('/api/profile/preview-merge', {
+      method: 'POST',
+      body: JSON.stringify({ incoming, against: 'saved' }),
+    });
+    if (!res.changes.length) {
+      renderProfileHeader(`${label}: no changes vs your saved profile.`);
+      return;
+    }
+    // Default: accept non-conflicts, leave conflicts for an explicit choice.
+    const accepted = new Set(res.changes.filter(c => !c.conflict).map(c => c.field));
+    state.diff = { changes: res.changes, accepted, label };
+    renderDiffPanel();
+  } else {
+    // First-time layering: merge against the current working draft.
+    const res = await api('/api/profile/preview-merge', {
+      method: 'POST',
+      body: JSON.stringify({ incoming, against: 'working', base: state.working }),
+    });
+    state.working = res.merged;
+    // Surface conflicts inline (manual-sacred or equal-tier ties weren't auto-applied).
+    state.conflicts = {};
+    for (const c of res.changes) if (c.conflict) state.conflicts[c.field] = c;
+    state.isDirty = true;
+    const applied = res.changes.filter(c => c.applied).length;
+    const conf = Object.keys(state.conflicts).length;
+    renderProfileHeader(
+      `Layered ${label}: ${applied} field(s) filled/updated` +
+      (conf ? `, ${conf} conflict(s) shown inline (your value kept).` : '.') +
+      ' Stack more inputs or Save once.');
+    renderProfileForm();
+  }
+}
+
+function closeDiffPanel() {
+  const panel = document.getElementById('diff-panel');
+  panel.style.display = 'none';
+  panel.innerHTML = '';
+}
+
+function _fieldLabel(fieldKey) {
+  const f = PROFILE_FIELDS.find(x => x.key === fieldKey);
+  return f ? f.label : fieldKey;
+}
+
+function renderDiffPanel() {
+  const panel = document.getElementById('diff-panel');
+  panel.innerHTML = '';
+  panel.style.display = '';
+  const { changes, accepted, label } = state.diff;
+
+  panel.appendChild(el('h3', {}, `Enrich saved profile — ${label}`));
+  panel.appendChild(el('div', { class: 'warn-line' },
+    'This updates your SAVED profile. Review each change; only accepted fields are written.'));
+
+  for (const ch of changes) {
+    const field = PROFILE_FIELDS.find(x => x.key === ch.field) || { key: ch.field, kind: 'text' };
+    const row = el('div', { class: 'diff-row' + (ch.conflict ? ' is-conflict' : '') });
+    const cb = el('input', { type: 'checkbox' });
+    cb.checked = accepted.has(ch.field);
+    cb.addEventListener('change', () => {
+      if (cb.checked) accepted.add(ch.field); else accepted.delete(ch.field);
+      applyBtn.textContent = `Apply ${accepted.size} accepted change(s)`;
+    });
+    const newS = SOURCE_LABEL[(ch.new_source || '').toLowerCase()] || 'new';
+    const right = el('div', {},
+      el('div', { class: 'field-name' },
+        _fieldLabel(ch.field),
+        ch.conflict ? el('span', { class: 'badge draft', style: 'margin-left:8px;' }, 'conflict') : null),
+      el('div', { class: 'vals' },
+        el('span', { class: 'old' }, _fmtVal(field, ch.old_value)),
+        el('span', {}, '  →  '),
+        el('span', { class: 'new' }, _fmtVal(field, ch.new_value)),
+        el('span', {}, `   (${newS})`)),
+    );
+    row.appendChild(el('label', { style: 'display:flex; align-items:center;' }, cb));
+    row.appendChild(right);
+    panel.appendChild(row);
+  }
+
+  const applyBtn = el('button', {}, `Apply ${accepted.size} accepted change(s)`);
+  applyBtn.addEventListener('click', applyDiff);
+  const cancel = el('button', { class: 'ghost', onclick: () => { state.diff = null; closeDiffPanel(); } },
+    'Cancel');
+  panel.appendChild(el('div', { class: 'diff-actions' }, cancel, applyBtn));
+}
+
+async function applyDiff() {
+  const { changes, accepted } = state.diff;
+  // Build the final from SAVED truth + accepted changes only.
+  const base = _cloneProfile(state.profile);
+  base.icp = base.icp || {};
+  for (const ch of changes) {
+    if (!accepted.has(ch.field)) continue;
+    _set(base, ch.field, ch.new_value);
+    base.source = base.source || {};
+    base.source[ch.field] = ch.new_source;
+  }
+  try {
+    state.profile = await api('/api/profile', { method: 'PUT', body: JSON.stringify(base) });
+    state.working = _cloneProfile(state.profile);
+    state.conflicts = {};
+    state.diff = null;
+    state.isDirty = false;
+    closeDiffPanel();
+    renderProfileHeader(`Applied ${accepted.size} change(s) to your saved profile.`);
+    renderProfileForm();
+  } catch (e) {
+    alert(`Apply failed: ${e.message}`);
+  }
+}
+
 async function saveProfile() {
+  if (state.diff) { alert('Resolve the enrichment diff above first (Apply or Cancel).'); return; }
   const btn = document.getElementById('save-profile-btn');
-  const body = collectFormValues();
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
     state.profile = await api('/api/profile', {
-      method: 'PUT', body: JSON.stringify(body),
+      method: 'PUT', body: JSON.stringify(state.working),
     });
-    state.profileDraft = null;
+    state.working = _cloneProfile(state.profile);
+    state.conflicts = {};
     state.isDirty = false;
-    renderProfileHeader();
+    renderProfileHeader('Profile saved.');
     renderProfileForm();
   } catch (e) {
     alert(`Save failed: ${e.message}`);
@@ -1220,10 +1352,11 @@ document.getElementById('upload-select').addEventListener('change', (ev) => {
 document.getElementById('tab-runs').addEventListener('click', () => switchView('runs'));
 document.getElementById('tab-setup').addEventListener('click', () => switchView('setup'));
 document.getElementById('path-manual').addEventListener('click', () => {
-  // Discard any pending draft, start from the saved profile (or empty).
-  state.profileDraft = null;
-  state.isDirty = false;
-  renderProfileHeader();
+  // "Fill in manually" just closes any open enrichment diff and lets the user
+  // edit the working form directly. It does NOT wipe layered-in work.
+  state.diff = null;
+  closeDiffPanel();
+  renderProfileHeader(state.isDirty ? undefined : 'Edit the form below, then Save.');
   renderProfileForm();
 });
 document.getElementById('crawl-btn').addEventListener('click', crawlAndDraft);

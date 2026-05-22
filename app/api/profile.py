@@ -31,6 +31,7 @@ from app.setup.crawl import crawl as crawl_site
 from app.setup.draft import (
     draft_from_crawl, draft_from_csv_rows, draft_from_knowledge, name_from_domain,
 )
+from app.setup.merge import merge_profiles
 from app.tenancy import scoped
 
 router = APIRouter(prefix="/api/profile", tags=["profile"])
@@ -60,6 +61,18 @@ class ProfileIn(BaseModel):
 
 class CrawlIn(BaseModel):
     url: str
+
+
+class PreviewMergeIn(BaseModel):
+    """Compute a per-field merge diff WITHOUT writing anything.
+      * against="saved"   → diff the incoming draft against the org's saved
+                            profile (enrichment flow 2). base is ignored.
+      * against="working" → diff against the client's current working draft
+                            (first-time layering flow 1); base carries it.
+    """
+    incoming: dict
+    against: str = "saved"
+    base: dict | None = None
 
 
 def _empty_payload(org_id: str) -> dict:
@@ -120,6 +133,30 @@ def put_profile(body: ProfileIn,
     db.commit()
     db.refresh(prof)
     return _serialize(prof)
+
+
+@router.post("/preview-merge")
+def preview_merge(body: PreviewMergeIn,
+                  user: User = Depends(current_user),
+                  db: Session = Depends(get_db)):
+    """Read-only: compute the per-field diff of layering `incoming` onto the
+    base (saved profile or the client's working draft). Writes NOTHING — PUT
+    remains the only writer of confirmed truth. The client renders the
+    changelist for accept/reject and PUTs the result of the accepted subset."""
+    if body.against == "saved":
+        prof = _get_profile(db, user.org_id)
+        base = _serialize(prof) if prof else _empty_payload(user.org_id)
+        base_exists = prof is not None and bool(prof.confirmed)
+    else:  # "working" — layering during first-time setup
+        base = body.base or _empty_payload(user.org_id)
+        base_exists = False
+    result = merge_profiles(base, body.incoming or {})
+    return {
+        "merged": result["merged"],
+        "changes": result["changes"],
+        "against": body.against,
+        "base_exists": base_exists,
+    }
 
 
 @router.post("/crawl")

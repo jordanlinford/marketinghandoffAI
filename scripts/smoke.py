@@ -16,6 +16,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app.agents import synthesis as synthesis_mod
 from app.data_sources.csv import CsvMarketDataSource
 from app.db import SessionLocal, create_all
 from app.main import app
@@ -33,6 +34,16 @@ from scripts.seed import main as seed_main
 def main() -> None:
     create_all()
     seed_main()
+
+    # Hermetic test gate: stub the market_intel narrative LLM call the same way
+    # the profile tests stub theirs (lowest-level _llm_* helper). With
+    # ANTHROPIC_API_KEY loaded, synthesize_brief() would otherwise make a real
+    # Anthropic request during the two market_intel runs below — making smoke
+    # depend on network + credits. Returning the deterministic template (no
+    # network) keeps the spine identical and the test self-contained.
+    synthesis_mod._llm_narrative = lambda structured, org_name, settings: (
+        synthesis_mod._template_narrative(structured, org_name), 0.0)
+
     db = SessionLocal()
     try:
         onit = db.execute(select(Org).where(Org.domain == "onit.com")).scalar_one()

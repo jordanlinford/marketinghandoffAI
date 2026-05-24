@@ -62,6 +62,12 @@ class AgentContext:
     brand_guide: dict[str, Any] = field(default_factory=dict)
     icp: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
+    # The org's CONFIRMED OrgProfile (ICP, product, competitors, keywords),
+    # loaded by the worker via scoped() and handed in as a plain dict — the
+    # agent never touches the DB. None when no confirmed profile exists, in
+    # which case agents fall back to seed config. In-agent precedence is
+    # explicit: confirmed org_profile > seed config.
+    org_profile: dict[str, Any] | None = None
     prior_artifacts: list[dict[str, Any]] = field(default_factory=list)
     get_market_data: Callable[[], Any] | None = None
     log: Callable[[str], None] = lambda msg: None

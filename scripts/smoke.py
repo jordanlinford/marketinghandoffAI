@@ -657,6 +657,119 @@ def main() -> None:
         print("[OK] Enrichment diff: accepted field applied, rejected field unchanged, "
               "confirmed stays true, read-only preview, tenant isolation holds.")
 
+        # ---------------------------------------------------------------------
+        # Profile-into-agent wiring — three checks:
+        #   (1) A run for an org WITH a confirmed profile produces a brief whose
+        #       ICP/targets reflect the PROFILE'S ICP, not the seed config.
+        #   (2) A run for an org with NO profile still works on seed defaults
+        #       (no regression).
+        #   (3) Tenant isolation: a run only ever loads its OWN org's profile
+        #       via scoped() — one org's confirmed profile never bleeds into
+        #       another org's run.
+        #
+        # Determinism: the stub data source draws each company's industry from
+        # icp["industries"], so a single-industry profile makes EVERY target's
+        # industry that value. We give the profiled org a profile whose
+        # industries are disjoint from its seed config, so "did the run use the
+        # profile or the seed?" is a clean, non-probabilistic assertion.
+        # ---------------------------------------------------------------------
+        SEED_INDS = ["Legal Services", "Financial Services"]
+        seed_cfg = {"icp": {"category": "legal operations", "industries": SEED_INDS,
+                            "min_employees": 500, "keyword_seeds": ["legal ops"],
+                            "channels": ["LinkedIn"]},
+                    "company_limit": 40, "keyword_limit": 20,
+                    "sam_min_fit": 0.6, "som_capture_rate": 0.08}
+
+        def _register_org(name: str, domain: str) -> tuple[Org, AgentRegistration]:
+            o = Org(name=name, domain=domain)
+            db.add(o)
+            db.commit()
+            db.refresh(o)
+            r = AgentRegistration(org_id=o.id, key="market_intel",
+                                  display_name="Market intelligence", kind="builtin",
+                                  enabled=True, config=dict(seed_cfg))
+            db.add(r)
+            db.commit()
+            db.refresh(r)
+            return o, r
+
+        def _run_market_intel(org_id: str, reg_id: str) -> Artifact:
+            r = Run(org_id=org_id, agent_registration_id=reg_id, agent_key="market_intel",
+                    trigger="manual", status="queued")
+            db.add(r)
+            db.commit()
+            db.refresh(r)
+            enqueue(db, org_id, "run_agent", {"run_id": r.id})
+            assert run_once() is True, "worker did not pick up the profile-wiring job"
+            db.refresh(r)
+            assert r.status == "succeeded", f"run failed: {r.error}"
+            return db.execute(
+                scoped(Artifact, org_id).where(Artifact.run_id == r.id)).scalar_one()
+
+        # Profiled Co: a CONFIRMED profile whose ICP (Aerospace) is disjoint from
+        # its seed config (Legal/Financial). The profile must win.
+        profiled, p_reg = _register_org("Profiled Co", "profiled.example")
+        db.add(OrgProfile(
+            org_id=profiled.id, confirmed=True,
+            product_summary="Marketplace for certified aerospace parts.",
+            value_prop="Source flight-ready parts in days, not months.",
+            icp={"industries": ["Aerospace"], "min_employees": 1000,
+                 "min_revenue_usd": None, "regions": [], "titles": ["VP Supply Chain"],
+                 "notes": "Tier-1 aerospace suppliers"},
+            competitors=[{"name": "SkyParts", "url": "https://skyparts.example"}],
+            keywords=["aerospace sourcing", "aircraft parts"],
+            conversion_goal="book a demo"))
+        db.commit()
+
+        # Seedonly Co: identical seed config, NO profile at all.
+        seedonly, s_reg = _register_org("Seedonly Co", "seedonly.example")
+
+        # (1) Profiled run reflects the profile's ICP, not the seed config.
+        p_art = _run_market_intel(profiled.id, p_reg.id)
+        p_struct = p_art.body["structured"]
+        assert p_struct["inputs"]["source"] == "org_profile", \
+            f"profiled run must report source=org_profile, got {p_struct['inputs']}"
+        p_target_inds = {t["industry"] for t in p_struct["top_targets"]}
+        assert p_target_inds == {"Aerospace"}, \
+            f"profile ICP must drive targets; got industries {p_target_inds}"
+        assert not (p_target_inds & set(SEED_INDS)), \
+            "seed industries leaked into a run that has a confirmed profile"
+        assert "SkyParts" in p_struct["inputs"]["competitors"], \
+            f"profile competitors must flow into the brief; got {p_struct['inputs']['competitors']}"
+        assert any(c["source"] == "Org profile (confirmed)" for c in p_art.citations), \
+            f"profiled run must cite the org profile; got {[c['source'] for c in p_art.citations]}"
+        print(f"[OK] Profile-into-agent (1): confirmed profile drives the brief "
+              f"(targets all in {p_target_inds}, competitors cited, source=org_profile).")
+
+        # (2) No-profile run falls back to seed defaults, unchanged.
+        s_art = _run_market_intel(seedonly.id, s_reg.id)
+        s_struct = s_art.body["structured"]
+        assert s_struct["inputs"]["source"] == "seed", \
+            f"no-profile run must report source=seed, got {s_struct['inputs']}"
+        s_target_inds = {t["industry"] for t in s_struct["top_targets"]}
+        assert s_target_inds <= set(SEED_INDS), \
+            f"seed-only run must use seed industries; got {s_target_inds}"
+        assert "Aerospace" not in s_target_inds, \
+            "no-profile run must not use any profile data"
+        assert any(c["source"] == "Seed defaults" for c in s_art.citations), \
+            f"no-profile run must cite seed defaults; got {[c['source'] for c in s_art.citations]}"
+        print(f"[OK] Profile-into-agent (2): no profile -> seed defaults unchanged "
+              f"(targets in {s_target_inds}, source=seed).")
+
+        # (3) Tenant isolation of profile loading. Seedonly's run produced a
+        # seed brief even though Profiled Co's confirmed profile sits in the
+        # same DB — proof the worker loads each run's profile strictly via
+        # scoped(). Assert the same at the DB layer (the canonical guard).
+        assert db.execute(scoped(OrgProfile, seedonly.id)).scalars().all() == [], \
+            "Seedonly must have no profile of its own"
+        own = db.execute(scoped(OrgProfile, profiled.id)).scalars().all()
+        assert len(own) == 1 and own[0].icp["industries"] == ["Aerospace"], \
+            "Profiled Co must see exactly its own profile via scoped()"
+        assert "Aerospace" not in s_target_inds, \
+            "TENANT LEAK: another org's profile bled into Seedonly's run"
+        print("[OK] Profile-into-agent (3): a run loads only its own org's profile "
+              "via scoped() — no cross-tenant bleed.")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

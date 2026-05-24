@@ -23,8 +23,18 @@ class MarketIntelAgent(Agent):
 
     def run(self, ctx: AgentContext) -> AgentResult:
         log = ctx.log
-        icp = ctx.icp or {}
         log(f"Starting market-intel run for {ctx.org_name}")
+
+        # Input precedence (do not drift): a CONFIRMED OrgProfile, loaded by the
+        # worker and handed in via ctx.org_profile, wins over the seed agent
+        # config field by field. With no confirmed profile, ctx.org_profile is
+        # None and we use the seed config unchanged (no regression). The agent
+        # reads the profile ONLY through ctx — never the DB.
+        icp, product_summary, competitors, inputs_source = self._effective_inputs(
+            ctx.icp or {}, ctx.org_profile)
+        log("Using confirmed org profile over seed config"
+            if inputs_source == "org_profile"
+            else "No confirmed org profile — using seed agent config")
 
         ds = ctx.get_market_data() if ctx.get_market_data else StubMarketDataSource()
 
@@ -55,8 +65,24 @@ class MarketIntelAgent(Agent):
             v.sort(key=lambda x: x["volume"], reverse=True)
 
         recommendations = self._recommend(sam, clusters, icp)
+        competitor_names = [c.get("name") for c in competitors
+                            if isinstance(c, dict) and c.get("name")]
+        if competitor_names:
+            recommendations.insert(0, "Position against named competitors "
+                                   f"({', '.join(competitor_names)}) in comparison "
+                                   "content and high-intent ads.")
 
         structured = {
+            # Honesty/provenance: surface which inputs drove this brief so the
+            # user can see whether it reasoned from their confirmed profile or
+            # from seed defaults.
+            "inputs": {
+                "source": inputs_source,            # "org_profile" | "seed"
+                "product_summary": product_summary,
+                "competitors": competitor_names,
+                "industries": icp.get("industries", []),
+                "keyword_seeds": seeds,
+            },
             "sizing": {
                 "tam_companies": len(companies),
                 "tam_revenue_usd": tam_revenue,
@@ -71,7 +97,16 @@ class MarketIntelAgent(Agent):
         narrative, cost = synthesize_brief(structured, ctx.org_name)
         log(f"Synthesis complete (cost ${cost:.4f})")
 
+        provenance = (
+            Citation(source="Org profile (confirmed)",
+                     snippet="ICP, product, competitors and keywords from your "
+                             "saved org profile")
+            if inputs_source == "org_profile" else
+            Citation(source="Seed defaults",
+                     snippet="No confirmed org profile yet — using the seed agent config")
+        )
         citations = [
+            provenance,
             Citation(source="ZoomInfo (stub)", snippet="Firmographic + intent data"),
             Citation(source="Keyword data (stub)", snippet="Search volume + difficulty"),
         ]
@@ -83,6 +118,30 @@ class MarketIntelAgent(Agent):
         )
         return AgentResult(artifacts=[artifact], proposed_actions=[],
                            cost_usd=cost, logs=[])
+
+    @staticmethod
+    def _effective_inputs(seed_icp: dict, profile: dict | None):
+        """Resolve the agent's inputs with explicit precedence:
+        confirmed OrgProfile > seed agent config, field by field.
+
+        Returns (icp, product_summary, competitors, source) where `source` is
+        "org_profile" when a confirmed profile contributed, else "seed". When
+        no profile exists the seed config is returned untouched (no regression).
+        """
+        if not profile:
+            return seed_icp, "", [], "seed"
+        # Start from the seed icp so fields the profile doesn't carry (channels,
+        # category) still flow through; then overlay the profile's values.
+        icp = dict(seed_icp)
+        p_icp = profile.get("icp") or {}
+        if p_icp.get("industries"):
+            icp["industries"] = p_icp["industries"]
+        if p_icp.get("min_employees") is not None:
+            icp["min_employees"] = p_icp["min_employees"]
+        if profile.get("keywords"):
+            icp["keyword_seeds"] = profile["keywords"]
+        return (icp, profile.get("product_summary") or "",
+                profile.get("competitors") or [], "org_profile")
 
     @staticmethod
     def _recommend(sam, clusters, icp) -> list[str]:

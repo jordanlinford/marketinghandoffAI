@@ -19,7 +19,7 @@ from app.data_sources.csv import CsvMarketDataSource
 from app.data_sources.stub import StubMarketDataSource
 from app.db import SessionLocal
 from app.models import (AgentRegistration, Artifact, AuditLog, Guardrail, Org,
-                        Proposal, Run, Upload, _now)
+                        OrgProfile, Proposal, Run, Upload, _now)
 from app.queue import complete, lease_next
 from app.schemas import AgentContext
 from app.tenancy import assert_same_org, scoped
@@ -39,6 +39,26 @@ def _resolve_market_data(db: Session, org_id: str, upload_id: str | None):
             raise RuntimeError(f"Upload {upload_id} not found for org {org_id}")
         return CsvMarketDataSource(up.rows)
     return StubMarketDataSource()
+
+
+def _confirmed_org_profile(db: Session, org_id: str) -> dict | None:
+    """Load the org's CONFIRMED OrgProfile (via scoped()) as the plain dict the
+    agent reads through ctx.org_profile. Returns None when no confirmed profile
+    exists, so the agent falls back to its seed config (no regression). A draft
+    (confirmed=false) is intentionally NOT passed — only the user's saved truth
+    drives a run."""
+    prof = db.execute(scoped(OrgProfile, org_id)).scalar_one_or_none()
+    if prof is None or not prof.confirmed:
+        return None
+    return {
+        "product_summary": prof.product_summary,
+        "value_prop": prof.value_prop,
+        "icp": prof.icp or {},
+        "competitors": prof.competitors or [],
+        "keywords": prof.keywords or [],
+        "conversion_goal": prof.conversion_goal,
+        "website_url": prof.website_url,
+    }
 
 
 def _audit(db: Session, org_id: str, actor: str, action: str, target_type: str,
@@ -72,6 +92,7 @@ def process_run(db: Session, run: Run) -> None:
         brand_guide=reg.config.get("brand_guide", {}),
         icp=reg.config.get("icp", {}),
         config=reg.config,
+        org_profile=_confirmed_org_profile(db, run.org_id),
         get_market_data=lambda: _resolve_market_data(db, run.org_id, run.upload_id),
         log=logs.append,
     )

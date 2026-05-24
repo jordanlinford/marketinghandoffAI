@@ -10,25 +10,45 @@ Run:  python -m scripts.smoke
 
 NOTE: raw selects in this script are a legitimate exception to scoped() —
 system-level setup, not a tenant request.
+
+DB ISOLATION: smoke runs against its OWN throwaway SQLite database in a temp
+dir, NOT the dev server's ./agenthq.db. This is set via AGENT_HQ_DATABASE_URL
+*before* any app module imports (the engine is built at import time from the
+cached settings). Each run gets a fresh empty DB and cleans it up on exit, so
+running the test gate can never disturb a live uvicorn's database (which once
+caused a recurring "no such table" 500 when the shared file was deleted out
+from under the running server).
 """
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-from sqlalchemy import select
+import atexit
+import os
+import shutil
+import tempfile
 
-from app.agents import synthesis as synthesis_mod
-from app.data_sources.csv import CsvMarketDataSource
-from app.db import SessionLocal, create_all
-from app.main import app
-from app.models import AgentRegistration, Artifact, Org, OrgProfile, Run, Upload, User
-from app.queue import enqueue
-from app.setup import crawl as crawl_mod
-from app.setup import draft as draft_mod
-from app.setup.draft import draft_from_knowledge
-from app.setup.merge import apply_accepted, merge_profiles
-from app.tenancy import scoped
-from app.worker import run_once
-from scripts.seed import main as seed_main
+# MUST run before importing any app.* module: app.db builds the engine at import
+# time from get_settings(), so the env override has to be in place first.
+_SMOKE_DB_DIR = tempfile.mkdtemp(prefix="agenthq_smoke_")
+os.environ["AGENT_HQ_DATABASE_URL"] = f"sqlite:///{_SMOKE_DB_DIR}/smoke.db"
+atexit.register(lambda: shutil.rmtree(_SMOKE_DB_DIR, ignore_errors=True))
+
+from fastapi.testclient import TestClient  # noqa: E402
+from sqlalchemy import select  # noqa: E402
+
+from app.agents import synthesis as synthesis_mod  # noqa: E402
+from app.data_sources.csv import CsvMarketDataSource  # noqa: E402
+from app.db import SessionLocal, create_all  # noqa: E402
+from app.main import app  # noqa: E402
+from app.models import (AgentRegistration, Artifact, Org, OrgProfile,  # noqa: E402
+                        Run, Upload, User)
+from app.queue import enqueue  # noqa: E402
+from app.setup import crawl as crawl_mod  # noqa: E402
+from app.setup import draft as draft_mod  # noqa: E402
+from app.setup.draft import draft_from_knowledge  # noqa: E402
+from app.setup.merge import apply_accepted, merge_profiles  # noqa: E402
+from app.tenancy import scoped  # noqa: E402
+from app.worker import run_once  # noqa: E402
+from scripts.seed import main as seed_main  # noqa: E402
 
 
 def main() -> None:

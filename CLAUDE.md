@@ -54,6 +54,10 @@ processes hitting one file — without it you get "database is locked"). Prod = 
 `sql/schema.sql`, which also installs row-level security. RLS is NOT live until
 `SET app.current_org = '<org_id>'` is wired into `get_db` and the worker — until then,
 app-layer `scoped()` is the only guard.
+Smoke runs against its OWN throwaway SQLite DB (temp dir, via `AGENT_HQ_DATABASE_URL`
+set before app imports), never `./agenthq.db`. Do NOT `rm -f agenthq.db*` while a dev
+uvicorn is running — the server keeps the deleted inode and 500s ("no such table") on its
+next reload. Rebuild with `python -m scripts.seed` + restart uvicorn if you must reset it.
 
 ## Don't touch the TS app
 Leave `client/`, `server/`, `shared/`, `public/`, `package.json`, and the `[deployment]`

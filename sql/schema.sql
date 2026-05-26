@@ -83,6 +83,10 @@ CREATE TABLE org_profiles (
     crawl_summary     TEXT NOT NULL DEFAULT '',
     source            JSONB NOT NULL DEFAULT '{}',
     confirmed         BOOLEAN NOT NULL DEFAULT false,
+    -- Routing for the DRAFT-REVIEW step of content generation. See models.py.
+    -- Governs DRAFT review only — publishing to a live channel is always a
+    -- separate, always-gated action and is out of scope for v1.
+    content_review_mode TEXT NOT NULL DEFAULT 'guardrail',
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -96,6 +100,9 @@ CREATE TABLE runs (
     cost_usd              DOUBLE PRECISION NOT NULL DEFAULT 0,
     created_by            TEXT,
     upload_id             TEXT REFERENCES uploads(id),
+    -- Per-run input passed in by the API caller via TriggerRunIn.task.
+    -- Read by the agent through ctx.task.
+    task                  JSONB NOT NULL DEFAULT '{}',
     started_at            TIMESTAMPTZ,
     finished_at           TIMESTAMPTZ,
     error                 TEXT,
@@ -111,6 +118,11 @@ CREATE TABLE artifacts (
     title       TEXT NOT NULL,
     body        JSONB NOT NULL DEFAULT '{}',
     citations   JSONB NOT NULL DEFAULT '[]',
+    -- Review status: 'ready' | 'pending_review' | 'rejected'. Default 'ready'
+    -- preserves the existing market_intel path. content_engine sets
+    -- 'pending_review' when routing a draft to the approval queue; the queue
+    -- decision flips it to 'ready' or 'rejected'. "ready" != "published".
+    status      TEXT NOT NULL DEFAULT 'ready',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

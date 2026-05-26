@@ -95,6 +95,10 @@ class Run(Base, TimestampMixin):
     # null => stub source (preserves prior behavior). Set when the trigger binds
     # this run to a user-uploaded account list (the CSV data-source seam).
     upload_id: Mapped[str | None] = mapped_column(ForeignKey("uploads.id"), nullable=True)
+    # Per-run input the API caller supplied via TriggerRunIn.task. Read by the
+    # agent through ctx.task (the content_engine uses it for action +
+    # content_type + topic; market_intel ignores it). Was previously dropped.
+    task: Mapped[dict] = mapped_column(JSON, default=dict)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -127,6 +131,12 @@ class Artifact(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(String(300))
     body: Mapped[dict] = mapped_column(JSON, default=dict)
     citations: Mapped[list] = mapped_column(JSON, default=list)
+    # Review status. "ready" is the default (preserves prior artifact behavior).
+    # The content_engine sets "pending_review" when a draft is routed to the
+    # approval queue; the queue approve/reject flips it to "ready" or "rejected".
+    # NOTE: "ready" never means "published" — publishing is a separately-gated,
+    # future action. See content_engine for the precedence rules.
+    status: Mapped[str] = mapped_column(String(20), default="ready")
 
 
 class Proposal(Base, TimestampMixin):
@@ -185,6 +195,16 @@ class OrgProfile(Base, TimestampMixin):
     source: Mapped[dict] = mapped_column(JSON, default=dict)
     # False on every draft; only PUT /api/profile flips it true.
     confirmed: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Org-level routing for the DRAFT-REVIEW step of content generation.
+    #   "all_through" — clean drafts auto-pass review (no queue entry).
+    #   "guardrail"   — clean drafts pass; any draft that trips a guardrail
+    #                   goes to the queue. (default)
+    #   "gate_all"    — every draft goes to the queue for human approve/reject.
+    # IMPORTANT: this governs DRAFT REVIEW only. It does NOT govern publishing
+    # to any live channel — publishing is a separate, always-gated action and
+    # is out of scope for v1. "all_through" means "draft marked ready", never
+    # "auto-published".
+    content_review_mode: Mapped[str] = mapped_column(String(20), default="guardrail")
 
 
 class Guardrail(Base, TimestampMixin):

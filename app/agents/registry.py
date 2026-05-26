@@ -24,3 +24,4 @@ def list_agent_keys() -> list[str]:
 
 # Import builtin agents so their @register decorators run.
 from app.agents import market_intel  # noqa: E402,F401
+from app.agents import content_engine  # noqa: E402,F401

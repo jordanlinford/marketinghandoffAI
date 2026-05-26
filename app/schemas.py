@@ -32,6 +32,11 @@ class ArtifactDraft(BaseModel):
     title: str
     body: dict[str, Any] = Field(default_factory=dict)
     citations: list[Citation] = Field(default_factory=list)
+    # Review status of the artifact when it lands in the DB. Defaults to
+    # "ready" (the existing market_intel path), so older agents keep working.
+    # The content_engine sets "pending_review" when a draft is routed to the
+    # approval queue; the queue flips it to "ready" or "rejected" on decision.
+    status: str = "ready"
 
 
 class ProposedAction(BaseModel):
@@ -68,7 +73,15 @@ class AgentContext:
     # which case agents fall back to seed config. In-agent precedence is
     # explicit: confirmed org_profile > seed config.
     org_profile: dict[str, Any] | None = None
+    # Recently-completed artifacts for this org that an agent may reason from
+    # (e.g. content_engine reads the latest market_brief). Loaded by the
+    # worker via scoped(); the agent never queries the DB.
     prior_artifacts: list[dict[str, Any]] = field(default_factory=list)
+    # The org's guardrail rules indexed by scope (spend / publish / content /
+    # ...). The worker loads these via scoped() and merges in dynamic profile
+    # data (e.g. banned_claims). Agents call app.guardrails.evaluate() against
+    # this dict — they do not read the Guardrail table directly.
+    guardrail_rules: dict[str, dict[str, Any]] = field(default_factory=dict)
     get_market_data: Callable[[], Any] | None = None
     log: Callable[[str], None] = lambda msg: None
 

@@ -30,17 +30,22 @@ import tempfile
 # time from get_settings(), so the env override has to be in place first.
 _SMOKE_DB_DIR = tempfile.mkdtemp(prefix="agenthq_smoke_")
 os.environ["AGENT_HQ_DATABASE_URL"] = f"sqlite:///{_SMOKE_DB_DIR}/smoke.db"
+# Force a fake ANTHROPIC_API_KEY so synthesis + content_templates take their
+# LLM branch (which smoke stubs below). Without this, the no-key fast path
+# bypasses the stub and we can't assert "cost recorded" for content gen.
+os.environ["ANTHROPIC_API_KEY"] = "smoke-stub-key"
 atexit.register(lambda: shutil.rmtree(_SMOKE_DB_DIR, ignore_errors=True))
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
+from app.agents import content_templates as content_templates_mod  # noqa: E402
 from app.agents import synthesis as synthesis_mod  # noqa: E402
 from app.data_sources.csv import CsvMarketDataSource  # noqa: E402
 from app.db import SessionLocal, create_all  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (AgentRegistration, Artifact, Org, OrgProfile,  # noqa: E402
-                        Run, Upload, User)
+from app.models import (AgentRegistration, Artifact, Guardrail, Org,  # noqa: E402
+                        OrgProfile, Proposal, Run, Upload, User)
 from app.queue import enqueue  # noqa: E402
 from app.setup import crawl as crawl_mod  # noqa: E402
 from app.setup import draft as draft_mod  # noqa: E402
@@ -63,6 +68,13 @@ def main() -> None:
     # network) keeps the spine identical and the test self-contained.
     synthesis_mod._llm_narrative = lambda structured, org_name, settings: (
         synthesis_mod._template_narrative(structured, org_name), 0.0)
+    # Same treatment for the content engine: bypass the LLM and use the
+    # deterministic template, so tests don't depend on the network. Cost is
+    # set to a fixed non-zero value so we can still assert "cost recorded".
+    def _stub_content_llm(content_type, profile, brief, topic, target, settings):
+        return content_templates_mod._REGISTRY[content_type](
+            profile, brief, topic, target), 0.0007
+    content_templates_mod._llm_build = _stub_content_llm
 
     db = SessionLocal()
     try:
@@ -769,6 +781,237 @@ def main() -> None:
             "TENANT LEAK: another org's profile bled into Seedonly's run"
         print("[OK] Profile-into-agent (3): a run loads only its own org's profile "
               "via scoped() — no cross-tenant bleed.")
+
+        # ---------------------------------------------------------------------
+        # Content engine — three checks:
+        #   (1) GENERATE produces a structured, block-based content object
+        #       grounded in the org's profile (brand voice + competitors
+        #       reflected), cost recorded on the run.
+        #   (2) Gate routing for the three modes:
+        #         all_through → artifact ready, NO proposal.
+        #         gate_all    → proposal lands, artifact pending_review.
+        #         guardrail   → clean drafts pass; a banned-claim trip lands in
+        #                       the queue. Approve flips artifact to ready;
+        #                       Reject flips it to rejected.
+        #   (3) Tenant isolation: content artifacts/proposals are scoped to
+        #       their org; a cross-org approve is denied; a content_engine run
+        #       for an org with NO profile fails closed (does not leak the
+        #       seed org's profile or produce artifacts/proposals).
+        # ---------------------------------------------------------------------
+        onit_content_reg = db.execute(
+            scoped(AgentRegistration, onit.id)
+            .where(AgentRegistration.key == "content_engine")
+        ).scalar_one()
+
+        def _trigger_content_run(org_id: str, reg_id: str, task: dict) -> Run:
+            r = Run(org_id=org_id, agent_registration_id=reg_id,
+                    agent_key="content_engine", trigger="manual",
+                    status="queued", task=task)
+            db.add(r)
+            db.commit()
+            db.refresh(r)
+            enqueue(db, org_id, "run_agent", {"run_id": r.id})
+            assert run_once() is True, "worker did not pick up content job"
+            db.refresh(r)
+            return r
+
+        def _set_review_mode(org_id: str, mode: str) -> None:
+            prof = db.execute(scoped(OrgProfile, org_id)).scalar_one()
+            prof.content_review_mode = mode
+            db.commit()
+
+        # (1) Generate a clean draft for Onit (default mode=guardrail). The
+        # template embeds brand_voice as "Tone: <voice>" and the competitor
+        # name in a "(vs. SimpleLegal)" clause — both must appear, proving
+        # the draft is grounded in the saved profile.
+        gen_run = _trigger_content_run(
+            onit.id, onit_content_reg.id,
+            {"action": "generate", "content_type": "email",
+             "topic": "Cut weekly review overhead", "target": "GC"})
+        assert gen_run.status == "succeeded", \
+            f"content generate failed: {gen_run.error}"
+        assert gen_run.cost_usd > 0, \
+            f"content gen must record cost (LLM path stubbed), got {gen_run.cost_usd}"
+        gen_art = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.run_id == gen_run.id, Artifact.type == "content_draft")
+        ).scalar_one()
+        content_obj = gen_art.body["content"]
+        assert content_obj["content_type"] == "email", content_obj
+        blocks = content_obj["blocks"]
+        assert isinstance(blocks, list) and len(blocks) >= 2, \
+            f"blocks must be an ORDERED list (>=2), got {blocks!r}"
+        kinds = [b["kind"] for b in blocks]
+        assert kinds[0] == "subject" and "cta" in kinds, \
+            f"email blocks must be ordered (subject…cta); got {kinds}"
+        body_text = " ".join(b.get("text", "") for b in blocks)
+        # Onit's saved profile carries brand_voice="Plain, confident, no jargon."
+        # and competitors=[{"name":"SimpleLegal"}] — both must surface.
+        assert "Plain, confident, no jargon" in body_text, \
+            f"brand_voice not reflected in draft: {body_text!r}"
+        assert "SimpleLegal" in body_text, \
+            f"competitors not reflected in draft: {body_text!r}"
+        assert gen_art.status == "ready", \
+            f"clean draft must be ready under guardrail mode, got {gen_art.status}"
+        clean_proposals = db.execute(
+            scoped(Proposal, onit.id).where(Proposal.run_id == gen_run.id)
+        ).scalars().all()
+        assert clean_proposals == [], \
+            f"clean draft must NOT create a proposal, got {clean_proposals}"
+        print(f"[OK] Content engine (1): {content_obj['content_type']} draft with "
+              f"{len(blocks)} ordered blocks, brand_voice + competitors reflected, "
+              f"cost=${gen_run.cost_usd:.4f}.")
+
+        # (2) Gate routing.
+        # guardrail + banned phrase → queue. Inject the banned phrase via the
+        # topic so the template's subject line carries it into the flat text.
+        trip_run = _trigger_content_run(
+            onit.id, onit_content_reg.id,
+            {"action": "generate", "content_type": "email",
+             "topic": "We are #1 in the world for legal ops",
+             "target": "GC"})
+        assert trip_run.status == "succeeded"
+        trip_art = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.run_id == trip_run.id, Artifact.type == "content_draft")
+        ).scalar_one()
+        trip_props = db.execute(
+            scoped(Proposal, onit.id).where(Proposal.run_id == trip_run.id)
+        ).scalars().all()
+        assert len(trip_props) == 1, \
+            f"banned-claim trip must produce exactly one proposal, got {len(trip_props)}"
+        assert trip_props[0].action_type == "content_review"
+        assert trip_props[0].guardrail_status == "blocked"
+        assert "#1 in the world" in trip_props[0].guardrail_detail.lower(), \
+            f"guardrail detail should name the banned phrase: {trip_props[0].guardrail_detail!r}"
+        assert trip_art.status == "pending_review"
+
+        # gate_all: every draft routed, regardless of guardrail verdict.
+        _set_review_mode(onit.id, "gate_all")
+        ga_run = _trigger_content_run(
+            onit.id, onit_content_reg.id,
+            {"action": "generate", "content_type": "ad",
+             "topic": "Stop the spreadsheet sprawl",
+             "target": "Head of Legal Ops"})
+        ga_art = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.run_id == ga_run.id, Artifact.type == "content_draft")
+        ).scalar_one()
+        ga_props = db.execute(
+            scoped(Proposal, onit.id).where(Proposal.run_id == ga_run.id)
+        ).scalars().all()
+        assert len(ga_props) == 1, "gate_all must queue every draft"
+        assert ga_props[0].guardrail_status == "passed", \
+            "clean draft should still PASS the underlying guardrail under gate_all"
+        assert ga_art.status == "pending_review"
+
+        # all_through: never queue, even though the guardrail rule still
+        # exists. NOTE: ready != published — publishing is out of scope.
+        _set_review_mode(onit.id, "all_through")
+        at_run = _trigger_content_run(
+            onit.id, onit_content_reg.id,
+            {"action": "generate", "content_type": "social_post",
+             "topic": "Modern legal ops", "target": "General Counsel"})
+        at_art = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.run_id == at_run.id, Artifact.type == "content_draft")
+        ).scalar_one()
+        at_props = db.execute(
+            scoped(Proposal, onit.id).where(Proposal.run_id == at_run.id)
+        ).scalars().all()
+        assert at_props == [], f"all_through must never queue, got {at_props}"
+        assert at_art.status == "ready"
+        _set_review_mode(onit.id, "guardrail")   # restore
+
+        # Approve flips the artifact to ready; Reject flips it to rejected.
+        approve_resp = client.post(
+            f"/api/review/proposals/{trip_props[0].id}/approve",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"note": "ok to send"},
+        )
+        assert approve_resp.status_code == 200, approve_resp.text
+        db.refresh(trip_art)
+        assert trip_art.status == "ready", \
+            f"approve must flip artifact ready, got {trip_art.status}"
+        reject_resp = client.post(
+            f"/api/review/proposals/{ga_props[0].id}/reject",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"note": "not now"},
+        )
+        assert reject_resp.status_code == 200, reject_resp.text
+        db.refresh(ga_art)
+        assert ga_art.status == "rejected"
+        print("[OK] Content engine (2): gate routing — all_through skips the "
+              "queue, gate_all queues every draft, guardrail queues banned-claim "
+              "trips only; Approve flips to ready, Reject flips to rejected.")
+
+        # (3) Tenant isolation of the action-taking spine.
+        leaked_props = db.execute(
+            scoped(Proposal, other.id).where(Proposal.action_type == "content_review")
+        ).scalars().all()
+        assert leaked_props == [], \
+            "TENANT LEAK: Acme can read Onit's content proposals"
+        leaked_drafts = db.execute(
+            scoped(Artifact, other.id).where(Artifact.type == "content_draft")
+        ).scalars().all()
+        assert leaked_drafts == [], \
+            "TENANT LEAK: Acme can read Onit's content drafts"
+
+        # Create a fresh PENDING proposal so we can test cross-org approve.
+        _set_review_mode(onit.id, "gate_all")
+        final_run = _trigger_content_run(
+            onit.id, onit_content_reg.id,
+            {"action": "generate", "content_type": "blog_outline",
+             "topic": "Why teams default to chaos", "target": "GC"})
+        pending_props = db.execute(
+            scoped(Proposal, onit.id).where(Proposal.run_id == final_run.id)
+        ).scalars().all()
+        assert len(pending_props) == 1
+        pending_id = pending_props[0].id
+        _set_review_mode(onit.id, "guardrail")
+
+        cross_approve = client.post(
+            f"/api/review/proposals/{pending_id}/approve",
+            headers={"X-Dev-User-Email": "ops@acme.com",
+                     "Content-Type": "application/json"},
+            json={"note": "trying to approve someone else's work"},
+        )
+        assert cross_approve.status_code in (403, 404), \
+            f"cross-org approve MUST be denied, got {cross_approve.status_code}: " \
+            f"{cross_approve.text}"
+
+        # The agent's profile-loading path must scope strictly. Acme has no
+        # confirmed OrgProfile — the agent must FAIL CLOSED rather than reach
+        # into Onit's profile or ship ungrounded copy.
+        acme_content_reg = AgentRegistration(
+            org_id=other.id, key="content_engine", display_name="Content engine",
+            kind="builtin", enabled=True, config={})
+        db.add(acme_content_reg)
+        db.commit()
+        db.refresh(acme_content_reg)
+        acme_run = _trigger_content_run(
+            other.id, acme_content_reg.id,
+            {"action": "generate", "content_type": "email",
+             "topic": "Doesn't matter", "target": ""})
+        assert acme_run.status == "failed", \
+            f"profileless content run must fail closed, got {acme_run.status}"
+        assert "confirmed org profile" in (acme_run.error or "").lower(), \
+            f"failure must mention the missing profile, got {acme_run.error!r}"
+        acme_arts = db.execute(
+            scoped(Artifact, other.id).where(Artifact.run_id == acme_run.id)
+        ).scalars().all()
+        assert acme_arts == [], \
+            f"failed profileless run must not leave artifacts: {acme_arts}"
+        acme_props = db.execute(
+            scoped(Proposal, other.id).where(Proposal.run_id == acme_run.id)
+        ).scalars().all()
+        assert acme_props == [], \
+            f"failed profileless run must not leave proposals: {acme_props}"
+        print("[OK] Content engine (3): tenant isolation — Acme sees zero of "
+              "Onit's content drafts/proposals, cross-org approve denied, "
+              "Acme's own profileless run fails closed without leakage.")
 
         print("[OK] Smoke test passed.")
     finally:

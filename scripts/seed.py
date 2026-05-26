@@ -55,8 +55,25 @@ def main() -> None:
             db.commit()
             print("Registered market_intel agent for Onit (weekly Monday cron)")
 
+        content_reg = db.execute(
+            select(AgentRegistration).where(
+                AgentRegistration.org_id == org.id, AgentRegistration.key == "content_engine")
+        ).scalar_one_or_none()
+        if content_reg is None:
+            db.add(AgentRegistration(
+                org_id=org.id, key="content_engine", display_name="Content engine",
+                kind="builtin", enabled=True, schedule_cron=None,
+                config={},   # no seed icp; grounds in the confirmed OrgProfile
+            ))
+            db.commit()
+            print("Registered content_engine agent for Onit")
+
+        # Default guardrail rules. "content" stays here as the SCOPE shell;
+        # OrgProfile.banned_claims is merged in at worker time so the profile
+        # remains the single source of truth for which phrases trip the rule.
         for scope, rules in [("spend", {"max_change_usd": 250}),
-                             ("publish", {"require_human_review": True})]:
+                             ("publish", {"require_human_review": True}),
+                             ("content", {"banned_claims": []})]:
             exists = db.execute(
                 select(Guardrail).where(Guardrail.org_id == org.id, Guardrail.scope == scope)
             ).scalar_one_or_none()

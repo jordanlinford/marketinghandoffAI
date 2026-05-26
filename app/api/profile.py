@@ -43,6 +43,9 @@ _EMPTY_ICP = {
 }
 
 
+_REVIEW_MODES = {"all_through", "guardrail", "gate_all"}
+
+
 class ProfileIn(BaseModel):
     """Everything the user can edit. confirmed is set server-side on PUT."""
     product_summary: str = ""
@@ -57,6 +60,12 @@ class ProfileIn(BaseModel):
     website_url: str = ""
     crawl_summary: str = ""
     source: dict = Field(default_factory=dict)
+    # Org-level routing for the DRAFT-REVIEW step of content generation. The
+    # only valid values are in _REVIEW_MODES; anything else is coerced to the
+    # safe default "guardrail" so a bad client never lands the org in a state
+    # where content silently bypasses review. Governs DRAFT review only —
+    # publishing is a separate, always-gated action and is out of scope.
+    content_review_mode: str = "guardrail"
 
 
 class CrawlIn(BaseModel):
@@ -84,6 +93,7 @@ def _empty_payload(org_id: str) -> dict:
         "brand_voice": "", "banned_claims": [],
         "conversion_goal": "", "conversion_event": "",
         "website_url": "", "crawl_summary": "",
+        "content_review_mode": "guardrail",
         "source": {}, "updated_at": None, "created_at": None,
     }
 
@@ -98,6 +108,7 @@ def _serialize(p: OrgProfile) -> dict:
         "brand_voice": p.brand_voice, "banned_claims": p.banned_claims or [],
         "conversion_goal": p.conversion_goal, "conversion_event": p.conversion_event,
         "website_url": p.website_url, "crawl_summary": p.crawl_summary,
+        "content_review_mode": p.content_review_mode or "guardrail",
         "source": p.source or {},
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,
@@ -122,6 +133,11 @@ def put_profile(body: ProfileIn,
     update in place if one exists, insert otherwise."""
     prof = _get_profile(db, user.org_id)
     fields = body.model_dump()
+    # Defensive coercion: any value outside the allowed set falls back to the
+    # safe default "guardrail" so a bad client never lands the org in a state
+    # where content silently bypasses review.
+    if fields.get("content_review_mode") not in _REVIEW_MODES:
+        fields["content_review_mode"] = "guardrail"
     if prof is None:
         prof = OrgProfile(org_id=user.org_id, confirmed=True, **fields)
         db.add(prof)

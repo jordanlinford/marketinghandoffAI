@@ -109,6 +109,10 @@
   .badge.passed    { background: #143a26; color: #7ce0a3; }
   .badge.blocked   { background: #4a1a1a; color: #ff9b9b; }
   .badge.pending   { background: #2c3142; color: #c5cad6; }
+  /* Content artifact statuses */
+  .badge.ready           { background: #143a26; color: #7ce0a3; }
+  .badge.pending_review  { background: #3a2c14; color: #f0c97a; }
+  .badge.rejected        { background: #4a1a1a; color: #ff9b9b; }
   .detail-empty { color: var(--muted); padding: 40px 0; text-align: center; }
   .detail h1 { font-size: 18px; margin: 0 0 4px; }
   .detail .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
@@ -275,8 +279,9 @@
 <header class="bar">
   <div class="brand">Agent <span class="dot">●</span> HQ</div>
   <div class="view-tabs" role="tablist">
-    <button id="tab-runs"  class="active" role="tab">Runs</button>
-    <button id="tab-setup" role="tab">Setup</button>
+    <button id="tab-runs"    class="active" role="tab">Runs</button>
+    <button id="tab-content" role="tab">Content</button>
+    <button id="tab-setup"   role="tab">Setup</button>
   </div>
   <div class="who" id="who">
     <span>loading…</span>
@@ -317,6 +322,51 @@
   <section class="panel" aria-label="Approval queue">
     <h2>Approval queue</h2>
     <div id="proposals"></div>
+  </section>
+</main>
+
+<!-- =========================== Content view ============================= -->
+<!-- The first action-taking surface. Triggers content_engine runs (suggest +
+     generate). Resulting runs show up in the Runs list; their detail renders
+     block-by-block. Proposals land in the existing Approval queue. -->
+<main id="content-view" class="setup-main" style="display:none;">
+  <section class="panel">
+    <div class="row" style="margin-bottom:8px;">
+      <h2 style="margin:0">Content engine</h2>
+      <span class="setup-status">
+        Grounded in your confirmed org profile + the latest market brief.
+        Drafts route per your review mode (Setup → Review mode).
+      </span>
+    </div>
+
+    <div class="setup-paths">
+      <div class="setup-path">
+        <h4>1 — Suggest ideas</h4>
+        <p>Read your profile and the latest market brief; propose a short list of
+           ideas (type, topic, rationale, target). Pick one to generate.</p>
+        <button id="content-suggest-btn">Suggest content ideas</button>
+      </div>
+      <div class="setup-path">
+        <h4>2 — Generate one piece</h4>
+        <p>Pick a type and topic — we'll draft it grounded in your profile.</p>
+        <div class="row" style="gap:6px;">
+          <select id="content-type">
+            <option value="email">email</option>
+            <option value="ad">ad</option>
+            <option value="social_post">social_post</option>
+            <option value="blog_outline">blog_outline</option>
+          </select>
+          <input type="text" id="content-topic" placeholder="topic (e.g. cut weekly review overhead)" />
+        </div>
+        <div class="row" style="gap:6px; margin-top:6px;">
+          <input type="text" id="content-target" placeholder="target audience (optional)" />
+          <button id="content-generate-btn">Generate</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="content-status" class="setup-status"
+         style="margin-top:14px;">Use one of the paths above to trigger a content_engine run.</div>
   </section>
 </main>
 
@@ -534,6 +584,56 @@ async function triggerRun() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Run market intelligence';
+  }
+}
+
+// ---- Content engine triggers ---------------------------------------------
+// Both routes enqueue a content_engine run with a `task` payload. The Runs
+// tab is the single home for output — switching to it on success surfaces
+// the run while the worker is still polling.
+async function triggerContentSuggest() {
+  const status = document.getElementById('content-status');
+  status.textContent = 'Enqueueing suggestion run…';
+  try {
+    const run = await api('/api/runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_key: 'content_engine',
+        task: { action: 'suggest' },
+      }),
+    });
+    switchView('runs');
+    await loadRuns();
+    selectRun(run.id);
+  } catch (e) {
+    status.innerHTML = `<span class="err">${e.message}</span>`;
+  }
+}
+
+async function triggerContentGenerate(typeArg, topicArg, targetArg) {
+  // The manual form passes nothing; the in-detail "Generate this idea"
+  // button passes type/topic/target. Either way, we POST one Run.
+  const content_type = (typeArg ?? document.getElementById('content-type').value).trim();
+  const topic = (topicArg ?? document.getElementById('content-topic').value).trim();
+  const target = (targetArg ?? document.getElementById('content-target').value).trim();
+  if (!topic) {
+    const status = document.getElementById('content-status');
+    if (status) status.innerHTML = `<span class="err">A topic is required.</span>`;
+    return;
+  }
+  try {
+    const run = await api('/api/runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_key: 'content_engine',
+        task: { action: 'generate', content_type, topic, target },
+      }),
+    });
+    switchView('runs');
+    await loadRuns();
+    selectRun(run.id);
+  } catch (e) {
+    alert(`Failed to enqueue content run: ${e.message}`);
   }
 }
 
@@ -773,11 +873,78 @@ function renderDetail() {
   }
 
   for (const art of artifacts) {
+    const titleKids = [art.title || art.type];
+    if (art.status && art.status !== 'ready') {
+      titleKids.push(' ');
+      titleKids.push(el('span', { class: `badge ${art.status}` }, art.status));
+    }
     root.appendChild(el('div', { class: 'section' },
-      el('h3', {}, art.title || art.type),
+      el('h3', {}, ...titleKids),
     ));
     const body = art.body || {};
     const structured = body.structured || {};
+
+    // Content_engine artifacts: ideas list (suggest) and structured drafts
+    // (generate). Rendered inline so the existing run detail panel is the
+    // single home for any agent's output.
+    if (art.type === 'content_ideas' && body.ideas) {
+      const wrap = el('div');
+      for (const idea of body.ideas) {
+        const card = el('div', { class: 'proposal' },
+          el('div', { class: 'row' },
+            el('strong', {}, idea.content_type),
+            el('span', { style: 'color:var(--muted); font-size:12px;' },
+              `target: ${idea.target || '—'}`),
+          ),
+          el('div', { style: 'margin: 6px 0 2px 0;' }, idea.topic),
+          idea.rationale ? el('div', { style: 'color:var(--muted); font-size:12px;' },
+            idea.rationale) : null,
+          el('div', { class: 'actions' },
+            el('button', { class: 'approve',
+              onclick: () => triggerContentGenerate(idea.content_type, idea.topic, idea.target),
+            }, 'Generate this idea'),
+          ),
+        );
+        wrap.appendChild(card);
+      }
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, `Ideas (${body.ideas.length})`), wrap));
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, 'Citations'), renderCitations(art.citations)));
+      continue;
+    }
+
+    if (art.type === 'content_draft' && body.content) {
+      const c = body.content;
+      const blocks = c.blocks || [];
+      const ul = el('div');
+      for (const b of blocks) {
+        ul.appendChild(el('div', { class: 'cluster' },
+          el('h4', {}, b.kind),
+          el('div', { style: 'white-space: pre-wrap;' }, b.text || ''),
+        ));
+      }
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, `${c.content_type} draft (${blocks.length} blocks)`), ul));
+      const prov = body.provenance || {};
+      const routing = body.routing || {};
+      const provLines = [
+        prov.market_brief_id
+          ? 'Grounded in your confirmed org profile + the latest market brief.'
+          : 'Grounded in your confirmed org profile (no market brief yet).',
+        prov.brand_voice_used ? 'Brand voice applied.' : 'Brand voice not set.',
+        (prov.competitors_reflected || []).length
+          ? `Competitors reflected: ${prov.competitors_reflected.join(', ')}.`
+          : null,
+        `Routing: mode=${routing.mode || 'guardrail'} · guardrail=${routing.guardrail_status || '—'} · ${routing.needs_review ? 'needs review' : 'auto-ready'}.`,
+      ].filter(Boolean);
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, 'Provenance'),
+        el('ul', { class: 'cites' }, ...provLines.map(line => el('li', {}, line)))));
+      root.appendChild(el('div', { class: 'section' },
+        el('h3', {}, 'Citations'), renderCitations(art.citations)));
+      continue;
+    }
 
     if (body.narrative) {
       const md = marked.parse(body.narrative);
@@ -830,6 +997,24 @@ function renderProposals() {
     return;
   }
   for (const p of state.proposals) {
+    // content_review proposals carry blocks in the payload — render those
+    // cleanly instead of the raw JSON dump used for other action types.
+    let payloadView;
+    if (p.action_type === 'content_review' && p.payload && Array.isArray(p.payload.blocks)) {
+      const pl = p.payload;
+      const wrap = el('div');
+      wrap.appendChild(el('div', { style: 'color:var(--muted); font-size:12px; margin: 4px 0 8px 0;' },
+        `${pl.content_type || 'content'} · topic: ${pl.topic || '—'} · routing=${pl.review_mode || '—'}`));
+      for (const b of pl.blocks) {
+        wrap.appendChild(el('div', { class: 'cluster' },
+          el('h4', {}, b.kind),
+          el('div', { style: 'white-space: pre-wrap;' }, b.text || ''),
+        ));
+      }
+      payloadView = wrap;
+    } else {
+      payloadView = el('pre', {}, JSON.stringify(p.payload || {}, null, 2));
+    }
     const card = el('div', { class: 'proposal' },
       el('div', { class: 'row' },
         el('strong', {}, p.action_type),
@@ -838,7 +1023,7 @@ function renderProposals() {
       el('div', { class: 'sub', style: 'color: var(--muted); font-size:12px;' },
         fmtTime(p.created_at)),
       p.reasoning ? el('div', { style: 'margin: 8px 0;' }, p.reasoning) : null,
-      el('pre', {}, JSON.stringify(p.payload || {}, null, 2)),
+      payloadView,
       el('div', { class: 'actions' },
         el('button', { class: 'approve', onclick: () => decide(p.id, 'approve') }, 'Approve'),
         el('button', { class: 'reject', onclick: () => decide(p.id, 'reject') }, 'Reject'),
@@ -867,6 +1052,9 @@ async function decide(id, kind) {
       body: JSON.stringify({ note }),
     });
     await loadProposals();
+    // The decision flipped the linked content_draft artifact's status —
+    // refresh the open run detail so the badge updates immediately.
+    if (state.selectedRunId) await loadDetail(state.selectedRunId);
   } catch (e) {
     alert(`Failed to ${kind}: ${e.message}`);
   }
@@ -904,6 +1092,15 @@ const PROFILE_FIELDS = [
     hint: 'One per line: "Name | https://url"' },
   { key: 'banned_claims', label: 'Banned claims', kind: 'lines', full: true,
     hint: 'One per line. Things copy must NOT say.' },
+  // The DRAFT-REVIEW gate. NOT a publish setting — publishing to any live
+  // channel is a separate, always-gated action and is out of scope for v1.
+  { key: 'content_review_mode', label: 'Content review mode', kind: 'enum', full: true,
+    options: [
+      ['guardrail',   'guardrail — clean drafts auto-pass; trips go to the queue'],
+      ['gate_all',    'gate_all — every draft goes to the queue'],
+      ['all_through', 'all_through — drafts auto-marked ready (still NOT published)'],
+    ],
+    hint: 'Governs draft review only. "ready" never means "published".' },
 ];
 
 function _get(obj, dotted) {
@@ -936,6 +1133,7 @@ function _toFieldValue(field, raw) {
       c.url ? `${c.name} | ${c.url}` : (c.name || '')).join('\n');
   }
   if (field.kind === 'number') return raw === '' || raw == null ? '' : String(raw);
+  if (field.kind === 'enum') return String(raw);
   return String(raw);
 }
 function _fromFieldValue(field, str) {
@@ -954,6 +1152,7 @@ function _fromFieldValue(field, str) {
     const n = Number(s);
     return Number.isFinite(n) ? n : null;
   }
+  if (field.kind === 'enum') return s;
   return s;
 }
 
@@ -994,6 +1193,13 @@ function renderProfileForm() {
       input = el('textarea', {}, val);
     } else if (field.kind === 'number') {
       input = el('input', { type: 'number', value: val });
+    } else if (field.kind === 'enum') {
+      input = el('select');
+      for (const [v, label] of (field.options || [])) {
+        const opt = el('option', { value: v }, label);
+        if (v === val) opt.setAttribute('selected', 'selected');
+        input.appendChild(opt);
+      }
     } else {
       input = el('input', { type: 'text', value: val });
     }
@@ -1320,19 +1526,30 @@ async function saveProfile() {
 
 function switchView(view) {
   const runs = document.getElementById('runs-view');
+  const content = document.getElementById('content-view');
   const setup = document.getElementById('setup-view');
   const tabRuns = document.getElementById('tab-runs');
+  const tabContent = document.getElementById('tab-content');
   const tabSetup = document.getElementById('tab-setup');
+  // Reset everything first, then turn on just the active view's tab + panel.
+  runs.style.display = 'none';
+  content.style.display = 'none';
+  setup.style.display = 'none';
+  tabRuns.classList.remove('active');
+  tabContent.classList.remove('active');
+  tabSetup.classList.remove('active');
   if (view === 'setup') {
-    runs.style.display = 'none';
     setup.style.display = '';
-    tabRuns.classList.remove('active');
     tabSetup.classList.add('active');
+    if (!state.profile) loadProfile();
+  } else if (view === 'content') {
+    content.style.display = '';
+    tabContent.classList.add('active');
+    // Make sure the profile is loaded so we can warn if there isn't one yet —
+    // content_engine requires a confirmed profile.
     if (!state.profile) loadProfile();
   } else {
     runs.style.display = '';
-    setup.style.display = 'none';
-    tabSetup.classList.remove('active');
     tabRuns.classList.add('active');
   }
 }
@@ -1350,7 +1567,11 @@ document.getElementById('upload-select').addEventListener('change', (ev) => {
   state.selectedUploadId = ev.target.value;
 });
 document.getElementById('tab-runs').addEventListener('click', () => switchView('runs'));
+document.getElementById('tab-content').addEventListener('click', () => switchView('content'));
 document.getElementById('tab-setup').addEventListener('click', () => switchView('setup'));
+document.getElementById('content-suggest-btn').addEventListener('click', triggerContentSuggest);
+document.getElementById('content-generate-btn').addEventListener('click',
+  () => triggerContentGenerate());
 document.getElementById('path-manual').addEventListener('click', () => {
   // "Fill in manually" just closes any open enrichment diff and lets the user
   // edit the working form directly. It does NOT wipe layered-in work.

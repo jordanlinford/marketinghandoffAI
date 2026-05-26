@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import current_user
 from app.db import get_db
-from app.models import AuditLog, Proposal, User, _now
+from app.models import Artifact, AuditLog, Proposal, User, _now
 from app.schemas import ProposalDecisionIn
 from app.tenancy import scoped
 
@@ -46,6 +46,19 @@ def _decide(db: Session, user: User, proposal_id: str, decision: str, note: str)
     p.status = decision
     p.approver_id = user.id
     p.decided_at = _now()
+    # For content_review proposals, mirror the decision onto the linked
+    # content_draft artifact's status — "ready" on approve, "rejected" on
+    # reject. The artifact shares the proposal's run_id (the worker sets both
+    # from the same Run), so scoped() by run_id is the safe linkage. NOTE:
+    # "ready" never means "published" — publishing is a separate, always-
+    # gated action that is out of scope for v1.
+    if p.action_type == "content_review":
+        art = db.execute(
+            scoped(Artifact, user.org_id)
+            .where(Artifact.run_id == p.run_id, Artifact.type == "content_draft")
+        ).scalar_one_or_none()
+        if art is not None:
+            art.status = "ready" if decision == "approved" else "rejected"
     db.add(AuditLog(org_id=user.org_id, actor=user.id, action=f"proposal.{decision}",
                     target_type="proposal", target_id=p.id,
                     meta={"note": note, "action_type": p.action_type}))

@@ -30,4 +30,16 @@ def evaluate(action: ProposedAction, rules_by_scope: dict[str, dict]) -> tuple[s
             return "blocked", "Publish requires human review by policy."
         return "passed", "Auto-publish enabled for this surface."
 
+    if scope == "content":
+        # Content-draft review. Trips if any of the org's banned_claims phrases
+        # appears in the assembled text. The worker merges OrgProfile.banned_claims
+        # into this scope's rules — the profile stays the single source of truth.
+        text = (action.payload.get("text") or "").lower()
+        banned = [str(c).strip().lower() for c in (rules.get("banned_claims") or [])
+                  if str(c).strip()]
+        hits = [c for c in banned if c and c in text]
+        if hits:
+            return "blocked", f"Banned-claim trip: {', '.join(hits)}"
+        return "passed", "Draft contains no banned-claim phrases."
+
     return "blocked", f"Unknown scope '{scope}' — escalating."

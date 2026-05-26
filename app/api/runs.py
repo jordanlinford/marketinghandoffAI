@@ -34,9 +34,12 @@ def trigger_run(body: TriggerRunIn, user: User = Depends(current_user),
             raise HTTPException(404, f"Upload '{body.upload_id}' not found for this org")
         upload_id = up.id
 
+    # Persist the caller's per-run task on the Run row so the worker can hand
+    # it to the agent through ctx.task. Closes the previous "task is dropped"
+    # gap — the content_engine relies on this for action/content_type/topic.
     run = Run(org_id=user.org_id, agent_registration_id=reg.id, agent_key=reg.key,
               trigger="manual", status="queued", created_by=user.id,
-              upload_id=upload_id)
+              upload_id=upload_id, task=body.task or {})
     db.add(run)
     db.commit()
     db.refresh(run)
@@ -63,6 +66,6 @@ def get_run(run_id: str, user: User = Depends(current_user), db: Session = Depen
         "logs": run.logs,
         "artifacts": [
             {"id": a.id, "type": a.type, "title": a.title, "body": a.body,
-             "citations": a.citations} for a in artifacts
+             "citations": a.citations, "status": a.status} for a in artifacts
         ],
     }

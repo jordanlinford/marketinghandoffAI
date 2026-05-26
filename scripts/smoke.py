@@ -42,11 +42,14 @@ from sqlalchemy import select  # noqa: E402
 from app.agents import content_grader as content_grader_mod  # noqa: E402
 from app.agents import content_templates as content_templates_mod  # noqa: E402
 from app.agents import synthesis as synthesis_mod  # noqa: E402
+from app.dashboard import suggestions as suggestions_mod  # noqa: E402
+from app.dashboard.ingest import parse_report_csv  # noqa: E402
 from app.data_sources.csv import CsvMarketDataSource  # noqa: E402
 from app.db import SessionLocal, create_all  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (AgentRegistration, Artifact, Guardrail, Org,  # noqa: E402
-                        OrgProfile, Proposal, Run, Upload, User)
+from app.models import (AgentRegistration, Artifact, Guardrail,  # noqa: E402
+                        MetricPoint, Org, OrgProfile, Proposal, ReportUpload,
+                        Run, Suggestion, Upload, User)
 from app.queue import enqueue  # noqa: E402
 from app.setup import crawl as crawl_mod  # noqa: E402
 from app.setup import draft as draft_mod  # noqa: E402
@@ -94,6 +97,21 @@ def main() -> None:
             "suggestions": ["Lead with the cost angle.", "Tighten the CTA."],
         }, 0.0003
     content_grader_mod._llm_grade = _stub_grader_llm
+
+    # Stub the dashboard's industry-perspective LLM. Returns one canned
+    # item in the agreed shape so we can assert structure + labeling.
+    # Test (4)'s deterministic-fallback case overrides this with a raise.
+    def _stub_industry_llm(profile, funnel, settings):
+        return [{
+            "kind": "industry",
+            "recommendation": "Industry stub: in-house legal ops buyers tend "
+                              "to consolidate vendors year-over-year.",
+            "evidence": {"note": "general industry perspective; not verified data"},
+            "confidence": "low",
+            "source_label": "General industry perspective — verify before acting",
+            "idea_content_type": None, "idea_topic": None, "idea_target": None,
+        }]
+    suggestions_mod._llm_industry = _stub_industry_llm
 
     db = SessionLocal()
     try:
@@ -1229,6 +1247,245 @@ def main() -> None:
               "(stitched from destination + tags); PATCH updates tags and "
               "tagged URL, cross-org PATCH denied; rubric + version chain "
               "are tenant-isolated.")
+
+        # ---------------------------------------------------------------------
+        # Analytics dashboard — five checks:
+        #   (1) Ingest: CSV normalizes into MetricPoint rows (generic shape);
+        #       baseline mode flips is_baseline=True; forgiving header mapping
+        #       handles aliased + reordered headers; a missing date column
+        #       returns zero points instead of crashing.
+        #   (2) Attribution join: a row carrying a UTM/campaign that matches
+        #       a produced content_draft is joined to that artifact in the
+        #       funnel view; baseline rows are NEVER attributed.
+        #   (3) Funnel view: metric_points aggregate into the three stages
+        #       over time; the production lane reflects the org's runs/
+        #       artifacts (every content_engine run from earlier is in it).
+        #   (4) Suggestions: trend-based suggestion includes evidence;
+        #       industry-perspective is labeled non-data; when the LLM
+        #       errors, the deterministic fallback returns a single labeled
+        #       "unavailable" item (graceful degradation, honest).
+        #   (5) Tenant isolation: an org only ever sees its own metric_
+        #       points / suggestions via scoped().
+        #
+        # The earlier quality-loop section left `regen_art` saved with
+        # utm_campaign="clm-comparison-q2" (the PATCH set it). We reuse it
+        # as the join key so attribution lines up to a real artifact.
+        # The PATCH happened via the API on a different ORM instance, so
+        # our in-memory copy is stale until we refresh — without this the
+        # UTM-match assertions read the pre-PATCH campaign.
+        # ---------------------------------------------------------------------
+        db.refresh(regen_art)
+        clm_campaign = regen_art.utm_campaign or "clm-comparison-q2"
+
+        # (1) Ingest — forgiving headers (wide format with aliased names).
+        # Note: 'Visits' aliases to sessions; 'Demo Requests' aliases to
+        # demo_requests; 'Campaign' is the UTM key. 'Notes' is unmapped
+        # and should be silently dropped.
+        # Shaped to trigger the deterministic trend rule "mid-funnel
+        # engagement rose materially but bottom-funnel demos stayed flat",
+        # which gives test (4) a clean signal to assert on.
+        ongoing_csv = (
+            "Date,Impressions,Visits,Demo Requests,Campaign,UTM Source,Notes\n"
+            "2026-05-04,12000,800,8,clm-comparison-q2,linkedin,launch week\n"
+            "2026-05-11,15000,950,7,clm-comparison-q2,linkedin,\n"
+            "2026-05-18,18000,1100,8,clm-comparison-q2,linkedin,steady\n"
+            "2026-05-25,21000,1300,7,clm-comparison-q2,linkedin,uplift\n"
+        )
+        up1 = client.post(
+            "/api/dashboard/reports",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("ongoing.csv", ongoing_csv.encode("utf-8"), "text/csv")},
+            data={"mode": "ongoing", "source": "linkedin_ads"},
+        )
+        assert up1.status_code == 200, up1.text
+        up1j = up1.json()
+        assert up1j["mode"] == "ongoing"
+        # Three known metrics × 4 rows = 12 points (impressions/sessions/
+        # demo_requests). The unmapped "Notes" column is dropped silently.
+        assert up1j["point_count"] == 12, up1j
+        cm = up1j["column_mapping"]
+        assert cm["Impressions"]["role"] == "metric"
+        assert cm["Visits"]["metric_name"] == "sessions", cm["Visits"]
+        assert cm["Demo Requests"]["metric_name"] == "demo_requests", cm["Demo Requests"]
+        assert cm["Campaign"]["role"] == "utm_campaign", cm["Campaign"]
+        assert cm["Notes"]["role"] is None, "unmapped column must be reported as None"
+
+        # Baseline upload (untagged historical rows) — should land as
+        # backdrop, NEVER attributed. Demos are deliberately higher than
+        # the ongoing rows so the trend rule sees "bottom flat-to-down"
+        # vs "middle up sharply" — a textbook leak signal.
+        baseline_csv = (
+            "date,impressions,sessions,demos\n"
+            "2026-02-02,5000,200,10\n"
+            "2026-03-02,5500,220,10\n"
+            "2026-04-06,6000,260,10\n"
+        )
+        up2 = client.post(
+            "/api/dashboard/reports",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("baseline.csv", baseline_csv.encode("utf-8"), "text/csv")},
+            data={"mode": "baseline", "source": "ga"},
+        )
+        assert up2.status_code == 200, up2.text
+        up2j = up2.json()
+        assert up2j["mode"] == "baseline"
+        assert up2j["point_count"] == 9, up2j
+
+        # Forgiving on a CSV with no date column — must NOT crash.
+        bad_csv = "campaign,impressions,clicks\nx,100,5\n"
+        up_bad = client.post(
+            "/api/dashboard/reports",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("bad.csv", bad_csv.encode("utf-8"), "text/csv")},
+            data={"mode": "ongoing", "source": "manual"},
+        )
+        assert up_bad.status_code == 200, up_bad.text
+        bj = up_bad.json()
+        assert bj["point_count"] == 0, bj
+        assert bj["format"] == "empty", bj
+
+        # Direct DB check: baseline flag set; metric_name uses canonical
+        # (alias → "sessions", not "visits"); raw_ref carries debug info.
+        all_points = db.execute(
+            scoped(MetricPoint, onit.id)
+        ).scalars().all()
+        assert any(p.is_baseline and p.metric_name == "impressions" for p in all_points), \
+            "baseline upload must flip is_baseline=True"
+        assert any(not p.is_baseline and p.metric_name == "sessions"
+                   and p.utm_campaign == clm_campaign for p in all_points), \
+            "ongoing upload must persist canonical metric names + UTM"
+        assert any(p.raw_ref.get("row") for p in all_points), \
+            "raw_ref should carry row debug info"
+        print(f"[OK] Dashboard (1): {up1j['point_count']} ongoing + "
+              f"{up2j['point_count']} baseline points landed; aliased headers "
+              "mapped to canonical metric names; missing-date CSV returned "
+              "format=empty without crashing.")
+
+        # (2) Attribution — the funnel view must credit the matching artifact.
+        funnel_resp = client.get(
+            "/api/dashboard/funnel",
+            headers={"X-Dev-User-Email": "jordan@onit.com"})
+        assert funnel_resp.status_code == 200, funnel_resp.text
+        funnel = funnel_resp.json()
+        bottom = funnel["stages"]["bottom"]
+        # demo_requests live in the bottom funnel; the ongoing rows
+        # carrying utm_campaign=clm-comparison-q2 must show up as
+        # attributed signal AND credit our regen_art.
+        bottom_attributed_total = sum(bottom["attributed"])
+        bottom_baseline_total = sum(bottom["baseline"])
+        assert bottom_attributed_total >= 8 + 7 + 8 + 7, \
+            f"ongoing demo_requests must flow into bottom 'attributed', got {bottom_attributed_total}"
+        # Baseline DEMOs (10+10+10=30) sit in backdrop ONLY.
+        assert bottom_baseline_total >= 10 + 10 + 10, \
+            f"baseline demos must flow into bottom 'baseline', got {bottom_baseline_total}"
+        contribs = bottom["top_contributors"]
+        # The UTM key matches our regen_art tags → it must be a contributor.
+        contrib_ids = {c["artifact_id"] for c in contribs}
+        assert regen_art.id in contrib_ids, \
+            f"the matching artifact must appear in top_contributors; got {contribs}"
+        # Baseline rows have NO utm_campaign → they cannot contribute to
+        # any specific artifact (only the backdrop trend).
+        assert not any(c.get("utm_campaign") in (None, "") for c in contribs), \
+            "baseline rows must NOT appear as named contributors"
+        print(f"[OK] Dashboard (2): UTM join attributes demo_requests "
+              f"(total attributed={bottom_attributed_total}) to artifact "
+              f"{regen_art.id[:6]}…; baseline {bottom_baseline_total} stays "
+              "backdrop (not attributed).")
+
+        # (3) Funnel view + production lane.
+        # The top + middle stages must have data (impressions + sessions).
+        top = funnel["stages"]["top"]
+        middle = funnel["stages"]["middle"]
+        assert sum(top["total"]) > 0 and "impressions" in top["metric_names"], top
+        assert sum(middle["total"]) > 0 and "sessions" in middle["metric_names"], middle
+        # Production lane reflects the org's runs / artifacts — we've
+        # produced multiple content_engine + market_intel runs by now.
+        prod = funnel["production"]
+        assert sum(prod["runs_total"]) > 0, f"production lane empty: {prod}"
+        assert sum(prod["drafts_produced"]) > 0, f"no drafts on production lane: {prod}"
+        assert len(prod["buckets"]) == len(funnel["buckets"]), \
+            "production buckets must align with stage buckets"
+        print(f"[OK] Dashboard (3): three stages aggregated (top sum="
+              f"{sum(top['total'])}, middle sum={sum(middle['total'])}, "
+              f"bottom sum={sum(bottom['total'])}); production lane shows "
+              f"{sum(prod['drafts_produced'])} draft(s), "
+              f"{sum(prod['runs_total'])} run(s).")
+
+        # (4) Suggestions — refresh, then assert structure + labeling.
+        refresh = client.post(
+            "/api/dashboard/suggestions/refresh",
+            headers={"X-Dev-User-Email": "jordan@onit.com"})
+        assert refresh.status_code == 200, refresh.text
+        rj = refresh.json()
+        assert rj, "refresh must produce at least one suggestion"
+        trend_items = [s for s in rj if s["kind"] == "trend"]
+        industry_items = [s for s in rj if s["kind"] == "industry"]
+        assert trend_items, "deterministic trend rules must produce at least one item"
+        for s in trend_items:
+            assert s["source_label"].startswith("Trend-based"), s
+            assert s["evidence"], f"every trend suggestion must carry evidence: {s}"
+        assert industry_items, "industry suggestion (stubbed) must appear"
+        for s in industry_items:
+            assert s["source_label"].startswith("General industry perspective"), s
+
+        # Deterministic fallback: with the stub swapped for a raiser, the
+        # industry section must degrade to the labeled "unavailable" item
+        # WITHOUT crashing the refresh and WITHOUT producing a trend lookalike.
+        original_industry = suggestions_mod._llm_industry
+
+        def _industry_boom(profile, funnel, settings):
+            raise RuntimeError("simulated industry LLM outage")
+        suggestions_mod._llm_industry = _industry_boom
+        try:
+            refresh2 = client.post(
+                "/api/dashboard/suggestions/refresh",
+                headers={"X-Dev-User-Email": "jordan@onit.com"})
+        finally:
+            suggestions_mod._llm_industry = original_industry
+        assert refresh2.status_code == 200, refresh2.text
+        rj2 = refresh2.json()
+        industry2 = [s for s in rj2 if s["kind"] == "industry"]
+        assert len(industry2) == 1, \
+            f"fallback must yield exactly one industry placeholder, got {industry2}"
+        assert "unavailable" in industry2[0]["recommendation"].lower(), \
+            f"fallback should say industry perspective is unavailable: {industry2[0]}"
+        assert industry2[0]["source_label"].startswith("General industry perspective"), \
+            "fallback MUST still carry the 'verify before acting' label"
+        print(f"[OK] Dashboard (4): {len(trend_items)} trend "
+              f"suggestion(s) with evidence; industry stub labeled "
+              "'verify before acting'; LLM-outage fallback yields a single "
+              "labeled placeholder.")
+
+        # (5) Tenant isolation — Acme (other) cannot see Onit's points
+        # or suggestions via scoped(). Also: a baseline upload by Acme
+        # against the same campaign string must NOT pull credit toward
+        # Onit's artifact (each org's funnel is computed from its own rows).
+        leaked_points = db.execute(
+            scoped(MetricPoint, other.id)
+        ).scalars().all()
+        assert leaked_points == [], \
+            "TENANT LEAK: Acme can read Onit's metric points"
+        leaked_suggs = db.execute(
+            scoped(Suggestion, other.id)
+        ).scalars().all()
+        assert leaked_suggs == [], \
+            "TENANT LEAK: Acme can read Onit's suggestions"
+        leaked_uploads = db.execute(
+            scoped(ReportUpload, other.id)
+        ).scalars().all()
+        assert leaked_uploads == [], \
+            "TENANT LEAK: Acme can read Onit's report uploads"
+        # And the API boundary: Acme is on a non-allowed domain so the
+        # dev-auth allowlist must 403 BEFORE the org filter runs.
+        cross_funnel = client.get(
+            "/api/dashboard/funnel",
+            headers={"X-Dev-User-Email": "ops@acme.com"})
+        assert cross_funnel.status_code in (403, 404), \
+            f"cross-org dashboard read MUST be denied, got " \
+            f"{cross_funnel.status_code}: {cross_funnel.text}"
+        print("[OK] Dashboard (5): tenant isolation holds — Acme sees 0 of "
+              "Onit's metric_points / suggestions / report_uploads via "
+              "scoped(), and the API blocks the cross-org read.")
 
         print("[OK] Smoke test passed.")
     finally:

@@ -22,6 +22,18 @@ import re
 from app.data_sources.base import CompanyRecord, KeywordRecord, MarketDataSource
 
 
+def norm_header(h: str | None) -> str:
+    """Forgiving header normalizer: lowercase, strip, treat '_' / '-' / '.'
+    as spaces, collapse whitespace. 'Business_Name', 'business name', and
+    'BUSINESS-NAME' all normalize the same. Shared across the account CSV
+    parser (app/api/uploads.py) and the metric-report ingest
+    (app/dashboard/ingest.py) so both stay forgiving in the same way."""
+    s = (h or "").strip().lower()
+    for ch in ("_", "-", "."):
+        s = s.replace(ch, " ")
+    return " ".join(s.split())
+
+
 def _coerce_int(v) -> int:
     if v is None:
         return 0

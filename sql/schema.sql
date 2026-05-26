@@ -181,6 +181,74 @@ CREATE TABLE audit_log (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- ---- Analytics dashboard ------------------------------------------------
+-- Generic time-series receptacle: users upload reports their tools already
+-- export, we normalize each row to a point. Curated funnel + production
+-- lane views compose on top (app/dashboard/funnel.py). UTM fields are the
+-- join key back to artifacts.utm_*.
+
+CREATE TABLE report_uploads (
+    id              TEXT PRIMARY KEY,
+    org_id          TEXT NOT NULL REFERENCES orgs(id),
+    filename        TEXT NOT NULL,
+    -- "ga" | "semrush" | "linkedin_ads" | "manual" | ...
+    source          TEXT NOT NULL DEFAULT 'manual',
+    -- 'baseline' = backdrop (never attributed); 'ongoing' = attributed where
+    -- the row carries a UTM matching produced content.
+    mode            TEXT NOT NULL DEFAULT 'ongoing',
+    column_mapping  JSONB NOT NULL DEFAULT '{}',
+    point_count     INTEGER NOT NULL DEFAULT 0,
+    uploaded_by     TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE metric_points (
+    id                TEXT PRIMARY KEY,
+    org_id            TEXT NOT NULL REFERENCES orgs(id),
+    report_upload_id  TEXT REFERENCES report_uploads(id),
+    source            TEXT NOT NULL DEFAULT 'manual',
+    metric_name       TEXT NOT NULL,
+    value             DOUBLE PRECISION NOT NULL DEFAULT 0,
+    date              DATE NOT NULL,
+    segment           TEXT NOT NULL DEFAULT '',
+    -- The join key to artifacts.utm_*. Present only when the report carried
+    -- it (typical for 'ongoing' uploads; baseline rows are usually untagged).
+    utm_campaign      TEXT,
+    utm_source        TEXT,
+    utm_medium        TEXT,
+    utm_content       TEXT,
+    raw_ref           JSONB NOT NULL DEFAULT '{}',
+    -- True for points from a 'baseline' upload — backdrop only, never
+    -- attributed to produced content.
+    is_baseline       BOOLEAN NOT NULL DEFAULT false,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE suggestions (
+    id                  TEXT PRIMARY KEY,
+    org_id              TEXT NOT NULL REFERENCES orgs(id),
+    -- 'trend' (grounded in this org's data) | 'industry' (LLM perspective,
+    -- explicitly labeled non-data).
+    kind                TEXT NOT NULL,
+    recommendation      TEXT NOT NULL,
+    -- Evidence is required: a suggestion without its "because" is not
+    -- allowed by the brief. Carries the specific data motivating it.
+    evidence            JSONB NOT NULL DEFAULT '{}',
+    confidence          TEXT NOT NULL DEFAULT 'medium',
+    source_label        TEXT NOT NULL DEFAULT '',
+    idea_content_type   TEXT,
+    idea_topic          TEXT,
+    idea_target         TEXT,
+    status              TEXT NOT NULL DEFAULT 'open',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_metric_points_org_date    ON metric_points(org_id, date);
+CREATE INDEX idx_metric_points_campaign    ON metric_points(org_id, utm_campaign);
+CREATE INDEX idx_metric_points_metric_name ON metric_points(org_id, metric_name);
+CREATE INDEX idx_report_uploads_org        ON report_uploads(org_id, created_at);
+CREATE INDEX idx_suggestions_org_status    ON suggestions(org_id, status);
+
 CREATE TABLE jobs (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id),
@@ -209,7 +277,8 @@ DECLARE t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY['users','connections','agents','runs','artifacts',
                            'proposals','guardrails','audit_log','jobs','uploads',
-                           'org_profiles']
+                           'org_profiles','report_uploads','metric_points',
+                           'suggestions']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', t);

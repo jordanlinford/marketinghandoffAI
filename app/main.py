@@ -3,7 +3,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
-from app.api import admin, artifacts, profile, review, runs, uploads
+from app.api import admin, artifacts, dashboard, profile, review, runs, uploads
 from app.config import get_settings
 from app.db import create_all
 
@@ -16,6 +16,7 @@ app.include_router(admin.router)
 app.include_router(uploads.router)
 app.include_router(profile.router)
 app.include_router(artifacts.router)
+app.include_router(dashboard.router)
 
 _UI_FILE = Path(__file__).parent / "static" / "ui.html"
 

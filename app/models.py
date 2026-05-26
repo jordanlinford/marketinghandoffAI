@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -252,6 +252,105 @@ class AuditLog(Base, TimestampMixin):
     target_type: Mapped[str] = mapped_column(String(80), default="")
     target_id: Mapped[str] = mapped_column(String(64), default="")
     meta: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+# ---------------------------------------------------------------------------
+# Analytics dashboard — generic time-series receptacle.
+#
+# The dashboard is a RECEPTACLE, not a connector. Users upload the reports
+# their tools already export (GA / SEMrush / LinkedIn Ads / ...) and the
+# normalized rows land in `metric_points`. The shape is intentionally
+# generic — different tools export wildly different metrics — and the
+# curated funnel view is computed on top (app/dashboard/funnel.py).
+#
+# UTM tags on metric_points are the JOIN KEY to artifacts.utm_*, so where
+# a row carries them we attribute performance back to the content the
+# system produced. Untagged rows (typical for historical baseline data)
+# stay backdrop — never claimed as something the system drove.
+# ---------------------------------------------------------------------------
+class ReportUpload(Base, TimestampMixin):
+    """One uploaded report file. `mode` distinguishes the historical
+    backdrop ("baseline") from recent rows we'll try to attribute
+    ("ongoing"). column_mapping records how columns were resolved so a
+    later debug or re-import has full traceability."""
+    __tablename__ = "report_uploads"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    filename: Mapped[str] = mapped_column(String(300))
+    # User-supplied label of which tool produced the file (e.g. "ga",
+    # "semrush", "linkedin_ads", "manual"). Stored on every metric_point
+    # in the same upload so we can filter or trace by tool.
+    source: Mapped[str] = mapped_column(String(50), default="manual")
+    # "baseline" → backdrop only, never attributed.
+    # "ongoing"  → attributed where UTM/campaign matches produced content.
+    mode: Mapped[str] = mapped_column(String(20), default="ongoing")
+    column_mapping: Mapped[dict] = mapped_column(JSON, default=dict)
+    point_count: Mapped[int] = mapped_column(Integer, default=0)
+    uploaded_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class MetricPoint(Base, TimestampMixin):
+    """One normalized observation. The schema is the generic point; the
+    VIEW is curated (top/middle/bottom funnel stages computed at read
+    time). Storing generically means a new tool's export just needs a
+    column-mapping — no schema migration."""
+    __tablename__ = "metric_points"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    report_upload_id: Mapped[str | None] = mapped_column(
+        ForeignKey("report_uploads.id"), nullable=True, index=True)
+    # Which tool exported this row (denormalized from ReportUpload.source
+    # for cheap filtering without a join).
+    source: Mapped[str] = mapped_column(String(50), default="manual")
+    metric_name: Mapped[str] = mapped_column(String(120), index=True)
+    value: Mapped[float] = mapped_column(Float, default=0.0)
+    date: Mapped[datetime] = mapped_column(Date, index=True)
+    # Optional dimension (channel, page, keyword, account, ...).
+    segment: Mapped[str] = mapped_column(String(200), default="")
+    # The join key to artifacts.utm_*. Present only when the report
+    # actually carried UTMs (typical for "ongoing" uploads — historical
+    # baseline rows usually arrive untagged).
+    utm_campaign: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    utm_source: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    utm_medium: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    utm_content: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    # "Where this row came from" for debug/audit (row index, raw values,
+    # auto-mapping decisions). Not load-bearing — never read by views.
+    raw_ref: Mapped[dict] = mapped_column(JSON, default=dict)
+    # True when this point came from a "baseline" upload — backdrop only,
+    # never attributed to produced content. Mirrors the honesty discipline
+    # used for csv vs csv+intent in the market_intel ingest.
+    is_baseline: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+
+
+class Suggestion(Base, TimestampMixin):
+    """An evidence-attached recommendation the cockpit surfaces. Two kinds:
+       * "trend"    — grounded in the org's OWN funnel + production data.
+                      Deterministic rule-based generators always produce
+                      these (no LLM dependency), and every one carries the
+                      specific data motivating it.
+       * "industry" — the model's general read of the space. EXPLICITLY
+                      labeled as perspective; carries confabulation risk
+                      and is never presented as current data.
+    `idea_*` fields capture a one-click route into the content engine —
+    when set, the UI offers "Generate this" which POSTs an /api/runs
+    content_engine task pre-filled with that idea."""
+    __tablename__ = "suggestions"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    recommendation: Mapped[str] = mapped_column(Text)
+    # Specific data points / numbers the recommendation rests on. Required:
+    # a suggestion without its "because" is not allowed (see the brief).
+    evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    confidence: Mapped[str] = mapped_column(String(20), default="medium")
+    # UI-ready label: "Trend-based — grounded in your data" |
+    # "General industry perspective — verify before acting".
+    source_label: Mapped[str] = mapped_column(String(120), default="")
+    idea_content_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    idea_topic: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    idea_target: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="open")  # open|dismissed|actioned
 
 
 # ---------------------------------------------------------------------------

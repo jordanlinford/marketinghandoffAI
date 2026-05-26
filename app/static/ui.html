@@ -279,9 +279,10 @@
 <header class="bar">
   <div class="brand">Agent <span class="dot">●</span> HQ</div>
   <div class="view-tabs" role="tablist">
-    <button id="tab-runs"    class="active" role="tab">Runs</button>
-    <button id="tab-content" role="tab">Content</button>
-    <button id="tab-setup"   role="tab">Setup</button>
+    <button id="tab-runs"      class="active" role="tab">Runs</button>
+    <button id="tab-content"   role="tab">Content</button>
+    <button id="tab-dashboard" role="tab">Dashboard</button>
+    <button id="tab-setup"     role="tab">Setup</button>
   </div>
   <div class="who" id="who">
     <span>loading…</span>
@@ -367,6 +368,64 @@
 
     <div id="content-status" class="setup-status"
          style="margin-top:14px;">Use one of the paths above to trigger a content_engine run.</div>
+  </section>
+</main>
+
+<!-- =========================== Dashboard view =========================== -->
+<!-- Generic time-series receptacle, curated funnel + production lane on top.
+     Users UPLOAD the reports their tools already export; we never connect to
+     GA/LinkedIn/etc. APIs (out of scope). Honest baseline-vs-attributed
+     distinction throughout: untagged historical rows are backdrop only and
+     are NEVER claimed as something the system drove. -->
+<main id="dashboard-view" class="setup-main" style="display:none;">
+  <section class="panel">
+    <div class="row" style="margin-bottom:8px;">
+      <h2 style="margin:0">Dashboard</h2>
+      <span class="setup-status">
+        Funnel + production over time. Baseline = backdrop trend (faded);
+        attributed = signal from rows whose UTMs match content you produced.
+      </span>
+    </div>
+
+    <div class="setup-paths">
+      <div class="setup-path">
+        <h4>Upload a report</h4>
+        <p>GA / SEMrush / LinkedIn / manual CSVs — we map common headers
+           case-insensitively. Unknown columns are dropped silently.</p>
+        <div class="row" style="gap:6px;">
+          <select id="dash-mode">
+            <option value="ongoing">ongoing — attribute where UTMs match</option>
+            <option value="baseline">baseline — historical backdrop only</option>
+          </select>
+          <input type="text" id="dash-source" placeholder="source (e.g. ga, linkedin_ads)" />
+        </div>
+        <div class="row" style="gap:6px; margin-top:6px;">
+          <input type="file" id="dash-file" accept=".csv,text/csv" />
+          <button id="dash-upload-btn">Upload report</button>
+        </div>
+        <div id="dash-upload-status" class="setup-status"
+             style="margin-top:6px;"></div>
+      </div>
+      <div class="setup-path">
+        <h4>Refresh suggestions</h4>
+        <p>Recompute trend (grounded) + industry-perspective (labeled) items
+           from your current funnel + profile.</p>
+        <button id="dash-refresh-btn" class="ghost">Refresh suggestions</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <h3>Funnel</h3>
+      <div id="dash-funnel"></div>
+    </div>
+    <div class="section">
+      <h3>Production lane</h3>
+      <div id="dash-production"></div>
+    </div>
+    <div class="section">
+      <h3>Suggestions</h3>
+      <div id="dash-suggestions"></div>
+    </div>
   </section>
 </main>
 
@@ -990,6 +1049,254 @@ async function regenerateDraft(parentArtifactId, critique) {
   } catch (e) {
     alert(`Regenerate failed: ${e.message}`);
   }
+}
+
+// ---- Dashboard ----------------------------------------------------------
+// Generic time-series receptacle, curated funnel view on top. The UI keeps
+// the honesty discipline: baseline (untagged historical) data is rendered
+// as faded backdrop; attributed (UTM-joined) data is rendered as solid
+// signal — never claimed as something the system drove unless the join
+// actually connected. Same chassis as csv vs csv+intent.
+
+async function loadDashboard() {
+  await Promise.all([loadFunnel(), loadSuggestions()]);
+}
+
+async function loadFunnel() {
+  const funnelRoot = document.getElementById('dash-funnel');
+  const prodRoot = document.getElementById('dash-production');
+  funnelRoot.innerHTML = '<div class="setup-status">Loading…</div>';
+  prodRoot.innerHTML = '';
+  let funnel;
+  try {
+    funnel = await api('/api/dashboard/funnel');
+  } catch (e) {
+    funnelRoot.innerHTML = `<div class="err">Failed to load funnel: ${e.message}</div>`;
+    return;
+  }
+  if (!funnel.buckets || !funnel.buckets.length) {
+    funnelRoot.innerHTML = el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No metric data yet'),
+      el('div', {},
+        'Upload a baseline report (historical) to see your trend backdrop, ' +
+        'then upload ongoing reports so attributed signal lights up.'),
+    ).outerHTML;
+    return;
+  }
+  funnelRoot.innerHTML = '';
+  funnelRoot.appendChild(renderFunnelStages(funnel));
+  prodRoot.appendChild(renderProductionLane(funnel));
+}
+
+function renderFunnelStages(funnel) {
+  const wrap = el('div', { class: 'sizing' });
+  const stageOrder = ['top', 'middle', 'bottom'];
+  for (const key of stageOrder) {
+    const s = funnel.stages[key];
+    if (!s) continue;
+    const baseline = (s.baseline || []).reduce((a, b) => a + b, 0);
+    const attributed = (s.attributed || []).reduce((a, b) => a + b, 0);
+    const total = baseline + attributed;
+    const card = el('div', { class: 'card', style: 'text-align:left;' },
+      el('div', { class: 'lbl' }, s.label || key),
+      el('div', { class: 'num' }, fmtNumber(total)),
+      el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px; margin-top:6px;' },
+        `attributed ${fmtNumber(attributed)} · baseline ${fmtNumber(baseline)} (backdrop)`),
+      el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px; margin-top:4px;' },
+        `metrics: ${(s.metric_names || []).join(', ') || '—'}`),
+      renderSparkline(s.total),
+      renderContributors(s.top_contributors),
+    );
+    wrap.appendChild(card);
+  }
+  return wrap;
+}
+
+function renderSparkline(series) {
+  // Tiny block sparkline. Marker-readable bars; no chart library. Each
+  // bucket gets a vertical bar height-scaled to the max value.
+  if (!series || !series.length) return el('div');
+  const max = Math.max(...series, 1);
+  const wrap = el('div', { style: 'display:flex; align-items:flex-end; ' +
+    'gap:2px; height:32px; margin-top:8px;' });
+  for (const v of series) {
+    const h = Math.max(2, Math.round((v / max) * 30));
+    wrap.appendChild(el('div', { style:
+      `width:6px; height:${h}px; background:var(--accent); border-radius:2px;`,
+      title: String(v) }));
+  }
+  return wrap;
+}
+
+function renderContributors(contribs) {
+  if (!contribs || !contribs.length) {
+    return el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px; margin-top:6px;' },
+      'No attributed content yet.');
+  }
+  const ul = el('ul', { class: 'recs', style: 'margin-top:6px;' });
+  for (const c of contribs) {
+    ul.appendChild(el('li', {},
+      `${c.title || 'content'} · ${fmtNumber(c.value)} (utm_campaign=${c.utm_campaign || '—'})`));
+  }
+  return ul;
+}
+
+function renderProductionLane(funnel) {
+  const prod = funnel.production || {};
+  const buckets = prod.buckets || funnel.buckets || [];
+  const totalDrafts = (prod.drafts_produced || []).reduce((a, b) => a + b, 0);
+  const totalReady = (prod.drafts_ready || []).reduce((a, b) => a + b, 0);
+  const totalPending = (prod.drafts_pending || []).reduce((a, b) => a + b, 0);
+  const totalCost = (prod.cost_usd || []).reduce((a, b) => a + b, 0);
+  return el('div', { class: 'sizing' },
+    el('div', { class: 'card' },
+      el('div', { class: 'num' }, String(totalDrafts)),
+      el('div', { class: 'lbl' }, 'Drafts produced'),
+      renderSparkline(prod.drafts_produced)),
+    el('div', { class: 'card' },
+      el('div', { class: 'num' }, String(totalReady)),
+      el('div', { class: 'lbl' }, 'Ready')),
+    el('div', { class: 'card' },
+      el('div', { class: 'num' }, String(totalPending)),
+      el('div', { class: 'lbl' }, 'Pending review')),
+    el('div', { class: 'card' },
+      el('div', { class: 'num' }, fmtCost(totalCost)),
+      el('div', { class: 'lbl' }, `Cost across ${buckets.length} bucket(s)`)),
+  );
+}
+
+async function loadSuggestions() {
+  const root = document.getElementById('dash-suggestions');
+  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  let items;
+  try {
+    items = await api('/api/dashboard/suggestions?status=open');
+  } catch (e) {
+    root.innerHTML = `<div class="err">Failed to load suggestions: ${e.message}</div>`;
+    return;
+  }
+  root.innerHTML = '';
+  if (!items.length) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No suggestions yet'),
+      el('div', {}, 'Upload a report or click "Refresh suggestions" to compute trend + industry items.'),
+    ));
+    return;
+  }
+  for (const s of items) {
+    root.appendChild(renderSuggestionCard(s));
+  }
+}
+
+function renderSuggestionCard(s) {
+  const isIndustry = s.kind === 'industry';
+  const badge = el('span',
+    { class: 'badge ' + (isIndustry ? 'pending' : 'passed') },
+    isIndustry ? 'perspective — verify' : 'grounded in your data');
+  const evidenceRows = [];
+  for (const [k, v] of Object.entries(s.evidence || {})) {
+    evidenceRows.push(el('li', {},
+      el('strong', { style: 'color:var(--muted); font-weight:500;' }, `${k}:`),
+      ' ', String(v)));
+  }
+  const actions = el('div', { class: 'actions' });
+  if (s.idea_content_type && s.idea_topic) {
+    const genBtn = el('button', { class: 'approve' }, 'Generate this');
+    genBtn.addEventListener('click', () => {
+      // Loop back: route the suggestion into the content engine pre-filled
+      // so dashboard → suggestion → generate (tagged, graded) closes the loop.
+      triggerContentGenerate(s.idea_content_type, s.idea_topic, s.idea_target || '');
+    });
+    actions.appendChild(genBtn);
+  }
+  const dismissBtn = el('button', { class: 'ghost' }, 'Dismiss');
+  dismissBtn.addEventListener('click', () => dismissSuggestion(s.id));
+  actions.appendChild(dismissBtn);
+  return el('div', { class: 'proposal' },
+    el('div', { class: 'row' },
+      el('strong', {}, s.recommendation),
+      badge,
+    ),
+    el('div', { class: 'sub', style: 'color: var(--muted); font-size:12px;' },
+      `${s.source_label || ''} · confidence: ${s.confidence || '—'}`),
+    evidenceRows.length
+      ? el('ul', { class: 'cites', style: 'margin-top:8px;' }, ...evidenceRows)
+      : el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' }, '(no evidence)'),
+    actions,
+  );
+}
+
+async function dismissSuggestion(id) {
+  try {
+    await api(`/api/dashboard/suggestions/${id}/dismiss`, { method: 'POST',
+      body: JSON.stringify({}) });
+    await loadSuggestions();
+  } catch (e) {
+    alert(`Dismiss failed: ${e.message}`);
+  }
+}
+
+async function uploadDashboardReport() {
+  const fileEl = document.getElementById('dash-file');
+  const status = document.getElementById('dash-upload-status');
+  if (!fileEl.files || !fileEl.files[0]) {
+    status.innerHTML = '<span class="err">Choose a .csv file first.</span>';
+    return;
+  }
+  const mode = document.getElementById('dash-mode').value;
+  const source = document.getElementById('dash-source').value.trim() || 'manual';
+  const btn = document.getElementById('dash-upload-btn');
+  btn.disabled = true;
+  status.textContent = 'Uploading…';
+  try {
+    const form = new FormData();
+    form.append('file', fileEl.files[0]);
+    form.append('mode', mode);
+    form.append('source', source);
+    const res = await fetch('/api/dashboard/reports', {
+      method: 'POST',
+      headers: { 'X-Dev-User-Email': state.email },
+      body: form,
+    });
+    if (!res.ok) throw new Error(`${res.status}: ${await res.text()}`);
+    const j = await res.json();
+    status.innerHTML = '';
+    status.appendChild(el('div', {},
+      `Ingested ${j.point_count} point(s) from ${j.filename} ` +
+      `(format=${j.format}, mode=${j.mode}, source=${j.source})` +
+      (j.skipped_rows ? ` · ${j.skipped_rows} row(s) skipped` : '')));
+    fileEl.value = '';
+    await loadDashboard();
+  } catch (e) {
+    status.innerHTML = `<span class="err">${e.message}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function refreshSuggestions() {
+  const btn = document.getElementById('dash-refresh-btn');
+  btn.disabled = true;
+  btn.textContent = 'Refreshing…';
+  try {
+    await api('/api/dashboard/suggestions/refresh', { method: 'POST',
+      body: JSON.stringify({}) });
+    await loadSuggestions();
+  } catch (e) {
+    alert(`Refresh failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Refresh suggestions';
+  }
+}
+
+function fmtNumber(n) {
+  if (n == null) return '—';
+  const abs = Math.abs(n);
+  if (abs >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (abs >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  if (Number.isInteger(n)) return String(n);
+  return n.toFixed(1);
 }
 
 function renderDetail() {
@@ -1732,16 +2039,20 @@ async function saveProfile() {
 function switchView(view) {
   const runs = document.getElementById('runs-view');
   const content = document.getElementById('content-view');
+  const dashboard = document.getElementById('dashboard-view');
   const setup = document.getElementById('setup-view');
   const tabRuns = document.getElementById('tab-runs');
   const tabContent = document.getElementById('tab-content');
+  const tabDashboard = document.getElementById('tab-dashboard');
   const tabSetup = document.getElementById('tab-setup');
   // Reset everything first, then turn on just the active view's tab + panel.
   runs.style.display = 'none';
   content.style.display = 'none';
+  dashboard.style.display = 'none';
   setup.style.display = 'none';
   tabRuns.classList.remove('active');
   tabContent.classList.remove('active');
+  tabDashboard.classList.remove('active');
   tabSetup.classList.remove('active');
   if (view === 'setup') {
     setup.style.display = '';
@@ -1753,6 +2064,10 @@ function switchView(view) {
     // Make sure the profile is loaded so we can warn if there isn't one yet —
     // content_engine requires a confirmed profile.
     if (!state.profile) loadProfile();
+  } else if (view === 'dashboard') {
+    dashboard.style.display = '';
+    tabDashboard.classList.add('active');
+    loadDashboard();
   } else {
     runs.style.display = '';
     tabRuns.classList.add('active');
@@ -1773,10 +2088,13 @@ document.getElementById('upload-select').addEventListener('change', (ev) => {
 });
 document.getElementById('tab-runs').addEventListener('click', () => switchView('runs'));
 document.getElementById('tab-content').addEventListener('click', () => switchView('content'));
+document.getElementById('tab-dashboard').addEventListener('click', () => switchView('dashboard'));
 document.getElementById('tab-setup').addEventListener('click', () => switchView('setup'));
 document.getElementById('content-suggest-btn').addEventListener('click', triggerContentSuggest);
 document.getElementById('content-generate-btn').addEventListener('click',
   () => triggerContentGenerate());
+document.getElementById('dash-upload-btn').addEventListener('click', uploadDashboardReport);
+document.getElementById('dash-refresh-btn').addEventListener('click', refreshSuggestions);
 document.getElementById('path-manual').addEventListener('click', () => {
   // "Fill in manually" just closes any open enrichment diff and lets the user
   // edit the working form directly. It does NOT wipe layered-in work.

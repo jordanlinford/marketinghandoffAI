@@ -17,20 +17,12 @@ from sqlalchemy.orm import Session
 
 from app.auth import current_user
 from app.db import get_db
-from app.data_sources.csv import _coerce_int, _parse_intent, _parse_revenue
+from app.data_sources.csv import (_coerce_int, _parse_intent, _parse_revenue,
+                                   norm_header as _norm_header)
 from app.models import Upload, User
 from app.tenancy import scoped
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
-
-
-def _norm_header(h: str | None) -> str:
-    """Lowercase, strip, treat '_' / '-' / '.' as spaces, collapse whitespace.
-    'Business_Name', 'business name', 'BUSINESS-NAME' all normalize the same."""
-    s = (h or "").strip().lower()
-    for ch in ("_", "-", "."):
-        s = s.replace(ch, " ")
-    return " ".join(s.split())
 
 
 # Normalized header → CompanyRecord field. Keys are already in normalized form.

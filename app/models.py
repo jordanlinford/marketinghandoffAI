@@ -137,6 +137,26 @@ class Artifact(Base, TimestampMixin):
     # NOTE: "ready" never means "published" — publishing is a separately-gated,
     # future action. See content_engine for the precedence rules.
     status: Mapped[str] = mapped_column(String(20), default="ready")
+    # Version chain for content drafts: each "Give me something better" run
+    # creates a NEW artifact whose parent_id points to the prior version. The
+    # original is preserved (never destroyed) so the user can compare. Nullable
+    # because the first draft (and all non-content artifacts) have no parent.
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id"), nullable=True, index=True)
+    # Advisory rubric grade (overall 0–100 + per-criterion + suggestions).
+    # NULL when the agent didn't grade (e.g. non-content artifacts, market
+    # briefs, etc.). Grades NEVER gate approval — see content_engine.
+    grade: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # UTM tags — the join key a future analytics dashboard will use to
+    # attribute performance back to the content that drove it. v1 generates
+    # and surfaces the tagged link; publishing under it is a manual step the
+    # user takes. Storing as first-class columns (not inside body) so the
+    # join key is queryable + indexable. NULL for non-content artifacts.
+    utm_campaign: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    utm_source: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    utm_medium: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    utm_content: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    destination_url: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Proposal(Base, TimestampMixin):
@@ -205,6 +225,13 @@ class OrgProfile(Base, TimestampMixin):
     # is out of scope for v1. "all_through" means "draft marked ready", never
     # "auto-published".
     content_review_mode: Mapped[str] = mapped_column(String(20), default="guardrail")
+    # Per-org content rubric: list of {name, description, weight?} criteria.
+    # The grader scores each draft against these. Empty list means "use the
+    # built-in default rubric" (see app/agents/content_grader.py:DEFAULT_RUBRIC)
+    # — we don't persist defaults so that updating the constant flows through
+    # to every org. Grades are ADVISORY: a low score is surfaced, never gates
+    # approval (gating on a self-grade is a footgun — humans decide).
+    content_rubric: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class Guardrail(Base, TimestampMixin):

@@ -4,39 +4,44 @@ Content engine — the first ACTION-TAKING agent.
 This is the agent that finally exercises the proposal → guardrail → review →
 approve/reject spine. market_intel never produced a proposal; this one does.
 
-Two modes (chosen via ctx.task.action):
+Three modes (chosen via ctx.task.action):
 
-  * "suggest"  — read the confirmed OrgProfile + the latest market_brief and
-                 propose a short list of {content_type, topic, rationale,
-                 target} ideas. Read-only: emits an artifact (status=ready),
-                 no proposals.
+  * "suggest"    — propose a short list of {content_type, topic, rationale,
+                   target} ideas, grounded in the confirmed OrgProfile + the
+                   latest market_brief. Read-only.
 
-  * "generate" — produce ONE piece of structured, block-based content for the
-                 chosen idea (or a user-supplied content_type + topic). The
-                 draft is routed per the org's content_review_mode:
+  * "generate"   — produce ONE piece of structured, block-based content for
+                   the chosen idea (or a user-supplied content_type + topic).
+                   Grades the draft against the rubric (advisory), tags it
+                   with UTMs (the future analytics join key), and routes it
+                   per the org's content_review_mode.
 
-                    all_through → artifact status=ready, NO proposal.
-                    guardrail   → clean drafts ready; banned-claim trips
-                                  land in the queue as pending_review.
-                    gate_all    → every draft lands in the queue.
+  * "regenerate" — "Give me something better". Takes a parent_artifact_id +
+                   the user's free-text critique, regenerates with that
+                   feedback, preserves the prior version (parent_id chain),
+                   re-grades. Same routing rules apply.
 
-                 Routing precedence: mode=gate_all wins; otherwise the
-                 guardrail decides. The agent CALLS the shared guardrail
-                 evaluator (it never reinvents the framework).
+Routing precedence (single decision site):
+  - all_through → artifact status=ready, NO proposal.
+  - guardrail   → clean drafts ready; banned-claim trips queued.
+  - gate_all    → every draft queued.
 
 CRITICAL: "approved" here means "draft marked ready" — NOT published. The
 content_review_mode governs DRAFT review only. Publishing to any live channel
-is a separate, always-gated action and is out of scope for v1.
+is a separate, always-gated action and is out of scope for v1. Grades are
+ADVISORY — they never gate approval.
 
-The agent reads the profile + brief + guardrail rules ONLY through ctx, per
-the chassis contract. It does not touch the DB.
+The agent reads the profile + brief + parent draft + guardrail rules ONLY
+through ctx, per the chassis contract. It does not touch the DB.
 """
 from __future__ import annotations
 
 from app import guardrails as guardrails_mod
 from app.agents.base import Agent
+from app.agents.content_grader import grade_content
 from app.agents.content_templates import (available_types, build as build_content)
 from app.agents.registry import register
+from app.agents.utm import build_tagged_url, suggest_utms, utm_dict_from_artifact
 from app.schemas import (AgentContext, AgentResult, ArtifactDraft, Citation,
                          ProposedAction)
 
@@ -82,10 +87,36 @@ class ContentEngineAgent(Agent):
         if action == "suggest":
             return self._suggest(ctx, profile, brief)
         if action == "generate":
-            return self._generate(ctx, profile, brief, task)
+            return self._generate(ctx, profile, brief, task, parent=None)
+        if action == "regenerate":
+            parent = self._lookup_parent(ctx, task)
+            return self._generate(ctx, profile, brief, task, parent=parent)
         raise RuntimeError(
             f"content_engine: unknown task.action {action!r} "
-            f"(expected 'suggest' or 'generate')")
+            f"(expected 'suggest', 'generate', or 'regenerate')")
+
+    # ---- Mode: regenerate helpers -----------------------------------------
+    @staticmethod
+    def _lookup_parent(ctx: AgentContext, task: dict) -> dict:
+        """Find the parent draft in ctx.prior_artifacts (the worker prepends
+        it when task.parent_artifact_id is set). Fails closed if missing —
+        we'd rather raise than silently fall back to a fresh draft, because
+        the user explicitly asked for a revision of THIS piece.
+
+        Cross-tenant safety: the worker loaded the parent via scoped() before
+        passing it in; if it didn't belong to this org, prior_artifacts won't
+        contain it and we fail here."""
+        parent_id = (task.get("parent_artifact_id") or "").strip()
+        if not parent_id:
+            raise RuntimeError(
+                "content_engine regenerate: 'parent_artifact_id' is required")
+        for prior in ctx.prior_artifacts or []:
+            if (prior.get("type") == "content_draft"
+                    and prior.get("id") == parent_id):
+                return prior
+        raise RuntimeError(
+            f"content_engine regenerate: parent artifact {parent_id!r} not "
+            f"found for this org. (Cross-tenant lookups are blocked by scoped().)")
 
     # ---- Mode: suggest ----------------------------------------------------
     def _suggest(self, ctx: AgentContext, profile: dict,
@@ -157,43 +188,76 @@ class ContentEngineAgent(Agent):
 
         return ideas[:6]
 
-    # ---- Mode: generate ---------------------------------------------------
+    # ---- Mode: generate (covers both fresh + regenerate) ------------------
     def _generate(self, ctx: AgentContext, profile: dict, brief: dict | None,
-                  task: dict) -> AgentResult:
-        content_type = (task.get("content_type") or "").strip()
-        topic = (task.get("topic") or "").strip()
-        target = (task.get("target") or "").strip()
+                  task: dict, parent: dict | None) -> AgentResult:
+        # For "generate", task carries content_type + topic + target. For
+        # "regenerate", these default to the parent's values so the user only
+        # has to supply the critique. Either path lets the user override.
+        parent_body = (parent or {}).get("body") or {}
+        parent_content = parent_body.get("content") or {}
+        parent_meta = parent_content.get("metadata") or {}
+        content_type = (task.get("content_type")
+                        or (parent_content.get("content_type") if parent else "")
+                        or "").strip()
+        topic = (task.get("topic")
+                 or (parent_meta.get("topic") if parent else "")
+                 or "").strip()
+        target = (task.get("target")
+                  or (parent_meta.get("target") if parent else "")
+                  or "").strip()
+        critique = (task.get("critique") or "").strip() if parent else ""
+        action_label = "regenerate" if parent else "generate"
+
         if not content_type:
-            raise RuntimeError("content_engine generate: 'content_type' is required")
+            raise RuntimeError(f"content_engine {action_label}: 'content_type' is required")
         if content_type not in available_types():
             raise RuntimeError(
-                f"content_engine generate: unknown content_type {content_type!r} "
+                f"content_engine {action_label}: unknown content_type {content_type!r} "
                 f"(available: {available_types()})")
         if not topic:
-            raise RuntimeError("content_engine generate: 'topic' is required")
+            raise RuntimeError(f"content_engine {action_label}: 'topic' is required")
+        if parent and not critique:
+            raise RuntimeError(
+                "content_engine regenerate: 'critique' is required — describe "
+                "what you'd like changed.")
 
-        content, cost = build_content(content_type, profile, brief, topic, target)
-        # Assemble flat text for the guardrail check — the rule trips on any
-        # banned phrase appearing in ANY block's text.
+        content, gen_cost = build_content(content_type, profile, brief,
+                                          topic, target, critique=critique)
+
+        # ---- UTM tagging (the future analytics join key) ------------------
+        # Version increments down the parent chain so utm_content is unique
+        # per piece. The campaign/source/medium dimensions are CARRIED FORWARD
+        # from the parent (a "Give me something better" stays inside the
+        # same campaign), but utm_content is always re-derived per version so
+        # v2 is distinguishable from v1. Task overrides win in all cases.
+        version = int(parent_body.get("version", 1)) + 1 if parent else 1
+        utm_overrides: dict = {}
+        if parent:
+            parent_utms = utm_dict_from_artifact(parent)
+            # Preserve the campaign + channel dimensions; let utm_content be
+            # rebuilt with the new version suffix.
+            for k in ("utm_campaign", "utm_source", "utm_medium"):
+                if parent_utms.get(k):
+                    utm_overrides[k] = parent_utms[k]
+        utm_overrides.update(task.get("utm") or {})
+        utms = suggest_utms(content_type, topic, version=version,
+                            overrides=utm_overrides)
+        destination_url = (task.get("destination_url")
+                           or (parent or {}).get("destination_url")
+                           or profile.get("website_url") or "")
+        tagged_url = build_tagged_url(destination_url, utms)
+
+        # ---- Guardrail + routing (unchanged spine) ------------------------
         flat_text = "\n".join((b.get("text") or "") for b in content.get("blocks", []))
-
         mode = (profile.get("content_review_mode") or _GUARDRAIL).lower()
-        # The agent calls the SHARED guardrail evaluator with the org's rules
-        # (loaded by the worker into ctx.guardrail_rules). banned_claims is
-        # merged in from the profile by the worker — single source of truth.
         probe = ProposedAction(
             action_type="content_review",
             payload={"content_type": content_type, "topic": topic, "text": flat_text},
             guardrail_scope="content",
-            reasoning=f"Drafted {content_type} for topic {topic!r}.")
+            reasoning=f"{action_label} {content_type} for topic {topic!r}.")
         gstatus, gdetail = guardrails_mod.evaluate(probe, ctx.guardrail_rules or {})
 
-        # Routing precedence (kept here, single decision site):
-        #   * mode=gate_all → always queue.
-        #   * mode=guardrail → queue iff the rule blocked the draft.
-        #   * mode=all_through → never queue (still recorded as an artifact).
-        # NOTE: "ready" never means "published" — publishing is a separate,
-        # always-gated future action.
         if mode == _GATE_ALL:
             needs_review, why = True, "Org policy: every draft reviewed (gate_all)."
         elif mode == _ALL_THROUGH:
@@ -201,8 +265,13 @@ class ContentEngineAgent(Agent):
         else:  # guardrail
             needs_review = (gstatus == "blocked")
             why = gdetail
-
         artifact_status = "pending_review" if needs_review else "ready"
+
+        # ---- Self-grade (advisory, never gating) --------------------------
+        grade, grade_cost = grade_content(content, profile)
+        total_cost = round(gen_cost + grade_cost, 6)
+
+        # ---- Build the artifact -------------------------------------------
         provenance = Citation(
             source="Org profile (confirmed) + latest market brief"
             if brief else "Org profile (confirmed)",
@@ -212,6 +281,12 @@ class ContentEngineAgent(Agent):
         review_note = Citation(
             source="Review routing",
             snippet=f"mode={mode}, guardrail={gstatus} — {why}")
+        cites = [provenance, review_note]
+        if parent:
+            cites.append(Citation(
+                source="Revision",
+                snippet=f"Revised from artifact {parent.get('id')} — critique: {critique!r}"))
+
         body = {
             "content": content,
             "provenance": {
@@ -221,27 +296,39 @@ class ContentEngineAgent(Agent):
                 "competitors_reflected": [
                     c.get("name") for c in (profile.get("competitors") or [])
                     if isinstance(c, dict) and c.get("name")],
+                # Honest about the publish gap (brief: graceful-honesty rule):
+                "publish_note": ("This is a draft. Publish using the tagged "
+                                 "link so performance can be traced back here."),
             },
             "routing": {"mode": mode, "guardrail_status": gstatus,
                         "guardrail_detail": gdetail, "needs_review": needs_review,
                         "artifact_status": artifact_status},
+            "version": version,
+            "parent_artifact_id": (parent or {}).get("id"),
+            "critique": critique,
+            "grade": grade,
+            "tagged_url": tagged_url,
+            "cost_breakdown": {"generation": gen_cost, "grading": grade_cost},
         }
         art = ArtifactDraft(
             type="content_draft",
-            title=f"{content_type.replace('_', ' ').title()} — {topic[:60]}",
-            body=body, citations=[provenance, review_note],
+            title=f"{content_type.replace('_', ' ').title()} — {topic[:60]}"
+                  + (f" (v{version})" if version > 1 else ""),
+            body=body, citations=cites,
             status=artifact_status,
+            parent_id=(parent or {}).get("id"),
+            grade=grade,
+            utm_campaign=utms["utm_campaign"], utm_source=utms["utm_source"],
+            utm_medium=utms["utm_medium"], utm_content=utms["utm_content"],
+            destination_url=destination_url or None,
         )
 
         proposals: list[ProposedAction] = []
         if needs_review:
             # The proposal payload carries enough for the queue UI to render
-            # the draft (content_type, topic, blocks). artifact_id is filled
-            # in by the worker after the artifact row is flushed.
-            # The Proposal's run_id (set by the worker) already links back to
-            # the content_draft artifact on the same run. Payload carries the
-            # blocks so the queue UI can render the draft without an extra
-            # fetch. Approve/Reject in review.py flips that artifact's status.
+            # the draft (content_type, topic, blocks). The Proposal's run_id
+            # links back to the content_draft artifact on the same run, so
+            # review.py can flip its status on approve/reject.
             proposals.append(ProposedAction(
                 action_type="content_review",
                 payload={
@@ -249,13 +336,15 @@ class ContentEngineAgent(Agent):
                     "blocks": content.get("blocks", []),
                     "text": flat_text,
                     "review_mode": mode,
+                    "version": version,
+                    "parent_artifact_id": (parent or {}).get("id"),
                 },
                 guardrail_scope="content",
                 reasoning=f"{content_type} draft routed for human review — {why}",
             ))
 
         return AgentResult(artifacts=[art], proposed_actions=proposals,
-                           cost_usd=cost, logs=[])
+                           cost_usd=total_cost, logs=[])
 
     # ---- Helpers ----------------------------------------------------------
     @staticmethod

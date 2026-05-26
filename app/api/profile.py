@@ -66,6 +66,10 @@ class ProfileIn(BaseModel):
     # where content silently bypasses review. Governs DRAFT review only —
     # publishing is a separate, always-gated action and is out of scope.
     content_review_mode: str = "guardrail"
+    # Per-org content rubric: list of {name, description, weight?} criteria
+    # the grader scores each draft against. Empty list means "use the built-in
+    # DEFAULT_RUBRIC from app/agents/content_grader.py". Grades are advisory.
+    content_rubric: list = Field(default_factory=list)
 
 
 class CrawlIn(BaseModel):
@@ -94,6 +98,7 @@ def _empty_payload(org_id: str) -> dict:
         "conversion_goal": "", "conversion_event": "",
         "website_url": "", "crawl_summary": "",
         "content_review_mode": "guardrail",
+        "content_rubric": [],
         "source": {}, "updated_at": None, "created_at": None,
     }
 
@@ -109,6 +114,7 @@ def _serialize(p: OrgProfile) -> dict:
         "conversion_goal": p.conversion_goal, "conversion_event": p.conversion_event,
         "website_url": p.website_url, "crawl_summary": p.crawl_summary,
         "content_review_mode": p.content_review_mode or "guardrail",
+        "content_rubric": p.content_rubric or [],
         "source": p.source or {},
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
         "created_at": p.created_at.isoformat() if p.created_at else None,

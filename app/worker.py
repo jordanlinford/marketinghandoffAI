@@ -41,6 +41,23 @@ def _resolve_market_data(db: Session, org_id: str, upload_id: str | None):
     return StubMarketDataSource()
 
 
+def _serialize_artifact(art: Artifact) -> dict:
+    """Stable view the agent sees in ctx.prior_artifacts. Mirrors the columns
+    the agent might read (notably parent_id + utm_* for the regenerate path)
+    without exposing the ORM row."""
+    return {
+        "id": art.id, "type": art.type, "title": art.title,
+        "body": art.body or {}, "citations": art.citations or [],
+        "status": art.status,
+        "parent_id": art.parent_id,
+        "grade": art.grade,
+        "utm_campaign": art.utm_campaign, "utm_source": art.utm_source,
+        "utm_medium": art.utm_medium, "utm_content": art.utm_content,
+        "destination_url": art.destination_url,
+        "created_at": art.created_at.isoformat() if art.created_at else None,
+    }
+
+
 def _latest_market_brief(db: Session, org_id: str) -> dict | None:
     """Latest succeeded market_brief artifact for this org (via scoped()), so
     the content_engine can ground its suggestions in real market data. Returns
@@ -52,11 +69,24 @@ def _latest_market_brief(db: Session, org_id: str) -> dict | None:
     ).scalar_one_or_none()
     if art is None:
         return None
-    return {
-        "id": art.id, "type": art.type, "title": art.title,
-        "body": art.body or {}, "citations": art.citations or [],
-        "created_at": art.created_at.isoformat() if art.created_at else None,
-    }
+    return _serialize_artifact(art)
+
+
+def _parent_artifact(db: Session, org_id: str,
+                     parent_artifact_id: str | None) -> dict | None:
+    """Load a specific prior artifact by id via scoped() — used by the
+    content_engine's "Give me something better" path. Returns None when the
+    id is absent, missing, or belongs to a different org. Cross-tenant safety
+    is enforced here so the agent never sees another org's artifact even if
+    a client supplies a guessed id."""
+    if not parent_artifact_id:
+        return None
+    art = db.execute(
+        scoped(Artifact, org_id).where(Artifact.id == parent_artifact_id)
+    ).scalar_one_or_none()
+    if art is None:
+        return None
+    return _serialize_artifact(art)
 
 
 def _build_guardrail_rules(db: Session, org_id: str,
@@ -135,7 +165,15 @@ def process_run(db: Session, run: Run) -> None:
         icp=reg.config.get("icp", {}),
         config=reg.config,
         org_profile=profile,
-        prior_artifacts=[b for b in [_latest_market_brief(db, run.org_id)] if b],
+        # The agent reads "what else exists for this org" only through this
+        # list. Brief always; parent draft only when the task names one (the
+        # regenerate path). Both are loaded via scoped() so cross-tenant ids
+        # can't sneak through, even if a client guesses one.
+        prior_artifacts=[a for a in (
+            _parent_artifact(db, run.org_id,
+                             (run.task or {}).get("parent_artifact_id")),
+            _latest_market_brief(db, run.org_id),
+        ) if a],
         guardrail_rules=rules_by_scope,
         get_market_data=lambda: _resolve_market_data(db, run.org_id, run.upload_id),
         log=logs.append,
@@ -148,9 +186,19 @@ def process_run(db: Session, run: Run) -> None:
     # set "pending_review" for drafts that need queue review).
     artifact_rows: list[Artifact] = []
     for a in result.artifacts:
-        row = Artifact(org_id=run.org_id, run_id=run.id, type=a.type, title=a.title,
-                       body=a.body, citations=[c.model_dump() for c in a.citations],
-                       status=getattr(a, "status", "ready"))
+        row = Artifact(
+            org_id=run.org_id, run_id=run.id, type=a.type, title=a.title,
+            body=a.body, citations=[c.model_dump() for c in a.citations],
+            status=getattr(a, "status", "ready"),
+            # New content-engine columns (None for non-content artifacts).
+            parent_id=getattr(a, "parent_id", None),
+            grade=getattr(a, "grade", None),
+            utm_campaign=getattr(a, "utm_campaign", None),
+            utm_source=getattr(a, "utm_source", None),
+            utm_medium=getattr(a, "utm_medium", None),
+            utm_content=getattr(a, "utm_content", None),
+            destination_url=getattr(a, "destination_url", None),
+        )
         db.add(row)
         artifact_rows.append(row)
     # Flush so the new artifact rows have ids the proposals can reference.

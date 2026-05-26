@@ -823,6 +823,175 @@ function renderCitations(cites) {
   return ul;
 }
 
+// ---- Content draft helpers (grade, UTM editor, regenerate) ---------------
+// Grades are ADVISORY: a low score is shown so the human can read it, never
+// blocks approval. The "ungraded" status surfaces the reason instead of
+// silently dropping the section.
+function renderGrade(grade) {
+  if (!grade) return el('div');
+  const wrap = el('div', { class: 'section' });
+  const header = el('h3', {},
+    'Grade ',
+    grade.status === 'graded' && grade.overall != null
+      ? el('span', { class: 'badge succeeded' }, `${grade.overall} / 100`)
+      : el('span', { class: 'badge pending' }, grade.status || 'ungraded'),
+    el('span', { style: 'color:var(--muted); font-weight:400; margin-left:8px; font-size:12px;' },
+      'advisory — never gates approval'),
+  );
+  wrap.appendChild(header);
+  if (grade.status !== 'graded') {
+    wrap.appendChild(el('div', { class: 'sub', style: 'color:var(--muted);' },
+      grade.reason || 'Not graded.'));
+    return wrap;
+  }
+  const tbody = el('tbody');
+  for (const c of grade.per_criterion || []) {
+    tbody.appendChild(el('tr', {},
+      el('td', {}, c.name || ''),
+      el('td', {}, c.score != null ? String(c.score) : '—'),
+      el('td', {}, c.reason || ''),
+    ));
+  }
+  wrap.appendChild(el('table', {},
+    el('thead', {}, el('tr', {},
+      el('th', {}, 'Criterion'), el('th', {}, 'Score'), el('th', {}, 'Reason'))),
+    tbody,
+  ));
+  if ((grade.suggestions || []).length) {
+    wrap.appendChild(el('h4', { style: 'margin-top:14px; color:var(--muted);' },
+      'Suggestions'));
+    const ul = el('ul', { class: 'recs' });
+    for (const s of grade.suggestions) ul.appendChild(el('li', {}, s));
+    wrap.appendChild(ul);
+  }
+  return wrap;
+}
+
+// UTM editor — four inputs, a live tagged URL preview, a Save Tags button
+// (PATCH /api/artifacts/{id}/tags) and a Copy button. The agent stamps
+// sensible defaults at creation; users can adjust here before publishing.
+// "Honesty about the limit" (brief): publish using THIS tagged link or the
+// join key won't flow into the future analytics dashboard.
+function renderUtmEditor(art) {
+  const wrap = el('div', { class: 'section' });
+  wrap.appendChild(el('h3', {}, 'Campaign tags (UTMs)'));
+  wrap.appendChild(el('div', { class: 'sub',
+    style: 'color:var(--muted); margin-bottom:10px;' },
+    'Publish using the tagged link below so performance can be traced ' +
+    'back here. The four UTM dimensions ARE the join key.'));
+
+  const fields = [
+    ['utm_campaign', 'utm_campaign'],
+    ['utm_source',   'utm_source'],
+    ['utm_medium',   'utm_medium'],
+    ['utm_content',  'utm_content'],
+    ['destination_url', 'destination URL'],
+  ];
+  const inputs = {};
+  const grid = el('div', { class: 'form-grid' });
+  for (const [key, label] of fields) {
+    const input = el('input', { type: 'text',
+      value: art[key] || '', placeholder: label });
+    inputs[key] = input;
+    grid.appendChild(el('div',
+      { class: 'field' + (key === 'destination_url' ? ' full' : '') },
+      el('label', {}, label),
+      input));
+  }
+  wrap.appendChild(grid);
+
+  const linkRow = el('div', { class: 'row', style: 'gap:8px; margin-top:10px;' });
+  const linkInput = el('input', { type: 'text',
+    value: (art.body && art.body.tagged_url) || '',
+    style: 'flex:1; font-family: ui-monospace, monospace;' });
+  linkInput.readOnly = true;
+  const copyBtn = el('button', { class: 'ghost' }, 'Copy');
+  copyBtn.addEventListener('click', () => {
+    linkInput.select();
+    navigator.clipboard.writeText(linkInput.value).catch(() => document.execCommand('copy'));
+    copyBtn.textContent = 'Copied!';
+    setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1200);
+  });
+  const saveBtn = el('button', {}, 'Save tags');
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+    try {
+      const patch = {};
+      for (const [key] of fields) patch[key] = inputs[key].value.trim();
+      const resp = await api(`/api/artifacts/${art.id}/tags`, {
+        method: 'PATCH', body: JSON.stringify(patch),
+      });
+      linkInput.value = resp.tagged_url || '';
+      // Reflect saved state back into the art object so a later "Copy"
+      // shows the saved link even without a full reload.
+      for (const [key] of fields) art[key] = resp[key];
+      if (art.body) art.body.tagged_url = resp.tagged_url;
+    } catch (e) {
+      alert(`Save tags failed: ${e.message}`);
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save tags';
+    }
+  });
+  linkRow.appendChild(linkInput);
+  linkRow.appendChild(copyBtn);
+  linkRow.appendChild(saveBtn);
+  wrap.appendChild(linkRow);
+  return wrap;
+}
+
+// "Give me something better" — critique box + regenerate. POSTs a content
+// run with action=regenerate; the new version lands as a new artifact with
+// parent_id pointing back here. Old version preserved for comparison.
+function renderRegenerateControl(art) {
+  const wrap = el('div', { class: 'section' });
+  wrap.appendChild(el('h3', {}, 'Give me something better'));
+  wrap.appendChild(el('div', { class: 'sub',
+    style: 'color:var(--muted); margin-bottom:8px;' },
+    'Tell us what you\'d change ("too long, lead with the cost angle"). ' +
+    'A new version will be generated — the original stays so you can compare.'));
+  const ta = el('textarea', { placeholder:
+    'e.g. Too soft. Lead with the cost-saving angle. Trim the body.' });
+  wrap.appendChild(ta);
+  const row = el('div', { class: 'row', style: 'margin-top:8px;' });
+  const btn = el('button', {}, 'Regenerate with critique');
+  btn.addEventListener('click', async () => {
+    const critique = ta.value.trim();
+    if (!critique) { alert('Add a critique first.'); return; }
+    btn.disabled = true;
+    btn.textContent = 'Regenerating…';
+    try {
+      await regenerateDraft(art.id, critique);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Regenerate with critique';
+    }
+  });
+  row.appendChild(btn);
+  wrap.appendChild(row);
+  return wrap;
+}
+
+async function regenerateDraft(parentArtifactId, critique) {
+  try {
+    const run = await api('/api/runs', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_key: 'content_engine',
+        task: { action: 'regenerate',
+                parent_artifact_id: parentArtifactId,
+                critique },
+      }),
+    });
+    switchView('runs');
+    await loadRuns();
+    selectRun(run.id);
+  } catch (e) {
+    alert(`Regenerate failed: ${e.message}`);
+  }
+}
+
 function renderDetail() {
   const root = document.getElementById('detail');
   root.innerHTML = '';
@@ -917,6 +1086,7 @@ function renderDetail() {
     if (art.type === 'content_draft' && body.content) {
       const c = body.content;
       const blocks = c.blocks || [];
+      const version = body.version || 1;
       const ul = el('div');
       for (const b of blocks) {
         ul.appendChild(el('div', { class: 'cluster' },
@@ -924,8 +1094,24 @@ function renderDetail() {
           el('div', { style: 'white-space: pre-wrap;' }, b.text || ''),
         ));
       }
+      const blocksTitle = version > 1
+        ? `${c.content_type} draft v${version} (${blocks.length} blocks) — revision of v${version - 1}`
+        : `${c.content_type} draft (${blocks.length} blocks)`;
       root.appendChild(el('div', { class: 'section' },
-        el('h3', {}, `${c.content_type} draft (${blocks.length} blocks)`), ul));
+        el('h3', {}, blocksTitle), ul));
+
+      // Grade — advisory, never gates approval (per the brief).
+      const grade = art.grade || body.grade;
+      if (grade) root.appendChild(renderGrade(grade));
+
+      // UTM tagging — editable inputs + a copy-link button for the tagged
+      // URL. The user can adjust before they publish; PATCH /api/artifacts/
+      // {id}/tags saves changes.
+      root.appendChild(renderUtmEditor(art));
+
+      // "Give me something better" — critique box + regenerate button.
+      root.appendChild(renderRegenerateControl(art));
+
       const prov = body.provenance || {};
       const routing = body.routing || {};
       const provLines = [
@@ -937,6 +1123,7 @@ function renderDetail() {
           ? `Competitors reflected: ${prov.competitors_reflected.join(', ')}.`
           : null,
         `Routing: mode=${routing.mode || 'guardrail'} · guardrail=${routing.guardrail_status || '—'} · ${routing.needs_review ? 'needs review' : 'auto-ready'}.`,
+        prov.publish_note,
       ].filter(Boolean);
       root.appendChild(el('div', { class: 'section' },
         el('h3', {}, 'Provenance'),
@@ -1101,6 +1288,10 @@ const PROFILE_FIELDS = [
       ['all_through', 'all_through — drafts auto-marked ready (still NOT published)'],
     ],
     hint: 'Governs draft review only. "ready" never means "published".' },
+  // Rubric — one per line, "name: description". Empty leaves the built-in
+  // defaults (on_brand, on_strategy, clarity, specificity, no_banned_claims).
+  { key: 'content_rubric', label: 'Content rubric', kind: 'rubric', full: true,
+    hint: 'One per line: "criterion_name: description". Empty = built-in defaults.' },
 ];
 
 function _get(obj, dotted) {
@@ -1134,6 +1325,10 @@ function _toFieldValue(field, raw) {
   }
   if (field.kind === 'number') return raw === '' || raw == null ? '' : String(raw);
   if (field.kind === 'enum') return String(raw);
+  if (field.kind === 'rubric') {
+    return (raw || []).map(c => c.description
+      ? `${c.name}: ${c.description}` : (c.name || '')).join('\n');
+  }
   return String(raw);
 }
 function _fromFieldValue(field, str) {
@@ -1153,6 +1348,15 @@ function _fromFieldValue(field, str) {
     return Number.isFinite(n) ? n : null;
   }
   if (field.kind === 'enum') return s;
+  if (field.kind === 'rubric') {
+    if (!s) return [];
+    return s.split(/\r?\n/).map(line => {
+      const [name, ...rest] = line.split(':');
+      const trimmedName = (name || '').trim();
+      if (!trimmedName) return null;
+      return { name: trimmedName, description: rest.join(':').trim() };
+    }).filter(Boolean);
+  }
   return s;
 }
 
@@ -1189,7 +1393,8 @@ function renderProfileForm() {
 
     const val = _toFieldValue(field, _get(data, field.key));
     let input;
-    if (field.kind === 'textarea' || field.kind === 'lines' || field.kind === 'competitors') {
+    if (field.kind === 'textarea' || field.kind === 'lines'
+        || field.kind === 'competitors' || field.kind === 'rubric') {
       input = el('textarea', {}, val);
     } else if (field.kind === 'number') {
       input = el('input', { type: 'number', value: val });

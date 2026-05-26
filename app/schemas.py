@@ -37,6 +37,15 @@ class ArtifactDraft(BaseModel):
     # The content_engine sets "pending_review" when a draft is routed to the
     # approval queue; the queue flips it to "ready" or "rejected" on decision.
     status: str = "ready"
+    # Optional artifact-column fields the content_engine uses; the worker
+    # copies them onto the Artifact row. None for non-content artifacts.
+    parent_id: str | None = None
+    grade: dict[str, Any] | None = None
+    utm_campaign: str | None = None
+    utm_source: str | None = None
+    utm_medium: str | None = None
+    utm_content: str | None = None
+    destination_url: str | None = None
 
 
 class ProposedAction(BaseModel):

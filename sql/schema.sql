@@ -87,6 +87,10 @@ CREATE TABLE org_profiles (
     -- Governs DRAFT review only — publishing to a live channel is always a
     -- separate, always-gated action and is out of scope for v1.
     content_review_mode TEXT NOT NULL DEFAULT 'guardrail',
+    -- Per-org content rubric: list of {name, description, weight?} criteria.
+    -- Empty list means "use the built-in DEFAULT_RUBRIC from code". Grades
+    -- are ADVISORY only — they never gate approval.
+    content_rubric    JSONB NOT NULL DEFAULT '[]',
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -123,6 +127,21 @@ CREATE TABLE artifacts (
     -- 'pending_review' when routing a draft to the approval queue; the queue
     -- decision flips it to 'ready' or 'rejected'. "ready" != "published".
     status      TEXT NOT NULL DEFAULT 'ready',
+    -- Version chain for content drafts. Each "Give me something better" run
+    -- creates a NEW artifact whose parent_id points to the prior version.
+    -- The original is preserved so the user can compare versions.
+    parent_id   TEXT REFERENCES artifacts(id),
+    -- Advisory rubric grade (overall + per-criterion + suggestions). Grades
+    -- never gate approval — they surface signal for the human reviewer.
+    grade       JSONB,
+    -- UTM tags as first-class columns so a future analytics dashboard can
+    -- JOIN performance rows back to the artifact that produced them.
+    -- v1 only generates the tagged link; the human publishes under it.
+    utm_campaign     TEXT,
+    utm_source       TEXT,
+    utm_medium       TEXT,
+    utm_content      TEXT,
+    destination_url  TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

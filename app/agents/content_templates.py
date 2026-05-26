@@ -51,28 +51,45 @@ def available_types() -> list[str]:
 
 
 def build(content_type: str, profile: dict, brief: dict | None,
-          topic: str, target: str) -> tuple[dict, float]:
+          topic: str, target: str, critique: str = "") -> tuple[dict, float]:
     """Build a content object of `content_type`. Returns (content, cost_usd).
-    Cost is non-zero only on the LLM path; the template fallback is free."""
+    Cost is non-zero only on the LLM path; the template fallback is free.
+
+    `critique` is the optional free-text guidance from "Give me something
+    better" — empty on first generation. Passed through to the LLM in the
+    prompt; the deterministic fallback folds it into the topic so the
+    revision is visibly different from the original."""
     if content_type not in _REGISTRY:
         raise ValueError(f"Unknown content_type '{content_type}'. "
                          f"Available: {available_types()}")
     settings = get_settings()
     if settings.anthropic_api_key:
         try:
-            return _llm_build(content_type, profile, brief, topic, target, settings)
+            return _llm_build(content_type, profile, brief, topic, target,
+                              settings, critique=critique)
         except Exception:
             pass  # never let synthesis crash a run; fall back
-    return _REGISTRY[content_type](profile, brief, topic, target), 0.0
+    # Deterministic fallback: when a critique is present, surface it in the
+    # topic so the rendered output reflects the revision request — even
+    # without an LLM. The original topic is still used by the caller for
+    # UTM tagging (so utm_campaign stays stable across versions).
+    topic_for_template = (f"{topic} — addressing: {critique}"
+                          if critique else topic)
+    return _REGISTRY[content_type](profile, brief, topic_for_template, target), 0.0
 
 
 # ---- LLM path -------------------------------------------------------------
 def _llm_build(content_type: str, profile: dict, brief: dict | None,
-               topic: str, target: str, settings) -> tuple[dict, float]:
+               topic: str, target: str, settings,
+               critique: str = "") -> tuple[dict, float]:
     """Ask Claude to produce the same shape the template fallback produces.
     We supply the structured grounding (profile + brief excerpt) and constrain
     the output JSON shape. The deterministic builder is the spec for what the
-    LLM must return."""
+    LLM must return.
+
+    When `critique` is set we're in "Give me something better" mode — the
+    prompt asks the model to incorporate the user's feedback while still
+    honoring brand voice + guardrails."""
     import json
 
     import anthropic
@@ -81,12 +98,16 @@ def _llm_build(content_type: str, profile: dict, brief: dict | None,
     # the always-safe fallback if the LLM goes sideways.
     fallback = _REGISTRY[content_type](profile, brief, topic, target)
     grounding = _grounding_payload(profile, brief)
+    critique_line = (
+        f"\n\nREVISION CRITIQUE (from the user, address this directly):\n{critique}"
+        if critique else "")
     prompt = (
         f"You are writing marketing content for {profile.get('product_summary') or 'this product'}. "
         f"Produce a {content_type} on the topic: {topic!r}. "
         f"Target audience: {target or _DEFAULT_TARGET}. "
         f"Honor the brand voice. NEVER use banned phrases. Reflect the value prop "
-        f"and (where relevant) position against the named competitors.\n\n"
+        f"and (where relevant) position against the named competitors."
+        f"{critique_line}\n\n"
         f"Return ONLY a JSON object matching this exact shape (no prose):\n"
         f"{json.dumps(fallback, indent=2)}\n\n"
         f"GROUNDING:\n{json.dumps(grounding, indent=2)}"

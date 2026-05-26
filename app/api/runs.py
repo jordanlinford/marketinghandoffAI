@@ -66,6 +66,14 @@ def get_run(run_id: str, user: User = Depends(current_user), db: Session = Depen
         "logs": run.logs,
         "artifacts": [
             {"id": a.id, "type": a.type, "title": a.title, "body": a.body,
-             "citations": a.citations, "status": a.status} for a in artifacts
+             "citations": a.citations, "status": a.status,
+             # Surface the new columns so the UI can render the grade, the
+             # version link, and the editable UTM fields without an extra
+             # fetch. None for non-content artifacts.
+             "parent_id": a.parent_id, "grade": a.grade,
+             "utm_campaign": a.utm_campaign, "utm_source": a.utm_source,
+             "utm_medium": a.utm_medium, "utm_content": a.utm_content,
+             "destination_url": a.destination_url}
+            for a in artifacts
         ],
     }

@@ -39,6 +39,7 @@ atexit.register(lambda: shutil.rmtree(_SMOKE_DB_DIR, ignore_errors=True))
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
+from app.agents import content_grader as content_grader_mod  # noqa: E402
 from app.agents import content_templates as content_templates_mod  # noqa: E402
 from app.agents import synthesis as synthesis_mod  # noqa: E402
 from app.data_sources.csv import CsvMarketDataSource  # noqa: E402
@@ -71,10 +72,28 @@ def main() -> None:
     # Same treatment for the content engine: bypass the LLM and use the
     # deterministic template, so tests don't depend on the network. Cost is
     # set to a fixed non-zero value so we can still assert "cost recorded".
-    def _stub_content_llm(content_type, profile, brief, topic, target, settings):
+    def _stub_content_llm(content_type, profile, brief, topic, target, settings,
+                          critique=""):
+        topic_for_template = (f"{topic} — addressing: {critique}"
+                              if critique else topic)
         return content_templates_mod._REGISTRY[content_type](
-            profile, brief, topic, target), 0.0007
+            profile, brief, topic_for_template, target), 0.0007
     content_templates_mod._llm_build = _stub_content_llm
+
+    # Grader stub: returns a real-looking graded result so we can assert the
+    # structure on the artifact. Tests that want to exercise the
+    # "ungraded fallback" path swap this for one that raises.
+    def _stub_grader_llm(content, profile, rubric, settings):
+        return {
+            "status": "graded",
+            "overall": 72,
+            "per_criterion": [
+                {"name": c.get("name", "criterion"), "score": 70,
+                 "reason": "(stubbed grader)"} for c in rubric
+            ],
+            "suggestions": ["Lead with the cost angle.", "Tighten the CTA."],
+        }, 0.0003
+    content_grader_mod._llm_grade = _stub_grader_llm
 
     db = SessionLocal()
     try:
@@ -1012,6 +1031,204 @@ def main() -> None:
         print("[OK] Content engine (3): tenant isolation — Acme sees zero of "
               "Onit's content drafts/proposals, cross-org approve denied, "
               "Acme's own profileless run fails closed without leakage.")
+
+        # ---------------------------------------------------------------------
+        # Content quality loop + UTM tagging — three checks:
+        #   (1) Every generated draft carries a structured grade (overall +
+        #       per-criterion + suggestions). When the grader LLM call fails,
+        #       we fall back to a neutral "ungraded" result WITHOUT blocking
+        #       the draft (grades are advisory).
+        #   (2) "Give me something better" with a critique produces a NEW
+        #       version (parent_id chain), preserves the prior version, runs
+        #       the grader on the new one, and captures cost on the regen.
+        #   (3) The draft carries the four UTM fields + a correctly-formatted
+        #       tagged URL; the artifact-tags PATCH endpoint updates them and
+        #       recomputes the tagged URL. Tenant isolation holds for the
+        #       rubric (OrgProfile.content_rubric) and the version chain.
+        # ---------------------------------------------------------------------
+        # Onit's review mode is "guardrail" again after test (2) cleanup; use
+        # a non-tripping topic so this whole section stays single-spine.
+        clean_task = {"action": "generate", "content_type": "email",
+                      "topic": "Cost-saving framework for in-house teams",
+                      "target": "GC", "destination_url": "https://onit.com/demo"}
+
+        # (1a) Grade lives on the artifact with the expected shape.
+        grade_run = _trigger_content_run(
+            onit.id, onit_content_reg.id, clean_task)
+        assert grade_run.status == "succeeded", \
+            f"graded content gen failed: {grade_run.error}"
+        grade_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.run_id == grade_run.id,
+                                            Artifact.type == "content_draft")
+        ).scalar_one()
+        assert grade_art.grade is not None, \
+            "graded run must persist artifact.grade"
+        assert grade_art.grade["status"] == "graded", grade_art.grade
+        assert isinstance(grade_art.grade["overall"], int), grade_art.grade
+        assert 0 <= grade_art.grade["overall"] <= 100, grade_art.grade
+        assert isinstance(grade_art.grade["per_criterion"], list) \
+            and grade_art.grade["per_criterion"], grade_art.grade
+        for crit in grade_art.grade["per_criterion"]:
+            assert "name" in crit and "score" in crit, crit
+        assert grade_art.grade["suggestions"], "graded run must include suggestions"
+        # Cost on the run accumulates generation + grading (both stubbed).
+        assert grade_run.cost_usd > 0.0007, \
+            f"cost should include grading on top of generation, got {grade_run.cost_usd}"
+        # The artifact body also exposes the cost breakdown so the UI can
+        # show "gen + grade" without recomputing.
+        cb = grade_art.body.get("cost_breakdown") or {}
+        assert cb.get("generation") > 0 and cb.get("grading") > 0, cb
+
+        # (1b) On grader LLM failure, fall back to ungraded WITHOUT blocking.
+        original_grader = content_grader_mod._llm_grade
+
+        def _grader_boom(content, profile, rubric, settings):
+            raise RuntimeError("simulated grader crash")
+        content_grader_mod._llm_grade = _grader_boom
+        try:
+            failgrade_run = _trigger_content_run(
+                onit.id, onit_content_reg.id, clean_task)
+        finally:
+            content_grader_mod._llm_grade = original_grader
+        assert failgrade_run.status == "succeeded", \
+            "draft must NOT fail when the grader crashes (grades are advisory)"
+        failgrade_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.run_id == failgrade_run.id,
+                                            Artifact.type == "content_draft")
+        ).scalar_one()
+        assert failgrade_art.grade is not None
+        assert failgrade_art.grade["status"] == "ungraded", failgrade_art.grade
+        assert "simulated grader crash" in (failgrade_art.grade.get("reason") or ""), \
+            f"ungraded reason should surface the failure: {failgrade_art.grade!r}"
+        # Draft itself is still usable: the artifact landed and has content.
+        assert failgrade_art.status in ("ready", "pending_review")
+        assert failgrade_art.body["content"]["blocks"], \
+            "draft content must still be present on grader failure"
+        print(f"[OK] Quality loop (1): graded draft "
+              f"(overall={grade_art.grade['overall']}, "
+              f"{len(grade_art.grade['per_criterion'])} criteria, "
+              f"{len(grade_art.grade['suggestions'])} suggestions); "
+              "grader failure → ungraded fallback, draft preserved.")
+
+        # (2) "Give me something better" — regenerate produces a NEW version
+        # whose parent_id points at the prior; the prior is preserved; the
+        # new one is graded; cost is captured.
+        critique = "Too soft — lead with the cost angle, more aggressive."
+        regen_run_obj = _trigger_content_run(
+            onit.id, onit_content_reg.id,
+            {"action": "regenerate",
+             "parent_artifact_id": grade_art.id,
+             "critique": critique})
+        assert regen_run_obj.status == "succeeded", \
+            f"regenerate failed: {regen_run_obj.error}"
+        regen_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.run_id == regen_run_obj.id,
+                                            Artifact.type == "content_draft")
+        ).scalar_one()
+        assert regen_art.parent_id == grade_art.id, \
+            f"regen artifact must link to parent; got parent_id={regen_art.parent_id!r}"
+        assert regen_art.id != grade_art.id, "regen must be a NEW artifact row"
+        assert regen_art.body.get("version") == 2, \
+            f"regen artifact must be version 2, got {regen_art.body.get('version')!r}"
+        # Prior version still exists unchanged.
+        prior_again = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.id == grade_art.id)
+        ).scalar_one()
+        assert prior_again.id == grade_art.id, "prior version must be preserved"
+        # New version got re-graded.
+        assert regen_art.grade is not None and \
+            regen_art.grade["status"] == "graded", regen_art.grade
+        # Critique surfaced in the new content (template fallback folds it
+        # into topic → subject/body text). Deterministic + testable.
+        regen_text = " ".join(
+            b.get("text", "") for b in regen_art.body["content"]["blocks"])
+        assert "cost angle" in regen_text.lower(), \
+            f"critique must visibly influence the regen output: {regen_text[:200]!r}"
+        # Regen cost was captured (generation + grading both stubbed non-zero).
+        assert regen_run_obj.cost_usd > 0, \
+            f"regen must record cost (separate paid call), got {regen_run_obj.cost_usd}"
+        # utm_campaign is preserved across versions; utm_content varies (v2).
+        assert regen_art.utm_campaign == grade_art.utm_campaign, \
+            "campaign must persist across versions"
+        assert regen_art.utm_content != grade_art.utm_content, \
+            "utm_content must be versioned so v2 is distinguishable from v1"
+        assert regen_art.utm_content.endswith("-v2"), regen_art.utm_content
+        print(f"[OK] Quality loop (2): regenerate produced v{regen_art.body['version']} "
+              f"(parent_id linkage holds, prior preserved, re-graded "
+              f"overall={regen_art.grade['overall']}, cost=${regen_run_obj.cost_usd:.4f}).")
+
+        # (3) UTM tagging + tenant isolation of rubric/versions.
+        for key in ("utm_campaign", "utm_source", "utm_medium", "utm_content"):
+            val = getattr(regen_art, key)
+            assert val and isinstance(val, str) and val.strip(), \
+                f"missing UTM field {key} on the artifact: {val!r}"
+        # The tagged URL is in body and stitched correctly from destination
+        # + the four UTM params.
+        tagged = regen_art.body.get("tagged_url") or ""
+        assert tagged.startswith("https://onit.com/demo"), tagged
+        for key in ("utm_campaign", "utm_source", "utm_medium", "utm_content"):
+            expected = getattr(regen_art, key)
+            assert f"{key}={expected.replace(' ', '+')}" in tagged \
+                or f"{key}={expected}" in tagged, \
+                f"tagged URL missing {key}={expected!r}: {tagged}"
+
+        # PATCH /api/artifacts/{id}/tags updates the columns + tagged_url.
+        patch_resp = client.patch(
+            f"/api/artifacts/{regen_art.id}/tags",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"utm_campaign": "clm-comparison-q2",
+                  "utm_medium": "paid-social",
+                  "destination_url": "https://onit.com/lp/clm"},
+        )
+        assert patch_resp.status_code == 200, patch_resp.text
+        pj = patch_resp.json()
+        assert pj["utm_campaign"] == "clm-comparison-q2"
+        assert pj["utm_medium"] == "paid-social"
+        assert pj["utm_source"] == regen_art.utm_source, \
+            "PATCH should leave unspecified UTMs untouched"
+        assert pj["tagged_url"].startswith("https://onit.com/lp/clm")
+        assert "utm_campaign=clm-comparison-q2" in pj["tagged_url"]
+
+        # Cross-org tag PATCH must fail. Acme tries to edit Onit's artifact.
+        cross_patch = client.patch(
+            f"/api/artifacts/{regen_art.id}/tags",
+            headers={"X-Dev-User-Email": "ops@acme.com",
+                     "Content-Type": "application/json"},
+            json={"utm_campaign": "stolen"},
+        )
+        assert cross_patch.status_code in (403, 404), \
+            f"cross-org tag PATCH MUST be denied, got {cross_patch.status_code}: " \
+            f"{cross_patch.text}"
+
+        # Tenant isolation of rubric: write a custom rubric on Onit, assert
+        # Acme cannot see it through scoped(), and Acme's own profile (when
+        # set) has its own independent rubric.
+        onit_profile_row = db.execute(scoped(OrgProfile, onit.id)).scalar_one()
+        onit_profile_row.content_rubric = [
+            {"name": "onit_specific", "description": "Onit-only criterion."},
+        ]
+        db.commit()
+        acme_rubrics = db.execute(
+            scoped(OrgProfile, other.id)
+        ).scalars().all()
+        # Acme had no OrgProfile row in earlier tests — still doesn't, so
+        # cross-tenant rubric simply can't exist for them.
+        for ap in acme_rubrics:
+            assert "onit_specific" not in [c.get("name") for c in (ap.content_rubric or [])], \
+                "TENANT LEAK: Acme can read Onit's rubric"
+        # And version chain isolation: Acme cannot read either content_draft
+        # version even though both belong to Onit's run.
+        leaked_versions = db.execute(
+            scoped(Artifact, other.id).where(
+                Artifact.id.in_([grade_art.id, regen_art.id]))
+        ).scalars().all()
+        assert leaked_versions == [], \
+            "TENANT LEAK: Acme can see Onit's content draft versions via scoped()"
+        print("[OK] Quality loop (3): four UTM fields + correct tagged URL "
+              "(stitched from destination + tags); PATCH updates tags and "
+              "tagged URL, cross-org PATCH denied; rubric + version chain "
+              "are tenant-isolated.")
 
         print("[OK] Smoke test passed.")
     finally:

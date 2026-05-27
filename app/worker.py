@@ -19,8 +19,13 @@ from app.data_sources.csv import CsvMarketDataSource
 from app.data_sources.stub import StubMarketDataSource
 from app.db import SessionLocal
 from app.models import (AgentRegistration, Artifact, AuditLog, Guardrail, Org,
-                        OrgProfile, Proposal, Run, Upload, _now)
+                        OrgProfile, ProductDocument, ProductProfile, Proposal,
+                        Run, Upload, _now)
 from app.products import resolve_product_profile
+from app.documents.extract import extract_candidates
+from app.documents.normalize import NormalizationError, normalize
+from app.documents.storage import read_document
+from app.models import ExtractedInsight
 from app.queue import complete, lease_next
 from app.schemas import AgentContext
 from app.tenancy import assert_same_org, scoped
@@ -237,21 +242,128 @@ def process_run(db: Session, run: Run) -> None:
     db.commit()
 
 
+def process_extraction(db: Session, doc_id: str, org_id: str) -> None:
+    """Document-ingestion job: normalize text → call extractor → persist
+    candidates. Errors land on product_document.extraction_error and the
+    document's status flips to 'failed' — we NEVER let the worker crash
+    over a bad upload, missing OCR binary, or LLM outage.
+
+    Cross-tenant safety: load the doc via scoped() (org_id derived from
+    the job — which the queue already verified against the run's
+    creator). Reads the raw file from the tenant-scoped storage path
+    written at upload time."""
+    doc = db.execute(
+        scoped(ProductDocument, org_id).where(ProductDocument.id == doc_id)
+    ).scalar_one_or_none()
+    if doc is None:
+        raise RuntimeError(f"ProductDocument {doc_id} not found for org {org_id}")
+    assert_same_org(doc, org_id)
+
+    def _fail(message: str) -> None:
+        doc.status = "failed"
+        doc.extraction_error = message
+        doc.updated_at = _now()
+        db.commit()
+        _audit(db, org_id, "system", "doc.extraction_failed",
+               "product_document", doc.id, {"reason": message})
+        db.commit()
+
+    # --- Step 1: read + normalize the bytes ---------------------------
+    try:
+        raw = read_document(doc.storage_path)
+    except Exception as exc:
+        return _fail(f"Could not read stored file: {exc}")
+
+    try:
+        normalized = normalize(raw, doc.filename, doc.mime_type)
+    except NormalizationError as exc:
+        # Friendly errors (e.g. Tesseract missing) flow through here.
+        return _fail(str(exc))
+    except Exception as exc:
+        return _fail(f"Unexpected normalization error: {exc}")
+
+    text = (normalized.get("text") or "").strip()
+    doc.extracted_text = text
+    db.commit()
+    if not text:
+        return _fail("No text could be extracted from the document.")
+
+    # --- Step 2: extract candidates via the LLM -----------------------
+    # The resolver gives the agent's standard view of profile context; we
+    # reuse it to ground the extractor's prompt the same way the agent
+    # would see it.
+    resolved = resolve_product_profile(db, org_id, doc.product_id)
+    candidates, cost = extract_candidates(text, resolved.get("_org") or {},
+                                          resolved.get("product") or {},
+                                          doc_kind=doc.kind or "messaging_framework")
+    if candidates is None:
+        return _fail("LLM unavailable (no API key, parse failure, or API error). "
+                     "Configure ANTHROPIC_API_KEY or retry.")
+
+    # --- Step 3: persist candidate insights ----------------------------
+    # OCR-derived candidates inherit a "via=ocr" anchor on their source
+    # location so the UI can render lower-trust badges. Per-anchor pages/
+    # slides aren't matched back to specific candidates in v1 (the LLM
+    # quotes a verbatim passage; we'd need an index pass to figure out
+    # which page it came from). source_location.via flags OCR globally.
+    via_ocr = bool(normalized.get("ocr_used"))
+    persisted = 0
+    for c in candidates:
+        loc = {"via": "ocr"} if via_ocr else None
+        db.add(ExtractedInsight(
+            org_id=org_id, product_id=doc.product_id,
+            product_document_id=doc.id,
+            field_name=c["field_name"],
+            value=c["value"],
+            confidence=c.get("confidence", 0.0),
+            source_passage=c.get("source_passage", ""),
+            source_location=loc,
+            dimensions=None,    # reserved for variants; v1 always null
+            status="pending",
+        ))
+        persisted += 1
+    doc.status = "extracted"
+    doc.extraction_error = None
+    doc.updated_at = _now()
+    _audit(db, org_id, "system", "doc.extracted",
+           "product_document", doc.id,
+           {"candidates": persisted, "cost_usd": cost,
+            "via_ocr": via_ocr})
+    db.commit()
+
+
 def run_once(db: Session | None = None) -> bool:
-    """Process at most one job. Returns True if a job was handled."""
+    """Process at most one job. Returns True if a job was handled.
+
+    Dispatches by job.kind so the worker can grow new job types without
+    touching the queue plumbing:
+      * 'run_agent'        → process_run (the legacy agent runs).
+      * 'extract_document' → process_extraction (Phase 1, Build B).
+    Anything else is failed loudly so we don't silently lose work."""
     own = db is None
     db = db or SessionLocal()
     try:
         job = lease_next(db)
         if job is None:
             return False
-        run = db.get(Run, job.payload.get("run_id"))
+        # We use `run` for the agent path's error-marking; extraction jobs
+        # don't have a run row.
+        run: Run | None = None
         try:
-            if run is None:
-                raise RuntimeError(f"Run {job.payload.get('run_id')} not found")
-            # PK lookup; verify the job and run agree on tenant before any work.
-            assert_same_org(run, job.org_id)
-            process_run(db, run)
+            if job.kind == "run_agent":
+                run = db.get(Run, job.payload.get("run_id"))
+                if run is None:
+                    raise RuntimeError(f"Run {job.payload.get('run_id')} not found")
+                # PK lookup; verify the job and run agree on tenant before any work.
+                assert_same_org(run, job.org_id)
+                process_run(db, run)
+            elif job.kind == "extract_document":
+                doc_id = (job.payload or {}).get("product_document_id")
+                if not doc_id:
+                    raise RuntimeError("extract_document job missing product_document_id")
+                process_extraction(db, doc_id, job.org_id)
+            else:
+                raise RuntimeError(f"Unknown job kind {job.kind!r}")
             complete(db, job)
         except Exception as exc:  # graceful failure: mark run + job, never crash loop
             db.rollback()

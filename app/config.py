@@ -22,6 +22,13 @@ class Settings(BaseSettings):
 
     worker_poll_seconds: float = 2.0
 
+    # Root for tenant-scoped document storage. Real uploads live under
+    # {storage_root}/{org_id}/{product_id}/ — see app/documents/storage.py.
+    # Overridden in smoke (AGENT_HQ_STORAGE_ROOT) to a tempdir so tests
+    # never touch ./storage. Documents are gitignored.
+    storage_root: str = Field(default="./storage",
+                              validation_alias="AGENT_HQ_STORAGE_ROOT")
+
     @property
     def allowed_domains(self) -> list[str]:
         return [d.strip().lower() for d in self.allowed_email_domains.split(",") if d.strip()]

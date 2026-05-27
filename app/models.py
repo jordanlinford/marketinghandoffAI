@@ -314,6 +314,113 @@ class ProductProfile(Base, TimestampMixin):
     utm_source_default: Mapped[str | None] = mapped_column(String(60), nullable=True)
     utm_medium_default: Mapped[str | None] = mapped_column(String(60), nullable=True)
 
+    # Lightweight, schemaless sections fed by extraction's "messaging notes"
+    # path. Shape today:
+    #   {"objection_handling": [{note, source_passage?, source_doc_id?}, ...],
+    #    "launch_messaging":   [...]}
+    # JSON because we want to learn the shape from real usage before
+    # normalizing it. The content_engine consults objection_handling at
+    # generation time; see app/agents/content_engine.py.
+    messaging_notes: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    # Append-only history of accepted product-knowledge values. Each entry:
+    #   {field, value, accepted_from_insight_id, accepted_at, status}
+    # status ∈ {active | superseded | historical}. New accepted value flips
+    # the prior active entry for that field to superseded; nothing is ever
+    # deleted. Supports rollback ("re-activate prior positioning"), audit
+    # ("what changed when"), and future correlation hooks — one column,
+    # zero new tables.
+    field_history: Mapped[list] = mapped_column(JSON, default=list)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+# ---------------------------------------------------------------------------
+# Document ingestion (Phase 1, Build B). The product layer absorbs PMM
+# frameworks, one-pagers, launch docs, etc. as durable structured product
+# intelligence — not a RAG corpus. The flow is:
+#   upload (ProductDocument) → worker normalize text → LLM extract →
+#   ExtractedInsight rows (status=pending) → human review (accept/edit/
+#   reject) → promote into ProductProfile via the additive merge +
+#   ProductProfile.field_history.
+# Agents NEVER read ProductDocument / ExtractedInsight directly — those
+# are review-layer concerns. Agents read the resolved profile, which is
+# richer thanks to accepted promotions.
+# ---------------------------------------------------------------------------
+class ProductDocument(Base, TimestampMixin):
+    __tablename__ = "product_documents"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    product_id: Mapped[str] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="CASCADE"), index=True)
+    filename: Mapped[str] = mapped_column(String(300))
+    mime_type: Mapped[str] = mapped_column(String(120), default="")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    # SHA-256 of the raw bytes for dedupe + integrity. Stored even if a
+    # later "re-upload same file" lands; the API can decide to short-circuit.
+    sha256: Mapped[str] = mapped_column(String(64), default="", index=True)
+    # Tenant-scoped path under settings.storage_root. The raw file is on disk
+    # (not in the DB) so we keep the row light.
+    storage_path: Mapped[str] = mapped_column(Text, default="")
+    # User-tagged at upload; the extractor uses this to emphasize the right
+    # canonical fields (a launch_doc weights launch_messaging higher, etc.).
+    # 'messaging_framework' | 'one_pager' | 'launch_doc' |
+    # 'sales_enablement' | 'other'.
+    kind: Mapped[str] = mapped_column(String(40), default="messaging_framework")
+    version_label: Mapped[str] = mapped_column(String(120), default="")
+    # 'ingesting' (queued) | 'extracted' | 'failed' | 'superseded'.
+    # 'superseded' is set when a newer doc of the same kind for the same
+    # product is uploaded — the older doc + its insights remain for audit;
+    # only "active extraction" moves on.
+    status: Mapped[str] = mapped_column(String(20), default="ingesting", index=True)
+    # The normalized text we pulled from the raw doc, so re-extraction can
+    # run without re-uploading. Nullable while status=ingesting/failed.
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Populated when ingestion or extraction fails — surfaces in the UI as
+    # an actionable error (e.g. "Tesseract OCR not installed").
+    extraction_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ExtractedInsight(Base, TimestampMixin):
+    """One candidate (field × document × extraction run). Pending until a
+    human accepts / edits / rejects. Accepted/edited rows promote into the
+    parent ProductProfile via the additive merge."""
+    __tablename__ = "extracted_insights"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    product_id: Mapped[str] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="CASCADE"), index=True)
+    product_document_id: Mapped[str] = mapped_column(
+        ForeignKey("product_documents.id", ondelete="CASCADE"), index=True)
+    # Must be one of the canonical ProductProfile target fields OR a
+    # messaging-notes target name. Extraction MUST NOT produce candidates
+    # for *_override fields — overriding inheritance is a deliberate human
+    # decision. Enforced in app/documents/extract.py + asserted in smoke.
+    field_name: Mapped[str] = mapped_column(String(80), index=True)
+    # JSON because the value shape varies by field (string for positioning,
+    # list for value_props, dict for target_persona).
+    value: Mapped[dict | list | str] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    # Verbatim quote from the doc that motivated the value — capped to a
+    # short passage. Persisted unparaphrased so the user can audit the
+    # model's reasoning, the same way market_brief carries citations.
+    source_passage: Mapped[str] = mapped_column(Text, default="")
+    # Best-effort source-location anchor: {"page": N} | {"slide": N} |
+    # {"paragraph": N} | {"via": "ocr"}. May be null for OCR.
+    source_location: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Reserved for future variant scoping (persona/industry/segment/...).
+    # v1: ALWAYS null. The column exists; no logic branches on it.
+    # See docs/document-ingestion-brief.md for the deferred ontology.
+    dimensions: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # 'pending' | 'accepted' | 'edited' | 'rejected' | 'superseded'.
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    # Populated when status=accepted/edited. If edited, this is the user's
+    # value (the source_passage stays as the original verbatim quote for
+    # audit). Promotion always uses accepted_value, not value.
+    accepted_value: Mapped[dict | list | str | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now)
 

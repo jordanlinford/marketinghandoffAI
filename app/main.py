@@ -3,8 +3,8 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
-from app.api import (admin, artifacts, dashboard, products, profile, review,
-                     runs, uploads)
+from app.api import (admin, artifacts, dashboard, documents, products, profile,
+                     review, runs, uploads)
 from app.config import get_settings
 from app.db import create_all
 
@@ -19,6 +19,10 @@ app.include_router(profile.router)
 app.include_router(artifacts.router)
 app.include_router(dashboard.router)
 app.include_router(products.router)
+# Two routers for the document-ingestion API: one rooted at /api/products
+# (per-product endpoints), one at /api/insights (per-id PATCH).
+app.include_router(documents.products_doc_router)
+app.include_router(documents.insights_router)
 
 _UI_FILE = Path(__file__).parent / "static" / "ui.html"
 

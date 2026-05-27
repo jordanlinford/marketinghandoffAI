@@ -197,6 +197,15 @@ def resolve_product_profile(db: Session, org_id: str,
                 continue
             provenance[f"product.{key}"] = "product"
 
+    # Messaging notes (objection_handling, launch_messaging, ...) live on
+    # the ProductProfile JSON column and are populated by document
+    # extraction's promotion step. Agents (content_engine) read them
+    # through the resolved profile so the chassis contract stays "ctx
+    # only" — no DB reads from agent code.
+    messaging_notes: dict = {}
+    if prod_row is not None and prod_row.status == "confirmed":
+        messaging_notes = dict(prod_row.messaging_notes or {})
+
     resolved: dict = {
         # Org-level fields the agent still reads directly
         "product_summary": org.get("product_summary", ""),
@@ -213,6 +222,9 @@ def resolve_product_profile(db: Session, org_id: str,
         # Product layer
         "product": product_layer,
         "product_id": product_layer["id"] if product_layer else None,
+        # Messaging notes — schemaless lists keyed by note type. Empty
+        # dict when there's no product or none have been promoted yet.
+        "messaging_notes": messaging_notes,
         # UTM defaults
         **utm,
         "provenance": provenance,

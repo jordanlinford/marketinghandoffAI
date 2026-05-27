@@ -136,6 +136,12 @@ def _llm_build(content_type: str, profile: dict, brief: dict | None,
 def _grounding_payload(profile: dict, brief: dict | None) -> dict:
     """The minimum slice of profile + brief the LLM needs. Keeps prompts tight."""
     brief_struct = ((brief or {}).get("body") or {}).get("structured") or {}
+    # messaging_notes (objection_handling, launch_messaging) flow in
+    # through the resolved profile from document-extraction promotions.
+    # The LLM treats them as "consider these objections / launch themes
+    # the framework calls out" rather than as hard inputs — lightweight,
+    # no new agent architecture (see docs/document-ingestion-brief.md).
+    notes = profile.get("messaging_notes") or {}
     return {
         "profile": {
             "product_summary": profile.get("product_summary", ""),
@@ -146,6 +152,10 @@ def _grounding_payload(profile: dict, brief: dict | None) -> dict:
             "competitors": profile.get("competitors") or [],
             "keywords": profile.get("keywords") or [],
             "conversion_goal": profile.get("conversion_goal", ""),
+            "messaging_notes": {
+                "objection_handling": notes.get("objection_handling") or [],
+                "launch_messaging": notes.get("launch_messaging") or [],
+            },
         },
         "brief": {
             "inputs": brief_struct.get("inputs", {}),

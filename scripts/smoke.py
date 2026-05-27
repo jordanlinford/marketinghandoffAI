@@ -34,7 +34,11 @@ os.environ["AGENT_HQ_DATABASE_URL"] = f"sqlite:///{_SMOKE_DB_DIR}/smoke.db"
 # LLM branch (which smoke stubs below). Without this, the no-key fast path
 # bypasses the stub and we can't assert "cost recorded" for content gen.
 os.environ["ANTHROPIC_API_KEY"] = "smoke-stub-key"
+# Document storage in a temp dir too — uploads must never touch ./storage.
+_SMOKE_STORAGE_DIR = tempfile.mkdtemp(prefix="agenthq_smoke_storage_")
+os.environ["AGENT_HQ_STORAGE_ROOT"] = _SMOKE_STORAGE_DIR
 atexit.register(lambda: shutil.rmtree(_SMOKE_DB_DIR, ignore_errors=True))
+atexit.register(lambda: shutil.rmtree(_SMOKE_STORAGE_DIR, ignore_errors=True))
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import select  # noqa: E402
@@ -46,10 +50,12 @@ from app.dashboard import suggestions as suggestions_mod  # noqa: E402
 from app.dashboard.ingest import parse_report_csv  # noqa: E402
 from app.data_sources.csv import CsvMarketDataSource  # noqa: E402
 from app.db import SessionLocal, create_all  # noqa: E402
+from app.documents import extract as extract_mod  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (AgentRegistration, Artifact, Guardrail,  # noqa: E402
-                        MetricPoint, Org, OrgProfile, ProductProfile, Proposal,
-                        ReportUpload, Run, Suggestion, Upload, User)
+from app.models import (AgentRegistration, Artifact, ExtractedInsight,  # noqa: E402
+                        Guardrail, MetricPoint, Org, OrgProfile, ProductDocument,
+                        ProductProfile, Proposal, ReportUpload, Run, Suggestion,
+                        Upload, User)
 from app.products import resolve_product_profile  # noqa: E402
 from app.queue import enqueue  # noqa: E402
 from app.setup import crawl as crawl_mod  # noqa: E402
@@ -113,6 +119,38 @@ def main() -> None:
             "idea_content_type": None, "idea_topic": None, "idea_target": None,
         }]
     suggestions_mod._llm_industry = _stub_industry_llm
+
+    # Document extraction LLM stub. Returns a deterministic mix of canonical
+    # fields + a messaging note + a blank/missing field so we can assert
+    # both no-confab AND the override-forbidden discipline. The actual
+    # source_passages are short verbatim quotes from the seeded TXT
+    # (smoke crafts the doc body so the quotes line up).
+    def _stub_extract_llm(doc_text, org_profile, product_profile, doc_kind, settings):
+        candidates = [
+            {"field_name": "positioning",
+             "value": "Modern matter management for in-house teams that "
+                      "live in workflow, not in legal-tech jargon.",
+             "confidence": 0.88,
+             "source_passage": "modern matter management for in-house teams"},
+            {"field_name": "value_props",
+             "value": [
+                 "Cuts contract turnaround time in half within 90 days.",
+                 "Self-serve matters for a 5-person legal team",
+             ],
+             "confidence": 0.82,
+             "source_passage": "self-serve matters for a 5-person legal team"},
+            {"field_name": "product_competitors",
+             "value": [{"name": "Ironclad"}, {"name": "LinkSquares"}],
+             "confidence": 0.7,
+             "source_passage": "compete with Ironclad and LinkSquares"},
+            {"field_name": "objection_handling",
+             "value": [{"objection": "Too expensive vs. spreadsheets",
+                        "response": "Lead with the cost of a missed renewal."}],
+             "confidence": 0.75,
+             "source_passage": "lead with the cost of a missed renewal"},
+        ]
+        return candidates, 0.0009
+    extract_mod._llm_extract = _stub_extract_llm
 
     db = SessionLocal()
     try:
@@ -1809,6 +1847,376 @@ def main() -> None:
               f"shows only this product's 6500/450/9 totals; org-level "
               f"funnel ({org_top_total} top) includes legacy + product "
               "data; cross-org filter denied.")
+
+        # ---------------------------------------------------------------------
+        # Document ingestion (Phase 1, Build B) — ten checks:
+        #   (1) Upload + ingest: a TXT doc transitions ingesting → extracted
+        #       and extracted_text is populated by the worker.
+        #   (2) Extraction stub: candidates persist with correct field_name,
+        #       value, confidence, source_passage; blank fields produce no
+        #       candidate (no confabulation).
+        #   (3) Extraction failure: when _llm_extract raises (treated as "no
+        #       LLM available"), the doc lands with status=failed and a
+        #       clear extraction_error; zero candidates persisted.
+        #   (4) Accept promotion (single-value): accepting positioning writes
+        #       into ProductProfile.positioning; the prior active history
+        #       entry flips to superseded; the new entry is active.
+        #   (5) Accept promotion — list field: accepting value_props appends
+        #       without duplicating existing items (case-insensitive); a
+        #       rejected candidate does NOT promote.
+        #   (6) Messaging notes: accepting an objection_handling candidate
+        #       appends into ProductProfile.messaging_notes.objection_handling
+        #       and retains the source_passage + source_doc_id.
+        #   (7) No-override discipline: assert no insight has a field_name
+        #       in the *_override list — neither the extractor nor the API
+        #       can land an override candidate.
+        #   (8) Tenant isolation: Acme cannot list/read/accept Onit's docs
+        #       or insights; cross-org reads/PATCHes are 403/404.
+        #   (9) Dimensions reserved: every candidate in v1 has dimensions=
+        #       None; no code branches on the column.
+        #  (10) Content agent uses promoted knowledge: a content_engine run
+        #       scoped to the product reflects the accepted positioning +
+        #       value_props in the draft body. The north-star test.
+        # ---------------------------------------------------------------------
+        # Resolve the seeded SimpleLegal CLM product.
+        simplelegal = db.execute(
+            scoped(ProductProfile, onit.id)
+            .where(ProductProfile.slug == "simplelegal-clm")
+        ).scalar_one()
+        sl_id = simplelegal.id
+
+        # Capture the seeded baseline so test (4) can assert the flip.
+        seed_history_before = list(simplelegal.field_history or [])
+        seed_positioning_before = simplelegal.positioning
+        seed_value_props_before = list(simplelegal.value_props or [])
+        # The seed includes "One source of truth for contracts and approvals."
+        # which our LLM stub's value_props will NOT include — so no
+        # accidental dedupe of an unrelated value. The stub's second
+        # value_prop "Cuts contract turnaround time in half within 90 days."
+        # matches the seed exactly (case-sensitive in this case), exercising
+        # the dedupe path.
+
+        # ---- (1) Upload + ingest ---------------------------------------
+        doc_body = (
+            "Modern Matter Management — Product Framework v2.0\n\n"
+            "Modern matter management for in-house teams that live in "
+            "workflow, not in legal-tech jargon. Designed for the GC who "
+            "needs a system, not a project.\n\n"
+            "Why it matters: self-serve matters for a 5-person legal team. "
+            "Cuts contract turnaround time in half within 90 days.\n\n"
+            "Competitive frame: we compete with Ironclad and LinkSquares; "
+            "what we sound like: clear, direct, no buzzwords.\n\n"
+            "Objection handling: Too expensive vs. spreadsheets — lead with "
+            "the cost of a missed renewal.\n"
+        )
+        up = client.post(
+            f"/api/products/{sl_id}/documents",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("framework_v2.txt",
+                            doc_body.encode("utf-8"), "text/plain")},
+            data={"kind": "messaging_framework", "version_label": "v2.0"},
+        )
+        assert up.status_code == 201, up.text
+        doc_json = up.json()
+        assert doc_json["status"] == "ingesting", doc_json
+        assert doc_json["kind"] == "messaging_framework"
+        doc_id = doc_json["id"]
+        # Drain the extraction job from the queue.
+        assert run_once() is True, "worker did not pick up the extraction job"
+        doc_row = db.execute(
+            scoped(ProductDocument, onit.id)
+            .where(ProductDocument.id == doc_id)
+        ).scalar_one()
+        assert doc_row.status == "extracted", \
+            f"doc status must flip to extracted, got {doc_row.status} " \
+            f"(error={doc_row.extraction_error})"
+        assert doc_row.extracted_text and "Modern matter management" in doc_row.extracted_text
+        print(f"[OK] Document (1): TXT upload normalized + extracted "
+              f"({len(doc_row.extracted_text)} chars).")
+
+        # ---- (2) Extraction stub — candidate persistence ----------------
+        candidates = db.execute(
+            scoped(ExtractedInsight, onit.id)
+            .where(ExtractedInsight.product_document_id == doc_id)
+        ).scalars().all()
+        # Stub returned 4 candidates: positioning, value_props,
+        # product_competitors, objection_handling. NO target_persona /
+        # proof_points / etc. — those were blank in the LLM JSON and must
+        # NOT yield candidate rows (no confabulation).
+        assert len(candidates) == 4, \
+            f"expected 4 candidates from the stub, got {len(candidates)}"
+        by_field = {c.field_name: c for c in candidates}
+        assert set(by_field) == {"positioning", "value_props",
+                                 "product_competitors", "objection_handling"}, \
+            f"unexpected candidate fields: {set(by_field)}"
+        pos_cand = by_field["positioning"]
+        assert pos_cand.confidence == 0.88, pos_cand.confidence
+        assert "modern matter management" in pos_cand.source_passage.lower()
+        assert pos_cand.status == "pending"
+        # Blank-field discipline: target_persona was not in the stub →
+        # no candidate row. Same for proof_points / differentiators /
+        # key_features / use_cases / launch_messaging.
+        for blank_field in ("target_persona", "proof_points",
+                            "differentiators", "key_features",
+                            "use_cases", "launch_messaging"):
+            assert blank_field not in by_field, \
+                f"blank field {blank_field} must not produce a candidate"
+        print(f"[OK] Document (2): {len(candidates)} candidates persisted "
+              "with correct field_name/confidence/source_passage; blank "
+              "fields produced no candidate (no confabulation).")
+
+        # ---- (3) Extraction failure when the LLM is unavailable ---------
+        original_extract = extract_mod._llm_extract
+
+        def _boom(doc_text, op, pp, dk, settings):
+            raise RuntimeError("simulated LLM outage")
+        extract_mod._llm_extract = _boom
+        try:
+            fail_up = client.post(
+                f"/api/products/{sl_id}/documents",
+                headers={"X-Dev-User-Email": "jordan@onit.com"},
+                files={"file": ("doomed.txt",
+                                b"any content", "text/plain")},
+                data={"kind": "other"},
+            )
+            assert fail_up.status_code == 201, fail_up.text
+            failed_id = fail_up.json()["id"]
+            assert run_once() is True
+            fail_row = db.execute(
+                scoped(ProductDocument, onit.id)
+                .where(ProductDocument.id == failed_id)
+            ).scalar_one()
+            assert fail_row.status == "failed", \
+                f"no-LLM doc must end up status=failed, got {fail_row.status}"
+            assert fail_row.extraction_error and "LLM unavailable" in fail_row.extraction_error, \
+                f"extraction_error must be actionable: {fail_row.extraction_error!r}"
+            # No candidates fabricated in the no-LLM case.
+            no_cands = db.execute(
+                scoped(ExtractedInsight, onit.id)
+                .where(ExtractedInsight.product_document_id == failed_id)
+            ).scalars().all()
+            assert no_cands == [], \
+                f"failed extraction must persist zero candidates, got {len(no_cands)}"
+        finally:
+            extract_mod._llm_extract = original_extract
+        print("[OK] Document (3): LLM-unavailable doc lands status=failed "
+              "with actionable extraction_error; zero candidates fabricated.")
+
+        # ---- (4) Accept positioning — flips prior history to superseded -
+        accept_pos = client.patch(
+            f"/api/insights/{pos_cand.id}",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"action": "accept"},
+        )
+        assert accept_pos.status_code == 200, accept_pos.text
+        # Refresh product from DB.
+        db.refresh(simplelegal)
+        assert "Modern matter management" in simplelegal.positioning, \
+            f"positioning must be promoted; got {simplelegal.positioning!r}"
+        hist = simplelegal.field_history or []
+        # Prior seeded entry for "positioning" must be superseded.
+        prior_pos = [e for e in hist if e.get("field") == "positioning"
+                     and e.get("accepted_from_insight_id") == "__seed__"]
+        assert prior_pos and prior_pos[0]["status"] == "superseded", \
+            f"prior positioning history entry must be superseded; got {prior_pos}"
+        # New active entry references the accepted insight.
+        new_pos = [e for e in hist if e.get("field") == "positioning"
+                   and e.get("accepted_from_insight_id") == pos_cand.id]
+        assert new_pos and new_pos[0]["status"] == "active", \
+            f"new positioning history entry must be active; got {new_pos}"
+        # The accepted insight row itself flipped.
+        db.refresh(pos_cand)
+        assert pos_cand.status == "accepted"
+        print(f"[OK] Document (4): single-value promotion flips prior "
+              f"history entry to superseded ({len(hist)} entries total).")
+
+        # ---- (5) List field promotion + dedupe + reject -----------------
+        vp_cand = by_field["value_props"]
+        accept_vp = client.patch(
+            f"/api/insights/{vp_cand.id}",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"action": "accept"},
+        )
+        assert accept_vp.status_code == 200, accept_vp.text
+        db.refresh(simplelegal)
+        vps = simplelegal.value_props or []
+        # Seed had "Cuts contract turnaround time in half within 90 days."
+        # The stub provided that SAME string + a new "Self-serve matters..."
+        # one. After promotion: dedupe drops the duplicate; the new one
+        # is appended; previous seed values retained.
+        dup = [v for v in vps if v == "Cuts contract turnaround time in half within 90 days."]
+        assert len(dup) == 1, \
+            f"duplicate value_prop must be deduped, got count={len(dup)}: {vps}"
+        assert any("Self-serve" in (v or "") for v in vps), \
+            f"new value_prop must be appended: {vps}"
+        # The seed values that weren't in the stub stay intact.
+        for seed_val in seed_value_props_before:
+            assert seed_val in vps, \
+                f"seed value_prop {seed_val!r} must be preserved through promotion"
+        # Now reject the competitors candidate — it must NOT promote.
+        pc_cand = by_field["product_competitors"]
+        comp_before = list(simplelegal.product_competitors or [])
+        rej = client.patch(
+            f"/api/insights/{pc_cand.id}",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"action": "reject"},
+        )
+        assert rej.status_code == 200, rej.text
+        db.refresh(simplelegal)
+        comp_after = list(simplelegal.product_competitors or [])
+        assert comp_after == comp_before, \
+            "rejected candidate must NOT alter the product field"
+        # And the rejected insight didn't write history either.
+        recent_hist = [e for e in (simplelegal.field_history or [])
+                       if e.get("accepted_from_insight_id") == pc_cand.id]
+        assert recent_hist == [], "rejected insight must not write field_history"
+        print(f"[OK] Document (5): list promotion dedupes (value_props "
+              f"size={len(vps)}); rejected candidate does not promote.")
+
+        # ---- (6) Messaging notes -----------------------------------------
+        oh_cand = by_field["objection_handling"]
+        accept_oh = client.patch(
+            f"/api/insights/{oh_cand.id}",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"action": "accept"},
+        )
+        assert accept_oh.status_code == 200, accept_oh.text
+        db.refresh(simplelegal)
+        notes = simplelegal.messaging_notes or {}
+        bucket = notes.get("objection_handling") or []
+        assert bucket, f"objection_handling must populate messaging_notes; got {notes}"
+        last = bucket[-1]
+        assert last.get("objection", "").startswith("Too expensive"), last
+        assert last.get("response", "").lower().startswith("lead with"), last
+        assert "missed renewal" in (last.get("source_passage") or "").lower(), \
+            f"source_passage must be retained: {last}"
+        assert last.get("source_doc_id") == doc_id, \
+            f"source_doc_id must reference the originating document: {last}"
+        print(f"[OK] Document (6): objection_handling appended into "
+              f"messaging_notes with source_passage + source_doc_id retained.")
+
+        # ---- (7) No-override discipline ---------------------------------
+        # Across ALL insights ever persisted (this entire smoke run),
+        # no candidate may carry an *_override field_name.
+        ALL_OVERRIDE_FIELDS = {
+            "brand_voice_override", "banned_claims_override",
+            "conversion_goal_override", "rubric_override",
+            "utm_source_default", "utm_medium_default",
+        }
+        all_insights = db.execute(
+            scoped(ExtractedInsight, onit.id)
+        ).scalars().all()
+        offenders = [i for i in all_insights if i.field_name in ALL_OVERRIDE_FIELDS]
+        assert not offenders, \
+            f"extraction MUST NOT produce override candidates, got: " \
+            f"{[(i.id, i.field_name) for i in offenders]}"
+        print(f"[OK] Document (7): no-override discipline holds — "
+              f"{len(all_insights)} insights, 0 override candidates.")
+
+        # ---- (8) Tenant isolation ----------------------------------------
+        # Acme cannot list / read / accept any of Onit's docs or insights.
+        cross_list = client.get(
+            f"/api/products/{sl_id}/documents",
+            headers={"X-Dev-User-Email": "ops@acme.com"})
+        assert cross_list.status_code in (403, 404), \
+            f"cross-org list docs must be denied, got {cross_list.status_code}"
+        cross_doc_get = client.get(
+            f"/api/products/{sl_id}/insights",
+            headers={"X-Dev-User-Email": "ops@acme.com"})
+        assert cross_doc_get.status_code in (403, 404), \
+            f"cross-org list insights must be denied, got {cross_doc_get.status_code}"
+        # Pick a still-pending insight (none left from the stub — we
+        # accepted/rejected all four. Upload a fresh doc to create new
+        # pending insights so we can test cross-org PATCH.)
+        fresh_up = client.post(
+            f"/api/products/{sl_id}/documents",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("framework_v3.txt",
+                            doc_body.encode("utf-8"), "text/plain")},
+            data={"kind": "messaging_framework"},
+        )
+        assert fresh_up.status_code == 201, fresh_up.text
+        assert run_once() is True
+        fresh_pending = db.execute(
+            scoped(ExtractedInsight, onit.id)
+            .where(ExtractedInsight.product_document_id == fresh_up.json()["id"],
+                   ExtractedInsight.status == "pending")
+        ).scalars().all()
+        assert fresh_pending, "expected fresh pending insights after re-upload"
+        cross_patch = client.patch(
+            f"/api/insights/{fresh_pending[0].id}",
+            headers={"X-Dev-User-Email": "ops@acme.com",
+                     "Content-Type": "application/json"},
+            json={"action": "accept"})
+        assert cross_patch.status_code in (403, 404), \
+            f"cross-org PATCH must be denied, got {cross_patch.status_code}: {cross_patch.text}"
+        # DB-layer isolation: scoped() returns zero docs / insights for Acme.
+        assert db.execute(scoped(ProductDocument, other.id)).scalars().all() == [], \
+            "TENANT LEAK: Acme sees Onit's product_documents"
+        assert db.execute(scoped(ExtractedInsight, other.id)).scalars().all() == [], \
+            "TENANT LEAK: Acme sees Onit's extracted_insights"
+        print("[OK] Document (8): tenant isolation holds — list/get/PATCH "
+              "all denied cross-org; scoped() returns 0 of Onit's rows for Acme.")
+
+        # ---- (9) Dimensions reserved ------------------------------------
+        all_insights2 = db.execute(
+            scoped(ExtractedInsight, onit.id)
+        ).scalars().all()
+        non_null_dims = [i for i in all_insights2 if i.dimensions is not None]
+        assert not non_null_dims, \
+            f"dimensions must be null in v1, got non-null on: " \
+            f"{[(i.id, i.dimensions) for i in non_null_dims]}"
+        print(f"[OK] Document (9): dimensions column reserved — "
+              f"{len(all_insights2)} insights, 0 with non-null dimensions.")
+
+        # ---- (10) Content engine reflects promoted knowledge ------------
+        # SimpleLegal CLM now has the doc-promoted positioning + the
+        # promoted value_prop. A content_engine run scoped to this product
+        # must reflect them in the rendered draft. (Stub builds use the
+        # deterministic template path which folds positioning + value_props
+        # into the body via _product_aware_view.)
+        _set_review_mode(onit.id, "guardrail")
+        promoted_run = Run(org_id=onit.id, agent_registration_id=onit_content_reg.id,
+                           agent_key="content_engine", trigger="manual",
+                           status="queued", product_id=sl_id,
+                           task={"action": "generate", "content_type": "email",
+                                 "topic": "Self-serve matters for legal ops",
+                                 "target": "GC"})
+        db.add(promoted_run); db.commit(); db.refresh(promoted_run)
+        enqueue(db, onit.id, "run_agent", {"run_id": promoted_run.id})
+        assert run_once() is True
+        db.refresh(promoted_run)
+        assert promoted_run.status == "succeeded", \
+            f"product-promoted run failed: {promoted_run.error}"
+        promoted_art = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.run_id == promoted_run.id,
+                   Artifact.type == "content_draft")
+        ).scalar_one()
+        body_text = " ".join(b.get("text", "")
+                             for b in promoted_art.body["content"]["blocks"])
+        # Promoted positioning fragment must surface — the deterministic
+        # template folds positioning into product_summary, which the email
+        # template stitches into the body.
+        assert "Modern matter management" in body_text, \
+            f"promoted positioning must appear in the draft: {body_text!r}"
+        # Promoted value_prop fragment must surface (it leads value_prop).
+        body_text_lower = body_text.lower()
+        assert ("self-serve" in body_text_lower
+                or "cuts contract turnaround" in body_text_lower), \
+            f"promoted value_prop must surface in the draft: {body_text!r}"
+        # Provenance carries the product link + competitors_reflected.
+        prov = promoted_art.body["provenance"]
+        assert prov["product_id"] == sl_id
+        assert "Ironclad" in (prov.get("competitors_reflected") or []), \
+            f"product_competitors must reflect into provenance: {prov}"
+        print(f"[OK] Document (10): content_engine run for SimpleLegal CLM "
+              "reflects promoted positioning + value_props in the draft "
+              "(north-star demo, mechanical form).")
 
         print("[OK] Smoke test passed.")
     finally:

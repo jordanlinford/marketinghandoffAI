@@ -8,3 +8,12 @@ python-dotenv>=1.0
 python-multipart>=0.0.9
 SQLAlchemy>=2.0
 uvicorn[standard]>=0.27
+# Document ingestion (Phase 1, Build B). Imported lazily by the
+# normalizers in app/documents/normalize.py so a missing dep only breaks
+# the corresponding MIME path, not the whole worker. Tesseract itself is a
+# SYSTEM dependency (`brew install tesseract` on macOS, apt on Linux);
+# pytesseract is just the Python wrapper. See README for setup notes.
+pypdf>=4.0
+python-docx>=1.1
+python-pptx>=0.6
+pytesseract>=0.3.10

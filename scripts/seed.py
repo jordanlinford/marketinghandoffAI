@@ -112,6 +112,30 @@ def main() -> None:
             db.commit()
             print("Seeded example product 'SimpleLegal CLM' under Onit")
 
+        # Seed one demonstrative field_history entry on SimpleLegal CLM so
+        # the dev DB shows the promotion shape (and rollback affordance)
+        # without requiring an actual document upload. Idempotent: only
+        # add if no history entries exist yet on this product.
+        product = db.execute(
+            select(ProductProfile).where(
+                ProductProfile.org_id == org.id,
+                ProductProfile.slug == "simplelegal-clm")
+        ).scalar_one()
+        if not (product.field_history or []):
+            from datetime import datetime, timezone
+            product.field_history = [{
+                "field": "positioning",
+                "value": product.positioning,
+                "accepted_from_insight_id": "__seed__",
+                "accepted_at": datetime.now(timezone.utc).isoformat(),
+                "status": "active",
+                "note": ("Seeded entry — represents the positioning that would "
+                         "have been written by accepting a doc-extracted insight. "
+                         "Demonstrates field_history shape without requiring an upload."),
+            }]
+            db.commit()
+            print("Seeded a demonstrative field_history entry on SimpleLegal CLM")
+
         for scope, rules in [("spend", {"max_change_usd": 250}),
                              ("publish", {"require_human_review": True}),
                              ("content", {"banned_claims": []})]:

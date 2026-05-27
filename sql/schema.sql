@@ -198,11 +198,82 @@ CREATE TABLE product_profiles (
     rubric_override          JSONB,
     utm_source_default       TEXT,
     utm_medium_default       TEXT,
+    -- Lightweight, schemaless sections fed by document-extraction's
+    -- "messaging notes" path (objection_handling, launch_messaging). The
+    -- content engine reads these at generation time. See models.py.
+    messaging_notes          JSONB NOT NULL DEFAULT '{}',
+    -- Append-only log of accepted product-knowledge values per field.
+    -- Each entry: {field, value, accepted_from_insight_id, accepted_at,
+    -- status: active|superseded|historical}. Supports rollback + audit.
+    field_history            JSONB NOT NULL DEFAULT '[]',
     updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (org_id, slug)
 );
 CREATE INDEX idx_product_profiles_org ON product_profiles(org_id);
+
+-- ---- Document ingestion -------------------------------------------------
+-- product_documents stores the raw uploaded docs (raw file on disk under
+-- a tenant-scoped path; this row carries the metadata). Each upload
+-- enqueues an extraction job on the worker, which normalizes text and
+-- calls the LLM to produce extracted_insights candidates.
+CREATE TABLE product_documents (
+    id                TEXT PRIMARY KEY,
+    org_id            TEXT NOT NULL REFERENCES orgs(id),
+    product_id        TEXT NOT NULL REFERENCES product_profiles(id) ON DELETE CASCADE,
+    filename          TEXT NOT NULL,
+    mime_type         TEXT NOT NULL DEFAULT '',
+    size_bytes        INTEGER NOT NULL DEFAULT 0,
+    sha256            TEXT NOT NULL DEFAULT '',
+    -- Tenant-scoped path under settings.storage_root.
+    storage_path      TEXT NOT NULL DEFAULT '',
+    -- 'messaging_framework' | 'one_pager' | 'launch_doc' |
+    -- 'sales_enablement' | 'other' (user-tagged at upload).
+    kind              TEXT NOT NULL DEFAULT 'messaging_framework',
+    version_label     TEXT NOT NULL DEFAULT '',
+    -- 'ingesting' | 'extracted' | 'failed' | 'superseded'.
+    status            TEXT NOT NULL DEFAULT 'ingesting',
+    extracted_text    TEXT,
+    extraction_error  TEXT,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_product_documents_org_product
+    ON product_documents(org_id, product_id);
+CREATE INDEX idx_product_documents_sha256 ON product_documents(org_id, sha256);
+
+-- extracted_insights is the candidate review queue. Each row is one
+-- (field × document × extraction-run) pending human review. Accepted/
+-- edited rows promote into ProductProfile via the additive merge.
+-- Extraction MUST NOT produce candidates for any *_override field — the
+-- application layer enforces this in app/documents/extract.py.
+CREATE TABLE extracted_insights (
+    id                  TEXT PRIMARY KEY,
+    org_id              TEXT NOT NULL REFERENCES orgs(id),
+    product_id          TEXT NOT NULL REFERENCES product_profiles(id) ON DELETE CASCADE,
+    product_document_id TEXT NOT NULL REFERENCES product_documents(id) ON DELETE CASCADE,
+    field_name          TEXT NOT NULL,
+    value               JSONB NOT NULL DEFAULT '{}',
+    confidence          DOUBLE PRECISION NOT NULL DEFAULT 0,
+    -- Verbatim quote from the doc that motivated the value.
+    source_passage      TEXT NOT NULL DEFAULT '',
+    -- {"page": N} | {"slide": N} | {"paragraph": N} | {"via": "ocr"}.
+    source_location     JSONB,
+    -- Reserved for future variant scoping (persona/industry/segment/...).
+    -- v1: always null. The column exists; no logic branches on it.
+    dimensions          JSONB,
+    -- 'pending' | 'accepted' | 'edited' | 'rejected' | 'superseded'.
+    status              TEXT NOT NULL DEFAULT 'pending',
+    accepted_value      JSONB,
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_extracted_insights_org_product
+    ON extracted_insights(org_id, product_id);
+CREATE INDEX idx_extracted_insights_status
+    ON extracted_insights(org_id, product_id, status);
+CREATE INDEX idx_extracted_insights_doc
+    ON extracted_insights(org_id, product_document_id);
 
 CREATE TABLE guardrails (
     id          TEXT PRIMARY KEY,
@@ -332,7 +403,8 @@ BEGIN
   FOREACH t IN ARRAY ARRAY['users','connections','agents','runs','artifacts',
                            'proposals','guardrails','audit_log','jobs','uploads',
                            'org_profiles','report_uploads','metric_points',
-                           'suggestions','product_profiles']
+                           'suggestions','product_profiles','product_documents',
+                           'extracted_insights']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', t);

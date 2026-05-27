@@ -322,6 +322,15 @@ class ContentEngineAgent(Agent):
         competitors_used = (product or {}).get("product_competitors") \
             if product and (product or {}).get("product_competitors") \
             else profile.get("competitors") or []
+        # Messaging notes (from document extraction's promotion path) —
+        # consult objection_handling when the topic touches a named
+        # competitor or pricing. Lightweight: we surface which notes
+        # the prompt considered in the artifact's provenance so the
+        # human can audit. The LLM path also receives the full notes
+        # block via _grounding_payload in app/agents/content_templates.py.
+        considered_objections = self._relevant_objections(
+            profile.get("messaging_notes") or {}, topic, competitors_used)
+
         body = {
             "content": content,
             "provenance": {
@@ -336,6 +345,7 @@ class ContentEngineAgent(Agent):
                     c.get("name") for c in competitors_used
                     if isinstance(c, dict) and c.get("name")],
                 "positioning_used": bool(product and product.get("positioning")),
+                "objection_handling_considered": considered_objections,
                 # Honest about the publish gap (brief: graceful-honesty rule):
                 "publish_note": ("This is a draft. Publish using the tagged "
                                  "link so performance can be traced back here."),
@@ -387,6 +397,42 @@ class ContentEngineAgent(Agent):
                            cost_usd=total_cost, logs=[])
 
     # ---- Helpers ----------------------------------------------------------
+    @staticmethod
+    def _relevant_objections(messaging_notes: dict, topic: str,
+                             competitors_used: list) -> list[dict]:
+        """Pick the subset of objection_handling notes worth surfacing for
+        THIS draft. Matched when the topic mentions a competitor name OR
+        pricing words OR the objection's own text overlaps with the topic.
+        Lightweight; we don't restructure the agent, we just include the
+        relevant subset in the prompt + provenance."""
+        all_notes = (messaging_notes or {}).get("objection_handling") or []
+        if not all_notes:
+            return []
+        topic_l = (topic or "").lower()
+        competitor_names = [
+            (c.get("name") if isinstance(c, dict) else str(c)).lower()
+            for c in (competitors_used or [])
+            if (c.get("name") if isinstance(c, dict) else c)]
+        pricing_signals = ("price", "pricing", "cost", "budget", "expensive",
+                           "cheaper", "discount")
+        touches_pricing = any(w in topic_l for w in pricing_signals)
+        touches_competitor = any(name and name in topic_l for name in competitor_names)
+        out: list[dict] = []
+        for note in all_notes:
+            if not isinstance(note, dict):
+                continue
+            obj_text = (note.get("objection") or note.get("note") or "").lower()
+            if (touches_competitor or touches_pricing
+                    or (obj_text and any(tok and tok in topic_l
+                                         for tok in obj_text.split()
+                                         if len(tok) > 4))):
+                out.append({
+                    "objection": note.get("objection") or note.get("note") or "",
+                    "response": note.get("response") or "",
+                    "source_passage": note.get("source_passage") or "",
+                })
+        return out[:5]   # cap so we don't blow up the prompt
+
     @staticmethod
     def _product_aware_view(profile: dict) -> dict:
         """Build the dict the template builders read. When a product layer

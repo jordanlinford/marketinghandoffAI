@@ -14,3 +14,6 @@ __pycache__/
 *.db-shm
 *.db-wal
 .env
+# Uploaded product documents — stored per-tenant under storage/{org_id}/
+# {product_id}/. Never commit user-uploaded content.
+storage/

@@ -203,7 +203,37 @@
   }
 
   /* ---- Setup view ---------------------------------------------------- */
-  .setup-main { padding: 16px; max-width: 980px; margin: 0 auto; }
+  .setup-main { display: block; padding: 16px; max-width: 980px; margin: 0 auto; }
+  /* When a view scopes to a product, a small breadcrumb sits above the
+     panels so the user always knows where they are in the workflow. */
+  .breadcrumb { color: var(--muted); font-size: 13px; margin: 0 0 12px 4px; }
+  .breadcrumb b { color: #c5cad6; font-weight: 500; }
+  /* Placeholder pages (Campaigns + Library) render real-looking controls
+     in a disabled state. Visual cue: faded + cursor:not-allowed. */
+  .placeholder-banner {
+    background: #1f263a; border: 1px solid var(--accent);
+    color: #c8dcff; padding: 10px 14px; border-radius: 8px;
+    margin-bottom: 14px; font-size: 13px;
+  }
+  .placeholder-grid input, .placeholder-grid select, .placeholder-grid button {
+    opacity: 0.55; cursor: not-allowed;
+  }
+  /* Command Center grid — cards laid out in a flexible auto-fill grid so
+     empty states collapse cleanly and busy ones flow. */
+  .home-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .home-card {
+    background: #1a2030; border: 1px solid #232a3d;
+    border-radius: 8px; padding: 14px;
+  }
+  .home-card h3 {
+    margin: 0 0 8px; font-size: 12px; text-transform: uppercase;
+    letter-spacing: .8px; color: var(--muted); font-weight: 600;
+  }
+  .home-card .big { font-size: 28px; color: #e6e9f0; margin: 4px 0 6px; }
+  .home-card a { cursor: pointer; }
   .setup-main .panel { padding: 18px; }
   .setup-paths { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
   @media (max-width: 800px) { .setup-paths { grid-template-columns: 1fr; } }
@@ -277,12 +307,20 @@
 </head>
 <body>
 <header class="bar">
-  <div class="brand">Agent <span class="dot">●</span> HQ</div>
+  <!-- Click the brand to return to the Command Center (the home view).
+       The six-step nav below is the workflow spine — each tab is a step
+       in the marketer's flow, numbered to reinforce the order. -->
+  <div class="brand" id="brand-home" style="cursor:pointer;"
+       title="Command Center (home)">
+    Agent <span class="dot">●</span> HQ
+  </div>
   <div class="view-tabs" role="tablist">
-    <button id="tab-runs"      class="active" role="tab">Runs</button>
-    <button id="tab-content"   role="tab">Content</button>
-    <button id="tab-dashboard" role="tab">Dashboard</button>
-    <button id="tab-setup"     role="tab">Setup</button>
+    <button id="tab-organization" class="active" role="tab">1. Organization</button>
+    <button id="tab-products"     role="tab">2. Products</button>
+    <button id="tab-create"       role="tab">3. Create</button>
+    <button id="tab-campaigns"    role="tab">4. Campaigns</button>
+    <button id="tab-library"      role="tab">5. Library</button>
+    <button id="tab-insights"     role="tab">6. Insights</button>
   </div>
   <!-- Product selector — minimal, header-level so every tab sees it.
        When (none) is selected everything stays org-level (current behavior).
@@ -300,7 +338,79 @@
     <span>loading…</span>
   </div>
 </header>
-<main id="runs-view">
+<!-- ============================ Command Center =========================
+     Default landing — answers "what should I work on next?" by composing
+     existing scoped state (no new endpoints): active products, pending
+     review items, content awaiting approval, recent runs, recent
+     suggestions, and a deterministic "recommended next actions" list. -->
+<main id="home-view" class="setup-main">
+  <section class="panel">
+    <div class="row" style="margin-bottom:8px;">
+      <h2 style="margin:0">Command Center</h2>
+      <span class="setup-status" id="home-status">
+        Your marketing OS. Pick up where you left off.
+      </span>
+    </div>
+    <div id="home-grid"></div>
+  </section>
+</main>
+
+<!-- ============================ Create (Step 3) =========================
+     Unified content workspace. The top spans all columns and holds the
+     content controls (Suggest, Generate, Run market intelligence). The
+     three panels below preserve the runs-list / detail / approval-queue
+     layout. The approval queue is still reached here. -->
+<main id="create-view" style="display:none;">
+  <!-- Top control bar spanning all 3 grid columns. -->
+  <section class="panel" style="grid-column: 1 / -1;">
+    <div class="row" style="margin-bottom:8px;">
+      <h2 style="margin:0">Create content</h2>
+      <span class="setup-status">
+        Grounded in your confirmed org profile + the latest market brief.
+        Drafts route per your review mode (Organization → Review mode).
+      </span>
+    </div>
+    <div class="setup-paths">
+      <div class="setup-path">
+        <h4>Suggest ideas</h4>
+        <p>Read your profile and the latest market brief; propose a short
+           list of ideas (type, topic, rationale, target). Pick one to generate.</p>
+        <button id="content-suggest-btn">Suggest content ideas</button>
+      </div>
+      <div class="setup-path">
+        <h4>Generate one piece</h4>
+        <p>Pick a type and topic — we'll draft it grounded in your profile.</p>
+        <div class="row" style="gap:6px;">
+          <select id="content-type">
+            <optgroup label="Standard content">
+              <option value="email">email</option>
+              <option value="ad">ad</option>
+              <option value="social_post">social_post</option>
+              <option value="blog_outline">blog_outline</option>
+            </optgroup>
+            <optgroup label="Enhanced content — coming next" disabled>
+              <option value="buyer_guide" disabled>buyer_guide (coming next)</option>
+              <option value="white_paper" disabled>white_paper (coming next)</option>
+              <option value="case_study" disabled>case_study (coming next)</option>
+              <option value="report" disabled>report (coming next)</option>
+            </optgroup>
+          </select>
+          <input type="text" id="content-topic"
+            placeholder="topic (e.g. cut weekly review overhead)" />
+        </div>
+        <div class="row" style="gap:6px; margin-top:6px;">
+          <input type="text" id="content-target"
+            placeholder="target audience (optional)" />
+          <button id="content-generate-btn">Generate</button>
+        </div>
+        <div class="setup-status" style="margin-top:6px; color:var(--muted);">
+          Enhanced content uses your product's full PMM framework and is
+          generated as templated long-form output. Coming next.
+        </div>
+      </div>
+    </div>
+    <div id="content-status" class="setup-status" style="margin-top:14px;"></div>
+  </section>
   <!-- LEFT: Runs -->
   <section class="panel" aria-label="Runs">
     <div class="row">
@@ -338,64 +448,143 @@
   </section>
 </main>
 
-<!-- =========================== Content view ============================= -->
-<!-- The first action-taking surface. Triggers content_engine runs (suggest +
-     generate). Resulting runs show up in the Runs list; their detail renders
-     block-by-block. Proposals land in the existing Approval queue. -->
-<main id="content-view" class="setup-main" style="display:none;">
-  <section class="panel">
-    <div class="row" style="margin-bottom:8px;">
-      <h2 style="margin:0">Content engine</h2>
-      <span class="setup-status">
-        Grounded in your confirmed org profile + the latest market brief.
-        Drafts route per your review mode (Setup → Review mode).
-      </span>
-    </div>
-
+<!-- ============================ Campaigns (Step 4) ======================
+     Real placeholder — the workflow is visible but inactive. The brief
+     calls this out explicitly: not a 404, a "feature whose machinery is
+     visible but inactive." When Phase 3 ships, the same DOM hooks slot
+     into the active build. -->
+<main id="campaigns-view" class="setup-main" style="display:none;">
+  <div class="placeholder-banner">
+    <strong>Campaign Builder — coming next.</strong>
+    This is where content becomes execution. Pick an approved asset,
+    define the CTA, target channels and audience, and the system will
+    spawn derivative copy + distribution + tracking.
+  </div>
+  <section class="panel placeholder-grid">
     <div class="setup-paths">
       <div class="setup-path">
-        <h4>1 — Suggest ideas</h4>
-        <p>Read your profile and the latest market brief; propose a short list of
-           ideas (type, topic, rationale, target). Pick one to generate.</p>
-        <button id="content-suggest-btn">Suggest content ideas</button>
+        <h4>Start with an asset</h4>
+        <p>Pick a published or approved asset to build a campaign around.</p>
+        <select disabled>
+          <option>(no campaign yet — select an asset)</option>
+        </select>
       </div>
       <div class="setup-path">
-        <h4>2 — Generate one piece</h4>
-        <p>Pick a type and topic — we'll draft it grounded in your profile.</p>
-        <div class="row" style="gap:6px;">
-          <select id="content-type">
-            <option value="email">email</option>
-            <option value="ad">ad</option>
-            <option value="social_post">social_post</option>
-            <option value="blog_outline">blog_outline</option>
-          </select>
-          <input type="text" id="content-topic" placeholder="topic (e.g. cut weekly review overhead)" />
-        </div>
-        <div class="row" style="gap:6px; margin-top:6px;">
-          <input type="text" id="content-target" placeholder="target audience (optional)" />
-          <button id="content-generate-btn">Generate</button>
-        </div>
+        <h4>Define the CTA</h4>
+        <p>The single action this campaign drives toward.</p>
+        <input type="text" disabled
+          placeholder="e.g. Book a demo, Download the guide" />
+      </div>
+      <div class="setup-path">
+        <h4>Channels</h4>
+        <p>Where this campaign runs.</p>
+        <select disabled multiple size="6">
+          <option>LinkedIn</option>
+          <option>Google Ads</option>
+          <option>Email</option>
+          <option>Meta</option>
+          <option>Reddit</option>
+          <option>Webinar</option>
+        </select>
       </div>
     </div>
-
-    <div id="content-status" class="setup-status"
-         style="margin-top:14px;">Use one of the paths above to trigger a content_engine run.</div>
+    <div class="setup-paths" style="margin-top:14px;">
+      <div class="setup-path">
+        <h4>Audience</h4>
+        <p>Segment this campaign targets.</p>
+        <select disabled>
+          <option>(no segments defined)</option>
+        </select>
+      </div>
+      <div class="setup-path">
+        <h4>Campaign objective</h4>
+        <p>What pipeline outcome this maps to.</p>
+        <select disabled>
+          <option>Pick an objective</option>
+          <option>Awareness</option>
+          <option>Engagement</option>
+          <option>Pipeline / MQLs</option>
+          <option>Closed-won</option>
+        </select>
+      </div>
+      <div class="setup-path">
+        <h4>We will generate</h4>
+        <ul style="margin:0; padding-left:18px; color:var(--muted); font-size:13px;">
+          <li>Derivative assets per channel</li>
+          <li>Channel-specific copy variations</li>
+          <li>Distribution recommendations</li>
+          <li>Tracking structure (UTMs)</li>
+        </ul>
+      </div>
+    </div>
+    <div class="setup-actions" style="margin-top:14px;">
+      <button disabled>Build campaign (coming next)</button>
+    </div>
   </section>
 </main>
 
-<!-- =========================== Dashboard view =========================== -->
+<!-- ============================ Library (Step 5) ========================
+     Real placeholder. Everything generated or uploaded will land here. -->
+<main id="library-view" class="setup-main" style="display:none;">
+  <div class="placeholder-banner">
+    <strong>Asset Library — coming next.</strong>
+    Everything generated or uploaded will be searchable, filterable, and
+    exportable from here.
+  </div>
+  <section class="panel placeholder-grid">
+    <h3 style="margin-top:0;">Filter</h3>
+    <div class="form-grid">
+      <div class="field"><label>Org</label>
+        <select disabled><option>(this org)</option></select></div>
+      <div class="field"><label>Product</label>
+        <select disabled><option>(any)</option></select></div>
+      <div class="field"><label>Campaign</label>
+        <select disabled><option>(any)</option></select></div>
+      <div class="field"><label>Asset type</label>
+        <select disabled>
+          <option>(any)</option>
+          <option>email</option><option>ad</option>
+          <option>social_post</option><option>blog_outline</option>
+          <option>buyer_guide</option><option>white_paper</option>
+          <option>case_study</option><option>report</option>
+        </select></div>
+      <div class="field"><label>Funnel stage</label>
+        <select disabled>
+          <option>(any)</option>
+          <option>Awareness (top)</option>
+          <option>Engagement (middle)</option>
+          <option>Opportunities (bottom)</option>
+        </select></div>
+      <div class="field"><label>Status</label>
+        <select disabled>
+          <option>(any)</option>
+          <option>ready</option>
+          <option>pending_review</option>
+          <option>rejected</option>
+        </select></div>
+    </div>
+    <div class="empty-state" style="margin-top:18px;">
+      <div class="big">Your generated and uploaded assets will live here.</div>
+      <div>Library — coming next.</div>
+    </div>
+  </section>
+</main>
+
+<!-- =========================== Insights (Step 6) ======================== -->
 <!-- Generic time-series receptacle, curated funnel + production lane on top.
      Users UPLOAD the reports their tools already export; we never connect to
      GA/LinkedIn/etc. APIs (out of scope). Honest baseline-vs-attributed
      distinction throughout: untagged historical rows are backdrop only and
      are NEVER claimed as something the system drove. -->
-<main id="dashboard-view" class="setup-main" style="display:none;">
+<main id="insights-view" class="setup-main" style="display:none;">
+  <div class="breadcrumb" id="insights-breadcrumb"></div>
   <section class="panel">
     <div class="row" style="margin-bottom:8px;">
-      <h2 style="margin:0">Dashboard</h2>
+      <h2 style="margin:0">Insights</h2>
       <span class="setup-status">
-        Funnel + production over time. Baseline = backdrop trend (faded);
-        attributed = signal from rows whose UTMs match content you produced.
+        The optimization layer — not just reporting. Funnel + production
+        over time, with attributed signal where UTMs match content you
+        produced (baseline = backdrop trend, faded).
       </span>
     </div>
 
@@ -441,15 +630,16 @@
   </section>
 </main>
 
-<!-- ============================ Setup view ============================== -->
-<!-- Org-level config: ICP, product, voice, conversion goal. Reused by every
-     later stage. Three entry paths (manual / crawl / customer CSV) feed the
-     same editable form. Drafts are obviously not-yet-saved until Save. -->
-<main id="setup-view" class="setup-main" style="display:none;">
+<!-- ========================== Organization (Step 1) =====================
+     Org-level config: ICP, product, voice, conversion goal, rubric,
+     content_review_mode. Three intake paths (manual / crawl / customer
+     CSV) feed the same editable form. PRODUCT-specific UI (documents,
+     review queue, product list) has moved to Step 2. -->
+<main id="organization-view" class="setup-main" style="display:none;">
   <section class="panel">
     <div class="row" style="margin-bottom:14px;">
       <div>
-        <h2 style="margin:0">Setup — Org profile</h2>
+        <h2 style="margin:0">Organization</h2>
         <div class="setup-status" id="profile-status">loading…</div>
       </div>
       <span id="profile-state-badge" class="badge"></span>
@@ -492,88 +682,123 @@
       </div>
     </div>
 
-    <!-- Document ingestion (Phase 1 Build B). Only shows when a product
-         is selected via the header selector. Upload pulls into a worker
-         job; the review queue surfaces extracted candidates per field. -->
-    <div class="section" id="product-docs-section" style="display:none;">
-      <h3>Documents — for the selected product</h3>
-      <div class="setup-status" style="margin-bottom:8px;">
-        Upload a PMM framework, one-pager, launch doc, or sales enablement
-        doc. Extraction runs in the background; review the candidate
-        insights below and accept / edit / reject them.
-      </div>
-      <div class="row" style="gap:6px;">
-        <select id="doc-kind">
-          <option value="messaging_framework">messaging_framework</option>
-          <option value="one_pager">one_pager</option>
-          <option value="launch_doc">launch_doc</option>
-          <option value="sales_enablement">sales_enablement</option>
-          <option value="other">other</option>
-        </select>
-        <input type="text" id="doc-version" placeholder="version label (optional)" />
-      </div>
-      <div class="row" style="gap:6px; margin-top:6px;">
-        <input type="file" id="doc-file"
-          accept=".pdf,.docx,.pptx,.ppt,.txt,.md,.png,.jpg,.jpeg,.tiff" />
-        <button id="doc-upload-btn">Upload document</button>
-      </div>
-      <div id="doc-upload-status" class="setup-status" style="margin-top:6px;"></div>
-      <div id="doc-list" style="margin-top:14px;"></div>
-      <h4 style="margin-top:18px;">Review queue</h4>
-      <div id="insight-queue"></div>
-      <h4 style="margin-top:18px;">Field history</h4>
-      <div id="field-history" class="setup-status">
-        Select a product to see its history.
-      </div>
-    </div>
-
-    <!-- Products — children of the org. Inheritable fields (brand_voice,
-         banned_claims, rubric, conversion_goal, UTM defaults) default to
-         inherit from the org; the override fields let a product win
-         field-by-field. -->
+    <!-- Structural placeholder — brand assets land in a future build.
+         Visible here so the IA tells the user where it WILL live. -->
     <div class="section">
-      <h3>Products</h3>
-      <div id="products-list"></div>
-      <details style="margin-top:10px;">
-        <summary style="cursor:pointer;">New product</summary>
-        <div class="form-grid" style="margin-top:10px;">
-          <div class="field full">
-            <label>Name</label>
-            <input type="text" id="np-name" placeholder="e.g. SimpleLegal CLM" />
-          </div>
-          <div class="field">
-            <label>Slug (optional — used for UTM prefix)</label>
-            <input type="text" id="np-slug" placeholder="auto from name" />
-          </div>
-          <div class="field">
-            <label>Website URL</label>
-            <input type="text" id="np-url" placeholder="https://..." />
-          </div>
-          <div class="field full">
-            <label>Positioning</label>
-            <textarea id="np-positioning"
-              placeholder="What this product does + why a buyer picks it"></textarea>
-          </div>
-          <div class="field full">
-            <label>Value props (one per line)</label>
-            <textarea id="np-value-props"
-              placeholder="One per line"></textarea>
-          </div>
-          <div class="field full">
-            <label>Key features (one per line)</label>
-            <textarea id="np-key-features"></textarea>
-          </div>
-          <div class="field full">
-            <label>Product competitors (one per line: "Name | https://url")</label>
-            <textarea id="np-competitors"></textarea>
-          </div>
-          <div class="field full">
-            <button id="np-create-btn">Create product (draft)</button>
-            <span class="setup-status" id="np-status"></span>
-          </div>
-        </div>
-      </details>
+      <h3>Design system &amp; brand assets — coming soon</h3>
+      <div class="setup-status">
+        Logo, colors, typography, and brand voice references will live
+        here. The org profile's brand_voice field above is the temporary
+        text-only stand-in until the asset library ships.
+      </div>
     </div>
+  </section>
+</main>
+
+<!-- ============================ Products (Step 2) =======================
+     PMM intelligence: per-product profile, inheritable overrides, the
+     Documents upload, the candidate review queue, field history.
+     Without a product selected (header dropdown), this view is the
+     product index — list + "+ New product". With one selected, it's
+     the per-product workspace. -->
+<main id="products-view" class="setup-main" style="display:none;">
+  <div class="breadcrumb" id="products-breadcrumb"></div>
+
+  <!-- Per-product workspace: shows only when a product is selected via
+       the header dropdown. The structural sections below remain
+       wherever the existing JS expects them. -->
+  <section class="panel" id="product-docs-section" style="display:none;">
+    <h2 style="margin:0 0 6px;">Teach the system about this product</h2>
+    <div class="setup-status" style="margin-bottom:12px;">
+      Upload your PMM framework — the system extracts positioning, value
+      props, personas, and competitive framing for you to review. Drafts
+      generated for this product will sound like the framework once you
+      accept the extracted insights.
+    </div>
+    <h3>Documents</h3>
+    <div class="setup-status" style="margin-bottom:8px;">
+      Upload a PMM framework, one-pager, launch doc, or sales enablement
+      doc. Extraction runs in the background; review the candidate
+      insights below and accept / edit / reject them.
+    </div>
+    <div class="row" style="gap:6px;">
+      <select id="doc-kind">
+        <option value="messaging_framework">messaging_framework</option>
+        <option value="one_pager">one_pager</option>
+        <option value="launch_doc">launch_doc</option>
+        <option value="sales_enablement">sales_enablement</option>
+        <option value="other">other</option>
+      </select>
+      <input type="text" id="doc-version" placeholder="version label (optional)" />
+    </div>
+    <div class="row" style="gap:6px; margin-top:6px;">
+      <!-- Some browsers (notably Safari) ignore extension-only `accept`
+           values for Office formats and grey out .docx / .pptx. List
+           both the extensions AND the canonical MIME types so every
+           browser sees at least one form it honors. -->
+      <input type="file" id="doc-file"
+        accept=".pdf,application/pdf,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.doc,application/msword,.pptx,application/vnd.openxmlformats-officedocument.presentationml.presentation,.ppt,application/vnd.ms-powerpoint,.txt,text/plain,.md,text/markdown,.png,image/png,.jpg,.jpeg,image/jpeg,.tiff,.tif,image/tiff" />
+      <button id="doc-upload-btn">Upload document</button>
+    </div>
+    <div id="doc-upload-status" class="setup-status" style="margin-top:6px;"></div>
+    <div id="doc-list" style="margin-top:14px;"></div>
+    <h3 style="margin-top:18px;">Review queue</h3>
+    <div id="insight-queue"></div>
+    <h3 style="margin-top:18px;">Field history</h3>
+    <div id="field-history" class="setup-status">
+      Select a product to see its history.
+    </div>
+  </section>
+
+  <!-- Product index: list of products + "+ New product". Always visible;
+       per-product detail (above) reveals when one is selected. -->
+  <section class="panel">
+    <h2 style="margin:0 0 6px;">Products</h2>
+    <div class="setup-status" style="margin-bottom:12px;">
+      Each product is a child of the org with its own profile. Brand
+      voice, banned claims, rubric, and conversion goal inherit from the
+      org by default; products can override them field-by-field.
+    </div>
+    <div id="products-list"></div>
+    <details style="margin-top:10px;">
+      <summary style="cursor:pointer;">+ New product</summary>
+      <div class="form-grid" style="margin-top:10px;">
+        <div class="field full">
+          <label>Name</label>
+          <input type="text" id="np-name" placeholder="e.g. SimpleLegal CLM" />
+        </div>
+        <div class="field">
+          <label>Slug (optional — used for UTM prefix)</label>
+          <input type="text" id="np-slug" placeholder="auto from name" />
+        </div>
+        <div class="field">
+          <label>Website URL</label>
+          <input type="text" id="np-url" placeholder="https://..." />
+        </div>
+        <div class="field full">
+          <label>Positioning</label>
+          <textarea id="np-positioning"
+            placeholder="What this product does + why a buyer picks it"></textarea>
+        </div>
+        <div class="field full">
+          <label>Value props (one per line)</label>
+          <textarea id="np-value-props"
+            placeholder="One per line"></textarea>
+        </div>
+        <div class="field full">
+          <label>Key features (one per line)</label>
+          <textarea id="np-key-features"></textarea>
+        </div>
+        <div class="field full">
+          <label>Product competitors (one per line: "Name | https://url")</label>
+          <textarea id="np-competitors"></textarea>
+        </div>
+        <div class="field full">
+          <button id="np-create-btn">Create product (draft)</button>
+          <span class="setup-status" id="np-status"></span>
+        </div>
+      </div>
+    </details>
   </section>
 </main>
 
@@ -2513,53 +2738,310 @@ async function saveProfile() {
   }
 }
 
+// ---- Router for the 6-step IA + Home (Command Center) -------------------
+// All views are toggled by display. CSS holds the per-view layout (Create
+// keeps the 3-grid; everything else is .setup-main block flow). Each view
+// has its own "on enter" hook so data refreshes on tab entry without a
+// global polling loop.
+const _VIEWS = {
+  home:         { panel: 'home-view',         tab: null,                onEnter: loadCommandCenter },
+  organization: { panel: 'organization-view', tab: 'tab-organization',  onEnter: () => { if (!state.profile) loadProfile(); } },
+  products:     { panel: 'products-view',     tab: 'tab-products',      onEnter: () => { loadProducts(); loadProductDocs(); renderProductsBreadcrumb(); } },
+  create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); } },
+  campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: () => {} },
+  library:      { panel: 'library-view',      tab: 'tab-library',       onEnter: () => {} },
+  insights:     { panel: 'insights-view',     tab: 'tab-insights',      onEnter: () => { renderInsightsBreadcrumb(); loadDashboard(); } },
+};
+
 function switchView(view) {
-  const runs = document.getElementById('runs-view');
-  const content = document.getElementById('content-view');
-  const dashboard = document.getElementById('dashboard-view');
-  const setup = document.getElementById('setup-view');
-  const tabRuns = document.getElementById('tab-runs');
-  const tabContent = document.getElementById('tab-content');
-  const tabDashboard = document.getElementById('tab-dashboard');
-  const tabSetup = document.getElementById('tab-setup');
-  // Reset everything first, then turn on just the active view's tab + panel.
-  runs.style.display = 'none';
-  content.style.display = 'none';
-  dashboard.style.display = 'none';
-  setup.style.display = 'none';
-  tabRuns.classList.remove('active');
-  tabContent.classList.remove('active');
-  tabDashboard.classList.remove('active');
-  tabSetup.classList.remove('active');
-  if (view === 'setup') {
-    setup.style.display = '';
-    tabSetup.classList.add('active');
-    if (!state.profile) loadProfile();
-    // Documents + review queue + history live in Setup, gated on a
-    // product being selected in the header. Refresh on tab entry so
-    // they reflect any out-of-band uploads since the page loaded.
-    loadProductDocs();
-  } else if (view === 'content') {
-    content.style.display = '';
-    tabContent.classList.add('active');
-    // Make sure the profile is loaded so we can warn if there isn't one yet —
-    // content_engine requires a confirmed profile.
-    if (!state.profile) loadProfile();
-  } else if (view === 'dashboard') {
-    dashboard.style.display = '';
-    tabDashboard.classList.add('active');
-    loadDashboard();
-  } else {
-    runs.style.display = '';
-    tabRuns.classList.add('active');
+  if (!_VIEWS[view]) view = 'home';
+  for (const [name, def] of Object.entries(_VIEWS)) {
+    const panel = document.getElementById(def.panel);
+    if (panel) panel.style.display = (name === view) ? '' : 'none';
+    if (def.tab) {
+      const tab = document.getElementById(def.tab);
+      if (tab) tab.classList.toggle('active', name === view);
+    }
   }
+  state.currentView = view;
+  const def = _VIEWS[view];
+  if (def && def.onEnter) def.onEnter();
 }
 
-// ---- Boot -----------------------------------------------------------------
+function renderProductsBreadcrumb() {
+  const root = document.getElementById('products-breadcrumb');
+  if (!root) return;
+  if (!state.selectedProductId) {
+    root.innerHTML = '<b>Products</b> · pick a product (header dropdown) or create one below.';
+    return;
+  }
+  const p = (state.products || []).find(x => x.id === state.selectedProductId);
+  root.innerHTML = `<b>Products</b> / <b>${p ? p.name : 'selected'}</b> — ` +
+    `documents, review queue, and field history scope to this product.`;
+}
+
+function renderInsightsBreadcrumb() {
+  const root = document.getElementById('insights-breadcrumb');
+  if (!root) return;
+  if (!state.selectedProductId) {
+    root.innerHTML = '<b>Insights</b> — org-level view. Pick a product (header dropdown) to scope.';
+    return;
+  }
+  const p = (state.products || []).find(x => x.id === state.selectedProductId);
+  root.innerHTML = `<b>Insights</b> / <b>${p ? p.name : 'selected'}</b> — funnel + ` +
+    `production + suggestions scoped to this product.`;
+}
+
+// ---- Command Center: "what should I work on next?" -----------------------
+// Composes existing scoped state (no new endpoints): products, pending
+// review counts (computed across products), proposals, recent runs,
+// recent suggestions, and a deterministic recommended-next-actions list.
+async function loadCommandCenter() {
+  const root = document.getElementById('home-grid');
+  if (!root) return;
+  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  // Pull the pieces in parallel; tolerate any single failure.
+  const safe = async (p) => { try { return await p; } catch (e) { return null; } };
+  const [products, runs, proposals, suggestions] = await Promise.all([
+    safe(api('/api/products')),
+    safe(api('/api/runs')),
+    safe(api('/api/review/proposals?status=pending')),
+    safe(api('/api/dashboard/suggestions?status=open')),
+  ]);
+  // Per-product pending-insight counts: one call per confirmed product.
+  // Cheap and the only place we walk products here.
+  let pendingInsightsTotal = 0;
+  const perProduct = {};
+  if (Array.isArray(products)) {
+    await Promise.all(products.map(async (p) => {
+      const items = await safe(api(`/api/products/${p.id}/insights?status=pending`));
+      const n = Array.isArray(items) ? items.length : 0;
+      perProduct[p.id] = n;
+      pendingInsightsTotal += n;
+    }));
+  }
+  // Per-product document counts (used for "no docs yet" rec rule).
+  const docCounts = {};
+  if (Array.isArray(products)) {
+    await Promise.all(products.map(async (p) => {
+      const items = await safe(api(`/api/products/${p.id}/documents`));
+      docCounts[p.id] = Array.isArray(items) ? items.length : 0;
+    }));
+  }
+  // Scope: a selected product narrows everything here too.
+  const productScope = state.selectedProductId || null;
+  const filteredProducts = productScope
+    ? (products || []).filter(p => p.id === productScope) : (products || []);
+  const filteredProposals = Array.isArray(proposals)
+    ? (productScope ? proposals.filter(p =>
+        // proposals don't carry product_id in the serialized payload above,
+        // but the run does — and run details are too much work here.
+        // Treat as best-effort: show all proposals at org level.
+        true) : proposals)
+    : [];
+  const filteredRuns = Array.isArray(runs)
+    ? (productScope ? runs.filter(r => r.product_id === productScope) : runs)
+    : [];
+  const filteredSuggestions = Array.isArray(suggestions)
+    ? (productScope ? suggestions.filter(s => s.product_id === productScope) : suggestions)
+    : [];
+
+  // ---- Compose cards ------------------------------------------------
+  root.innerHTML = '';
+  const grid = el('div', { class: 'home-grid' });
+
+  // Card: Active products / features.
+  const productsCard = el('div', { class: 'home-card' },
+    el('h3', {}, 'Active products / features'),
+  );
+  if (!filteredProducts.length) {
+    productsCard.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No products yet'),
+      el('div', {}, 'Start with Organization, then add a Product to begin.'),
+    ));
+  } else {
+    for (const p of filteredProducts.slice(0, 6)) {
+      const sub = `${(p.value_props || []).length} value props · ` +
+        `${docCounts[p.id] || 0} docs · ${perProduct[p.id] || 0} pending review` +
+        (p.status === 'draft' ? ' · draft' : '');
+      const item = el('div', { style: 'margin: 6px 0; cursor:pointer;',
+        onclick: () => {
+          state.selectedProductId = p.id;
+          renderProductSelector();
+          switchView('products');
+        } },
+        el('div', {}, p.name),
+        el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' }, sub),
+      );
+      productsCard.appendChild(item);
+    }
+  }
+  grid.appendChild(productsCard);
+
+  // Card: Pending review (extracted insights).
+  const reviewCard = el('div', { class: 'home-card',
+    style: pendingInsightsTotal ? 'cursor:pointer;' : '',
+    onclick: pendingInsightsTotal ? () => switchView('products') : null },
+    el('h3', {}, 'Pending review items'),
+    el('div', { class: 'big' }, String(pendingInsightsTotal)),
+    el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
+      pendingInsightsTotal
+        ? 'Extracted insights waiting on your review. Click → Products.'
+        : 'No insights waiting. Upload a PMM doc under a product to extract more.'),
+  );
+  grid.appendChild(reviewCard);
+
+  // Card: Content awaiting approval.
+  const contentReview = filteredProposals.filter(p => p.action_type === 'content_review');
+  const proposalsCard = el('div', { class: 'home-card',
+    style: contentReview.length ? 'cursor:pointer;' : '',
+    onclick: contentReview.length ? () => switchView('create') : null },
+    el('h3', {}, 'Content awaiting approval'),
+    el('div', { class: 'big' }, String(contentReview.length)),
+    el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
+      contentReview.length
+        ? 'Drafts in the Approval queue. Click → Create.'
+        : 'Nothing waiting. Drafts auto-pass review unless the org mode gates them.'),
+  );
+  grid.appendChild(proposalsCard);
+
+  // Card: Recent runs.
+  const runsCard = el('div', { class: 'home-card' },
+    el('h3', {}, 'Recent runs'),
+  );
+  const recentRuns = filteredRuns.slice(0, 5);
+  if (!recentRuns.length) {
+    runsCard.appendChild(el('div', { class: 'empty-state' },
+      el('div', {}, 'No runs yet. Trigger one from Create.')));
+  } else {
+    for (const r of recentRuns) {
+      runsCard.appendChild(el('div', { style: 'margin:6px 0; cursor:pointer;',
+        onclick: () => { switchView('create'); selectRun(r.id); } },
+        el('div', {},
+          r.agent_key,
+          el('span', { class: `badge ${r.status}`,
+            style: 'margin-left:8px;' }, r.status)),
+        el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
+          `${fmtTime(r.created_at)} · ${fmtCost(r.cost_usd)}` +
+          (r.product_id ? ' · product-scoped' : '')),
+      ));
+    }
+  }
+  grid.appendChild(runsCard);
+
+  // Card: Recent performance alerts (dashboard suggestions).
+  const sugCard = el('div', { class: 'home-card' },
+    el('h3', {}, 'Recent performance alerts'),
+  );
+  const recentSugs = filteredSuggestions.slice(0, 3);
+  if (!recentSugs.length) {
+    sugCard.appendChild(el('div', { class: 'empty-state' },
+      el('div', {}, 'No alerts yet. Upload performance reports in Insights.')));
+  } else {
+    for (const s of recentSugs) {
+      sugCard.appendChild(el('div', { style: 'margin:6px 0; cursor:pointer;',
+        onclick: () => switchView('insights') },
+        el('div', {}, s.recommendation),
+        el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
+          s.source_label || ''),
+      ));
+    }
+  }
+  grid.appendChild(sugCard);
+
+  // Card: Recommended next actions — deterministic rules over the data
+  // we already loaded. No LLM, no new endpoints.
+  const actions = composeNextActions(filteredProducts, docCounts, perProduct,
+                                     filteredRuns, contentReview, filteredSuggestions);
+  const actionsCard = el('div', { class: 'home-card' },
+    el('h3', {}, 'Recommended next actions'),
+  );
+  if (!actions.length) {
+    actionsCard.appendChild(el('div', { class: 'empty-state' },
+      el('div', {}, "You're on top of it. Nothing recommended right now.")));
+  } else {
+    const ul = el('ul', { style: 'margin: 4px 0 0 0; padding-left: 18px;' });
+    for (const a of actions) {
+      const li = el('li', { style: 'margin: 6px 0;' });
+      li.appendChild(el('div', {}, a.text));
+      if (a.evidence) {
+        li.appendChild(el('div', { class: 'sub',
+          style: 'color:var(--muted); font-size:12px;' }, a.evidence));
+      }
+      if (a.onclick) {
+        const link = el('a', { onclick: a.onclick }, 'Open →');
+        li.appendChild(el('div', {}, link));
+      }
+      ul.appendChild(li);
+    }
+    actionsCard.appendChild(ul);
+  }
+  grid.appendChild(actionsCard);
+
+  root.appendChild(grid);
+}
+
+function composeNextActions(products, docCounts, perProduct, runs, contentReview, suggestions) {
+  const out = [];
+  for (const p of products) {
+    if ((docCounts[p.id] || 0) === 0) {
+      out.push({
+        text: `Upload a PMM framework for ${p.name} to unlock grounded content.`,
+        evidence: '0 documents on this product so far.',
+        onclick: () => {
+          state.selectedProductId = p.id;
+          renderProductSelector();
+          switchView('products');
+        },
+      });
+    }
+    const pending = perProduct[p.id] || 0;
+    if (pending > 0) {
+      out.push({
+        text: `${pending} extracted insight${pending === 1 ? '' : 's'} ` +
+              `waiting for review on ${p.name}.`,
+        evidence: 'Reviewing accepts the candidates into the product profile.',
+        onclick: () => {
+          state.selectedProductId = p.id;
+          renderProductSelector();
+          switchView('products');
+        },
+      });
+    }
+  }
+  const recentlyFailed = (runs || []).find(r => {
+    if (r.status !== 'failed') return false;
+    if (!r.created_at) return false;
+    const age = (Date.now() - new Date(r.created_at + (
+      /(?:Z|[+-]\d{2}:?\d{2})$/.test(r.created_at) ? '' : 'Z'))) / 1000;
+    return age < 3600;
+  });
+  if (recentlyFailed) {
+    out.push({
+      text: `A ${recentlyFailed.agent_key} run failed — check the logs.`,
+      evidence: `Failed ${fmtTime(recentlyFailed.created_at)} · ` +
+                (recentlyFailed.error || 'no error message captured'),
+      onclick: () => { switchView('create'); selectRun(recentlyFailed.id); },
+    });
+  }
+  if (contentReview.length) {
+    out.push({
+      text: `${contentReview.length} draft${contentReview.length === 1 ? '' : 's'} ` +
+            'awaiting approval.',
+      evidence: 'Pending in the Approval queue.',
+      onclick: () => switchView('create'),
+    });
+  }
+  return out.slice(0, 6);
+}
+
+// ---- Boot ---------------------------------------------------------------
 async function refreshAll() {
   await loadMe();
   await Promise.all([loadRuns(), loadProposals(), loadUploads(), loadProducts()]);
   if (state.selectedRunId) await loadDetail(state.selectedRunId);
+  // After everything loads, render the Command Center cards.
+  if (state.currentView === 'home' || !state.currentView) loadCommandCenter();
 }
 
 document.getElementById('trigger-btn').addEventListener('click', triggerRun);
@@ -2567,10 +3049,15 @@ document.getElementById('upload-btn').addEventListener('click', uploadCsv);
 document.getElementById('upload-select').addEventListener('change', (ev) => {
   state.selectedUploadId = ev.target.value;
 });
-document.getElementById('tab-runs').addEventListener('click', () => switchView('runs'));
-document.getElementById('tab-content').addEventListener('click', () => switchView('content'));
-document.getElementById('tab-dashboard').addEventListener('click', () => switchView('dashboard'));
-document.getElementById('tab-setup').addEventListener('click', () => switchView('setup'));
+// Tab + brand-home click handlers. The brand returns to the Command
+// Center; the six tabs map 1:1 to workflow steps.
+document.getElementById('brand-home').addEventListener('click', () => switchView('home'));
+document.getElementById('tab-organization').addEventListener('click', () => switchView('organization'));
+document.getElementById('tab-products').addEventListener('click', () => switchView('products'));
+document.getElementById('tab-create').addEventListener('click', () => switchView('create'));
+document.getElementById('tab-campaigns').addEventListener('click', () => switchView('campaigns'));
+document.getElementById('tab-library').addEventListener('click', () => switchView('library'));
+document.getElementById('tab-insights').addEventListener('click', () => switchView('insights'));
 document.getElementById('content-suggest-btn').addEventListener('click', triggerContentSuggest);
 document.getElementById('content-generate-btn').addEventListener('click',
   () => triggerContentGenerate());
@@ -2578,12 +3065,11 @@ document.getElementById('dash-upload-btn').addEventListener('click', uploadDashb
 document.getElementById('dash-refresh-btn').addEventListener('click', refreshSuggestions);
 document.getElementById('product-selector').addEventListener('change', (ev) => {
   state.selectedProductId = ev.target.value || '';
-  // Re-render anything that's product-scoped. Runs/content trigger reads
-  // state at click time, so they don't need a re-render here.
-  const dashEl = document.getElementById('dashboard-view');
-  if (dashEl && dashEl.style.display !== 'none') loadDashboard();
-  const setupEl = document.getElementById('setup-view');
-  if (setupEl && setupEl.style.display !== 'none') loadProductDocs();
+  // Re-render product-scoped surfaces in whichever view is open.
+  const v = state.currentView;
+  if (v === 'insights')  { renderInsightsBreadcrumb(); loadDashboard(); }
+  if (v === 'products')  { loadProductDocs(); renderProductsBreadcrumb(); }
+  if (v === 'home')      loadCommandCenter();
 });
 document.getElementById('np-create-btn').addEventListener('click', createProduct);
 document.getElementById('doc-upload-btn').addEventListener('click', uploadProductDoc);
@@ -2598,6 +3084,9 @@ document.getElementById('path-manual').addEventListener('click', () => {
 document.getElementById('crawl-btn').addEventListener('click', crawlAndDraft);
 document.getElementById('sample-btn').addEventListener('click', sampleAndDraft);
 document.getElementById('save-profile-btn').addEventListener('click', saveProfile);
+
+// Default landing = the Command Center.
+state.currentView = 'home';
 refreshAll();
 </script>
 </body>

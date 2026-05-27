@@ -1667,6 +1667,37 @@ function renderProductSelector() {
   sel.value = state.selectedProductId || '';
 }
 
+// Open a product — the same effect as picking it from the header
+// dropdown. Centralized here so the product cards, the Command Center
+// links, and any future entry points all run through one function.
+function openProduct(productId) {
+  state.selectedProductId = productId;
+  renderProductSelector();
+  // Re-render the surfaces that depend on selectedProductId in whatever
+  // view is open (matches the dropdown's change handler behavior).
+  const v = state.currentView;
+  if (v === 'products') { loadProductDocs(); renderProductsBreadcrumb(); }
+  if (v === 'insights') { renderInsightsBreadcrumb(); loadDashboard(); }
+  if (v === 'home')     loadCommandCenter();
+  // Pull the now-revealed per-product detail panel into view. We try the
+  // detail panel first; if the view hasn't opened it yet, scroll to the
+  // top of products-view.
+  const detail = document.getElementById('product-docs-section');
+  if (detail && detail.style.display !== 'none') {
+    detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  } else {
+    const productsView = document.getElementById('products-view');
+    if (productsView) productsView.scrollIntoView({ behavior: 'smooth' });
+  }
+}
+
+// Wrap a click handler so it doesn't bubble to a parent's click handler —
+// used inside cards whose container itself is clickable. Without this,
+// clicking "Confirm" would also trigger the card's openProduct().
+function _stopClickBubble(fn) {
+  return (ev) => { if (ev && ev.stopPropagation) ev.stopPropagation(); fn(); };
+}
+
 function renderProductsList() {
   const root = document.getElementById('products-list');
   if (!root) return;
@@ -1679,9 +1710,19 @@ function renderProductsList() {
     return;
   }
   for (const p of state.products) {
-    const card = el('div', { class: 'proposal' },
+    const isSelected = state.selectedProductId === p.id;
+    // Make the whole card a clickable navigation affordance — first-use
+    // instinct is to click the card. The buttons inside stop propagation
+    // so "Confirm" and "Open →" still do their specific jobs without
+    // double-firing.
+    const card = el('div',
+      { class: 'proposal',
+        style: 'cursor:pointer;' +
+               (isSelected ? ' border-color: var(--accent);' : ''),
+        title: `Open ${p.name}`,
+        onclick: () => openProduct(p.id) },
       el('div', { class: 'row' },
-        el('strong', {}, p.name),
+        el('strong', { style: 'cursor:pointer;' }, p.name),
         el('span', { class: 'badge ' + (p.status === 'confirmed' ? 'succeeded' : 'pending') },
           p.status),
       ),
@@ -1700,12 +1741,19 @@ function renderProductsList() {
                        p.utm_medium_default && 'utm_medium']
                        .filter(Boolean).join(', ') || '(all inherit from org)'}`),
       el('div', { class: 'actions' },
+        // Confirm stays as its own action (only for drafts). It must NOT
+        // also trigger the card's openProduct().
         p.status === 'confirmed' ? null : el('button',
-          { class: 'approve', onclick: () => confirmProduct(p.id) },
+          { class: 'approve',
+            onclick: _stopClickBubble(() => confirmProduct(p.id)) },
           'Confirm'),
-        el('button', { class: 'ghost',
-          onclick: () => { state.selectedProductId = p.id; renderProductSelector(); } },
-          'Select for runs'),
+        // Explicit "Open →" link so the navigation affordance is visible
+        // even when card-level click isn't immediately obvious. Same
+        // effect as clicking the card.
+        el('button',
+          { class: 'approve',
+            onclick: _stopClickBubble(() => openProduct(p.id)) },
+          isSelected ? 'Open (selected) →' : 'Open →'),
       ),
     );
     root.appendChild(card);

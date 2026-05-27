@@ -82,6 +82,13 @@ def main() -> None:
     # Same treatment for the content engine: bypass the LLM and use the
     # deterministic template, so tests don't depend on the network. Cost is
     # set to a fixed non-zero value so we can still assert "cost recorded".
+    # Save the ORIGINAL real _llm_build so the prompt-structure test
+    # below can un-stub and run it against a fake Anthropic client to
+    # inspect what the production code actually sends. Without saving
+    # the pre-stub reference, `import ... as _real_llm_build` would
+    # pick up the stub (Python rebinds module attrs in place).
+    _ORIGINAL_LLM_BUILD = content_templates_mod._llm_build
+
     def _stub_content_llm(content_type, profile, brief, topic, target, settings,
                           critique=""):
         topic_for_template = (f"{topic} — addressing: {critique}"
@@ -2227,19 +2234,47 @@ def main() -> None:
               "(north-star demo, mechanical form).")
 
         # ---------------------------------------------------------------------
-        # No-echo discipline (regression guard) — explicit lockdown:
-        # generate a draft for a product whose brand_voice contains a
-        # distinctive marker. The marker MUST NOT appear in any block of
-        # the produced content. brand_voice is GUIDANCE for HOW to write,
-        # not text to include. This locks the discipline so a future prompt
-        # or template change can't silently regress the bug.
+        # No-echo discipline (regression guard) — TWO levels:
+        #
+        #   (A) Output-level on the DETERMINISTIC FALLBACK path: with a
+        #       product whose brand_voice carries a distinctive marker,
+        #       no block of the resulting draft may contain the marker,
+        #       any instruction label ("Tone:", "brand_voice", ...), or
+        #       a parenthesized comma-separated competitor list.
+        #
+        #   (B) Prompt-structure on the LLM path itself: stub the
+        #       Anthropic client to CAPTURE the outbound request and
+        #       assert what it sent. This is what the previous fix missed
+        #       — the stubbed _llm_build never exercised the actual
+        #       prompt structure, so the bug shipped. Now the test
+        #       inspects what we'd actually send to the real model:
+        #         * `system=` is passed.
+        #         * The system message describes voice as instruction
+        #           ("Voice you write in") — NOT as a labeled JSON field
+        #           that the model could mistake for "fields to narrate".
+        #         * Neither the system nor user message contains the
+        #           string "Tone:" anywhere (mentioning it teaches the
+        #           model to produce it — don't-think-about-the-elephant).
+        #         * The user message shows a PLACEHOLDER schema (angle-
+        #           bracket descriptions), NOT the fallback's rendered
+        #           text the model can copy.
+        #
+        # A live-LLM verification ("does the REAL model still echo?") is
+        # in scripts/verify_no_echo_live.py — gated on a real API key,
+        # used to verify behavior after the fix lands.
         # ---------------------------------------------------------------------
-        # SimpleLegal inherits brand_voice from the org. We set a product-
-        # level override that carries the marker, so it lands in the
-        # resolver as the effective brand_voice for runs scoped to this
-        # product. (The override path through the resolver is already
-        # tested elsewhere; here we only assert echo behavior.)
         TONE_MARKER = "TONE_MARKER_DO_NOT_ECHO_xyzzy42"
+        # Forbidden patterns we must NEVER see in any body block, on
+        # either path. The parenthesized-list regex catches the LLM
+        # leak that the previous round of fixes missed.
+        import re as _re
+        _PAREN_COMPETITOR_LIST = _re.compile(r"\([^)]*,[^)]*,[^)]*\)")
+        _PAREN_VS_LIST = _re.compile(r"\(vs\.\s*[^)]*,[^)]*\)", _re.IGNORECASE)
+        forbidden_labels = ("Tone:", "brand_voice", "value_prop:",
+                            "banned_claims", "positioning:", "Voice:",
+                            "Style:")
+
+        # --- (A) Output-level check on the deterministic fallback path. ---
         simplelegal.brand_voice_override = (
             "Direct, confident, practitioner-first. " + TONE_MARKER)
         db.commit()
@@ -2262,31 +2297,131 @@ def main() -> None:
                 .where(Artifact.run_id == no_echo_run.id,
                        Artifact.type == "content_draft")
             ).scalar_one()
-            for block in no_echo_art.body["content"]["blocks"]:
+            blocks_to_check = no_echo_art.body["content"]["blocks"]
+            for block in blocks_to_check:
                 btext = block.get("text") or ""
                 assert TONE_MARKER not in btext, \
-                    f"NO-ECHO BREACH: brand_voice marker leaked into a " \
+                    f"NO-ECHO BREACH (A): brand_voice marker leaked into a " \
                     f"{block.get('kind')!r} block: {btext!r}"
-            # Defense-in-depth: also assert no "Tone:" label and no other
-            # obvious instruction-shape ("brand_voice", "value_prop") in
-            # the body text.
-            joined = " ".join(b.get("text", "")
-                              for b in no_echo_art.body["content"]["blocks"])
-            for forbidden in ("Tone:", "brand_voice", "value_prop:",
-                              "banned_claims", "positioning:"):
+                assert not _PAREN_COMPETITOR_LIST.search(btext), \
+                    f"NO-ECHO BREACH (A): parenthesized comma-list leaked " \
+                    f"into a {block.get('kind')!r} block: {btext!r}"
+                assert not _PAREN_VS_LIST.search(btext), \
+                    f"NO-ECHO BREACH (A): '(vs. X, Y, Z)' list leaked " \
+                    f"into a {block.get('kind')!r} block: {btext!r}"
+            joined = " ".join(b.get("text", "") for b in blocks_to_check)
+            for forbidden in forbidden_labels:
                 assert forbidden not in joined, \
-                    f"NO-ECHO BREACH: instruction label {forbidden!r} " \
+                    f"NO-ECHO BREACH (A): instruction label {forbidden!r} " \
                     f"leaked into body: {joined!r}"
         finally:
-            # Revert the override so any later assertions about default
-            # inheritance behavior aren't disturbed (we're at end of smoke,
-            # but explicit cleanup keeps this test independent).
             db.refresh(simplelegal)
             simplelegal.brand_voice_override = None
             db.commit()
-        print(f"[OK] No-echo discipline: brand_voice marker "
-              f"{TONE_MARKER!r} did NOT leak into any block; no "
-              "instruction labels (Tone:, brand_voice, etc.) in body.")
+
+        # --- (B) Prompt-structure check on the LLM path. ---
+        # Capture what _llm_build sends to Claude by stubbing the
+        # anthropic.Anthropic constructor with a fake client whose
+        # messages.create() records its args + returns a canned response.
+        import anthropic as _anthropic_mod
+        captured_calls: list[dict] = []
+
+        class _FakeMsg:
+            def __init__(self, text):
+                self.content = [type("Blk", (), {"type": "text", "text": text})()]
+                self.usage = type("U", (), {"input_tokens": 100,
+                                            "output_tokens": 50})()
+
+        class _FakeClient:
+            def __init__(self, **kwargs):
+                self.messages = self
+
+            def create(self, **kwargs):
+                captured_calls.append(kwargs)
+                # Return a syntactically-valid JSON envelope so the
+                # caller's defensive parse succeeds and we exercise the
+                # full call path.
+                fake_json = (
+                    '{"content_type":"email","blocks":['
+                    '{"kind":"subject","text":"hello"},'
+                    '{"kind":"body","text":"clean body."},'
+                    '{"kind":"cta","text":"open →"}'
+                    '],"metadata":{}}')
+                return _FakeMsg(fake_json)
+
+        original_Anthropic = _anthropic_mod.Anthropic
+        # Temporarily un-stub _llm_build so the real implementation runs
+        # against our fake SDK — that's the whole point: inspect the
+        # actual prompt structure the production code emits. We use the
+        # reference captured BEFORE the stub was applied (top of smoke);
+        # re-importing here would just pick up the stub.
+        original_llm_build_stub = content_templates_mod._llm_build
+        content_templates_mod._llm_build = _ORIGINAL_LLM_BUILD
+        _anthropic_mod.Anthropic = _FakeClient
+        try:
+            # Trigger a generate run; the worker calls _real_llm_build
+            # which constructs the prompt and invokes _FakeClient.
+            simplelegal.brand_voice_override = (
+                "Direct, confident, practitioner-first. " + TONE_MARKER)
+            db.commit()
+            prompt_run = Run(
+                org_id=onit.id, agent_registration_id=onit_content_reg.id,
+                agent_key="content_engine", trigger="manual",
+                status="queued", product_id=sl_id,
+                task={"action": "generate", "content_type": "email",
+                      "topic": "Spend visibility", "target": "GC"})
+            db.add(prompt_run); db.commit(); db.refresh(prompt_run)
+            enqueue(db, onit.id, "run_agent", {"run_id": prompt_run.id})
+            assert run_once() is True
+            db.refresh(prompt_run)
+            assert prompt_run.status == "succeeded", \
+                f"prompt-structure run failed: {prompt_run.error}"
+        finally:
+            _anthropic_mod.Anthropic = original_Anthropic
+            content_templates_mod._llm_build = original_llm_build_stub
+            db.refresh(simplelegal)
+            simplelegal.brand_voice_override = None
+            db.commit()
+        assert captured_calls, "_real_llm_build did not invoke the SDK"
+        call = captured_calls[-1]
+        # The SDK call must use system= AND messages= cleanly separated.
+        assert "system" in call, \
+            "outbound LLM request must pass system= (got only " \
+            f"{sorted(call.keys())})"
+        assert "messages" in call and call["messages"], call
+        system_text = call["system"] or ""
+        user_text = call["messages"][0]["content"]
+        combined = system_text + "\n" + user_text
+        # The system message must describe the voice as INSTRUCTION
+        # ("Voice you write in"), never as a labeled JSON field.
+        assert "Voice you write in" in system_text, \
+            f"system message must frame voice as instruction; got " \
+            f"{system_text[:400]!r}"
+        # The actual marker DOES appear in the system message (we want
+        # the model to embody it as style) but NOT inside a labeled-JSON
+        # field shape — no '"brand_voice":' substring anywhere in the
+        # outbound payload.
+        assert '"brand_voice":' not in combined, \
+            f"prompt must not present brand_voice as a labeled field " \
+            f"(model treats it as text to narrate): {combined[:600]!r}"
+        # "Tone:" must not appear anywhere in either message — mentioning
+        # it teaches the model to produce it.
+        assert "Tone:" not in combined, \
+            f"prompt must not contain the literal 'Tone:' label " \
+            f"(triggers the don't-think-about-the-elephant echo): " \
+            f"{combined[:600]!r}"
+        # The schema in the user message must use placeholder strings,
+        # not the fallback's already-rendered body text (otherwise the
+        # model imitates the fallback prose).
+        assert "<the main body" in user_text or "<body content" in user_text, \
+            f"user message must show a placeholder schema, not rendered " \
+            f"fallback prose: {user_text[:400]!r}"
+        print(f"[OK] No-echo (A): output path — TONE_MARKER + parenthesized "
+              "competitor lists + instruction labels all absent from blocks.")
+        print(f"[OK] No-echo (B): outbound LLM request uses system=, the "
+              "voice is framed as instruction (no \"brand_voice\":  field), "
+              "no 'Tone:' label, and the user message ships a placeholder "
+              "schema (not rendered fallback text).")
 
         print("[OK] Smoke test passed.")
     finally:

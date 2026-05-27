@@ -73,14 +73,22 @@ class ContentEngineAgent(Agent):
         action = (task.get("action") or "suggest").lower()
         log(f"content_engine action={action} for {ctx.org_name}")
 
-        profile = ctx.org_profile
-        if profile is None:
+        # The agent reads profile-level config through ctx.profile (the
+        # ResolvedProfile from app/products.resolve_product_profile). With
+        # no product selected, the resolved profile is the org-level view;
+        # with a product, it carries the inherited fields, product-only
+        # fields under profile["product"], and per-field provenance.
+        # The resolver always returns a dict, so the underlying _org block
+        # is what tells us whether a confirmed OrgProfile actually exists.
+        resolved = ctx.profile or {}
+        if not resolved.get("_org"):
             # We could still suggest from seed defaults, but the brief is
             # clear: content engine is the payoff of Setup. If there's no
             # confirmed profile, fail loudly rather than ship ungrounded copy.
             raise RuntimeError(
                 "content_engine requires a confirmed org profile. "
                 "Save the profile in Setup before running this agent.")
+        profile = resolved
 
         brief = self._latest_brief(ctx)
 
@@ -222,7 +230,13 @@ class ContentEngineAgent(Agent):
                 "content_engine regenerate: 'critique' is required — describe "
                 "what you'd like changed.")
 
-        content, gen_cost = build_content(content_type, profile, brief,
+        # Product-aware template view: when a product is selected, fold its
+        # positioning + first value_prop into the org-level fields the
+        # template builders read, and prefer product_competitors over the
+        # org's competitors list. The original resolved profile keeps the
+        # full inheritance + provenance for downstream consumers.
+        template_profile = self._product_aware_view(profile)
+        content, gen_cost = build_content(content_type, template_profile, brief,
                                           topic, target, critique=critique)
 
         # ---- UTM tagging (the future analytics join key) ------------------
@@ -231,8 +245,16 @@ class ContentEngineAgent(Agent):
         # from the parent (a "Give me something better" stays inside the
         # same campaign), but utm_content is always re-derived per version so
         # v2 is distinguishable from v1. Task overrides win in all cases.
+        # Product defaults (utm_source_default / utm_medium_default /
+        # utm_campaign_prefix) are layered in BELOW the parent + task
+        # overrides so an explicit value always wins.
         version = int(parent_body.get("version", 1)) + 1 if parent else 1
         utm_overrides: dict = {}
+        for k in ("utm_source_default", "utm_medium_default"):
+            v = profile.get(k)
+            if v:
+                # Strip the "_default" suffix to match the UTM key name.
+                utm_overrides[k.replace("_default", "")] = v
         if parent:
             parent_utms = utm_dict_from_artifact(parent)
             # Preserve the campaign + channel dimensions; let utm_content be
@@ -242,7 +264,8 @@ class ContentEngineAgent(Agent):
                     utm_overrides[k] = parent_utms[k]
         utm_overrides.update(task.get("utm") or {})
         utms = suggest_utms(content_type, topic, version=version,
-                            overrides=utm_overrides)
+                            overrides=utm_overrides,
+                            campaign_prefix=profile.get("utm_campaign_prefix"))
         destination_url = (task.get("destination_url")
                            or (parent or {}).get("destination_url")
                            or profile.get("website_url") or "")
@@ -272,12 +295,19 @@ class ContentEngineAgent(Agent):
         total_cost = round(gen_cost + grade_cost, 6)
 
         # ---- Build the artifact -------------------------------------------
+        product = (profile.get("product") or None)
+        prov_source_parts = ["Org profile (confirmed)"]
+        if product:
+            prov_source_parts.append(f"{product.get('name')} product profile")
+        if brief:
+            prov_source_parts.append("latest market brief")
         provenance = Citation(
-            source="Org profile (confirmed) + latest market brief"
-            if brief else "Org profile (confirmed)",
-            snippet="Brand voice, banned_claims, value prop, competitors, "
-                    "conversion goal" + (
-                        " · brief targets and keyword gaps" if brief else ""))
+            source=" + ".join(prov_source_parts),
+            snippet=(
+                "Brand voice, banned_claims, value prop, conversion goal"
+                + (" · product positioning + value_props + product_competitors"
+                   if product else " · competitors")
+                + (" · brief targets and keyword gaps" if brief else "")))
         review_note = Citation(
             source="Review routing",
             snippet=f"mode={mode}, guardrail={gstatus} — {why}")
@@ -287,15 +317,25 @@ class ContentEngineAgent(Agent):
                 source="Revision",
                 snippet=f"Revised from artifact {parent.get('id')} — critique: {critique!r}"))
 
+        # Competitors that the template actually used (product-first when
+        # product set, else org-level), for honest "reflected" provenance.
+        competitors_used = (product or {}).get("product_competitors") \
+            if product and (product or {}).get("product_competitors") \
+            else profile.get("competitors") or []
         body = {
             "content": content,
             "provenance": {
                 "org_profile": True,
+                "product_id": (product or {}).get("id"),
+                "product_name": (product or {}).get("name"),
                 "market_brief_id": (brief or {}).get("id"),
                 "brand_voice_used": bool(profile.get("brand_voice")),
+                "brand_voice_source": (profile.get("provenance", {})
+                                       .get("brand_voice", "org")),
                 "competitors_reflected": [
-                    c.get("name") for c in (profile.get("competitors") or [])
+                    c.get("name") for c in competitors_used
                     if isinstance(c, dict) and c.get("name")],
+                "positioning_used": bool(product and product.get("positioning")),
                 # Honest about the publish gap (brief: graceful-honesty rule):
                 "publish_note": ("This is a draft. Publish using the tagged "
                                  "link so performance can be traced back here."),
@@ -347,6 +387,38 @@ class ContentEngineAgent(Agent):
                            cost_usd=total_cost, logs=[])
 
     # ---- Helpers ----------------------------------------------------------
+    @staticmethod
+    def _product_aware_view(profile: dict) -> dict:
+        """Build the dict the template builders read. When a product layer
+        is present in the resolved profile:
+          - prepend the product's positioning to the org's product_summary
+            so the LLM + template see "what we sell + how we sell it";
+          - fold the product's first value_prop into the value_prop field
+            (templates lead with it);
+          - replace `competitors` with `product_competitors` when the
+            product has any (the brief: prefer them for positioning copy).
+        With no product layer, returns the resolved profile unchanged.
+        Templates ignore unknown keys, so this stays purely additive."""
+        product = profile.get("product") or None
+        if not product:
+            return profile
+        view = dict(profile)
+        positioning = (product.get("positioning") or "").strip()
+        org_summary = (profile.get("product_summary") or "").strip()
+        if positioning:
+            view["product_summary"] = (
+                f"{org_summary}. {positioning}" if org_summary else positioning)
+        value_props = product.get("value_props") or []
+        if value_props:
+            lead = (value_props[0] or "").strip()
+            org_value = (profile.get("value_prop") or "").strip()
+            if lead:
+                view["value_prop"] = f"{lead} ({org_value})" if org_value else lead
+        prod_comps = product.get("product_competitors") or []
+        if prod_comps:
+            view["competitors"] = prod_comps
+        return view
+
     @staticmethod
     def _latest_brief(ctx: AgentContext) -> dict | None:
         for prior in ctx.prior_artifacts or []:

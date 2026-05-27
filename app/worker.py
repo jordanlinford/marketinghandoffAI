@@ -20,6 +20,7 @@ from app.data_sources.stub import StubMarketDataSource
 from app.db import SessionLocal
 from app.models import (AgentRegistration, Artifact, AuditLog, Guardrail, Org,
                         OrgProfile, Proposal, Run, Upload, _now)
+from app.products import resolve_product_profile
 from app.queue import complete, lease_next
 from app.schemas import AgentContext
 from app.tenancy import assert_same_org, scoped
@@ -148,8 +149,13 @@ def process_run(db: Session, run: Run) -> None:
     org = db.get(Org, run.org_id)
     org_name = org.name if org else run.org_id
     logs: list[str] = []
-    profile = _confirmed_org_profile(db, run.org_id)
-    rules_by_scope = _build_guardrail_rules(db, run.org_id, profile)
+    org_profile = _confirmed_org_profile(db, run.org_id)
+    # Resolved profile = org + (optional) product layer + per-field
+    # provenance. This is the canonical input the agent reads through
+    # ctx.profile. With no product selected on the run, it's effectively
+    # the org-level view (backwards-compatible).
+    resolved_profile = resolve_product_profile(db, run.org_id, run.product_id)
+    rules_by_scope = _build_guardrail_rules(db, run.org_id, org_profile)
     # Per-run task: prefer the explicit one persisted on the Run row (set by
     # the API caller), fall back to the agent's default_task from its config.
     task = run.task if run.task else reg.config.get("default_task", {})
@@ -164,7 +170,9 @@ def process_run(db: Session, run: Run) -> None:
         brand_guide=reg.config.get("brand_guide", {}),
         icp=reg.config.get("icp", {}),
         config=reg.config,
-        org_profile=profile,
+        org_profile=org_profile,
+        profile=resolved_profile,
+        product_id=run.product_id,
         # The agent reads "what else exists for this org" only through this
         # list. Brief always; parent draft only when the task names one (the
         # regenerate path). Both are loaded via scoped() so cross-tenant ids
@@ -187,7 +195,11 @@ def process_run(db: Session, run: Run) -> None:
     artifact_rows: list[Artifact] = []
     for a in result.artifacts:
         row = Artifact(
-            org_id=run.org_id, run_id=run.id, type=a.type, title=a.title,
+            org_id=run.org_id, run_id=run.id,
+            # Stamp the product on every artifact so the dashboard can
+            # filter by product without re-joining through Run.
+            product_id=run.product_id,
+            type=a.type, title=a.title,
             body=a.body, citations=[c.model_dump() for c in a.citations],
             status=getattr(a, "status", "ready"),
             # New content-engine columns (None for non-content artifacts).
@@ -208,7 +220,9 @@ def process_run(db: Session, run: Run) -> None:
     for p in result.proposed_actions:
         status, detail = guardrails.evaluate(p, rules_by_scope)
         db.add(Proposal(
-            org_id=run.org_id, run_id=run.id, action_type=p.action_type, payload=p.payload,
+            org_id=run.org_id, run_id=run.id,
+            product_id=run.product_id,
+            action_type=p.action_type, payload=p.payload,
             guardrail_scope=p.guardrail_scope, guardrail_status=status, guardrail_detail=detail,
             reasoning=p.reasoning, status="pending",
         ))

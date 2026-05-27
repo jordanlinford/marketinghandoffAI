@@ -17,7 +17,8 @@ from app.dashboard.ingest import parse_report_csv
 from app.dashboard.suggestions import (industry_suggestions,
                                        trend_suggestions)
 from app.db import get_db
-from app.models import MetricPoint, OrgProfile, ReportUpload, Suggestion, User
+from app.models import (MetricPoint, OrgProfile, ProductProfile, ReportUpload,
+                        Suggestion, User)
 from app.tenancy import scoped
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
@@ -40,6 +41,7 @@ def _serialize_suggestion(s: Suggestion) -> dict:
         "id": s.id, "kind": s.kind, "recommendation": s.recommendation,
         "evidence": s.evidence or {}, "confidence": s.confidence,
         "source_label": s.source_label, "status": s.status,
+        "product_id": s.product_id,
         "idea_content_type": s.idea_content_type,
         "idea_topic": s.idea_topic, "idea_target": s.idea_target,
         "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -69,6 +71,7 @@ def _profile_dict(db: Session, org_id: str) -> dict | None:
 async def upload_report(file: UploadFile = File(...),
                         mode: str = Form("ongoing"),
                         source: str = Form("manual"),
+                        product_id: str = Form(""),
                         user: User = Depends(current_user),
                         db: Session = Depends(get_db)) -> dict:
     """Ingest one report CSV.
@@ -91,12 +94,25 @@ async def upload_report(file: UploadFile = File(...),
     except UnicodeDecodeError:
         raise HTTPException(400, "CSV must be UTF-8 encoded")
 
+    # Optional product scope. An empty string from the form means
+    # "org-level". scoped() ensures the id belongs to the caller's org.
+    product_id_resolved: str | None = None
+    if product_id and product_id.strip():
+        prod = db.execute(
+            scoped(ProductProfile, user.org_id)
+            .where(ProductProfile.id == product_id.strip())
+        ).scalar_one_or_none()
+        if prod is None:
+            raise HTTPException(404, f"Product '{product_id}' not found for this org")
+        product_id_resolved = prod.id
+
     parsed = parse_report_csv(text)
     upload = ReportUpload(
         org_id=user.org_id, filename=file.filename or "report.csv",
         source=(source or "manual").strip().lower(),
         mode=mode, column_mapping=parsed["column_mapping"],
         point_count=len(parsed["points"]), uploaded_by=user.id,
+        product_id=product_id_resolved,
     )
     db.add(upload)
     db.flush()   # need upload.id before inserting points
@@ -114,6 +130,9 @@ async def upload_report(file: UploadFile = File(...),
             utm_content=p.get("utm_content") or None,
             raw_ref=p.get("raw_ref") or {},
             is_baseline=is_baseline,
+            # The upload's product scope flows onto every point in it, so
+            # downstream funnel queries can filter on a single column.
+            product_id=product_id_resolved,
         ))
     db.commit()
     db.refresh(upload)
@@ -144,15 +163,20 @@ def list_reports(user: User = Depends(current_user),
 
 
 @router.get("/funnel")
-def get_funnel(bucket: str = "week", user: User = Depends(current_user),
+def get_funnel(bucket: str = "week", product_id: str | None = None,
+               user: User = Depends(current_user),
                db: Session = Depends(get_db)):
     if bucket not in ("day", "week", "month"):
         raise HTTPException(400, "bucket must be one of day | week | month")
-    return funnel_view(db, user.org_id, bucket=bucket)
+    # product_id None = org-level (all metric_points / runs for the org).
+    # When set, the funnel view filters everything to that product so the
+    # cockpit can show "SimpleLegal CLM only".
+    return funnel_view(db, user.org_id, bucket=bucket, product_id=product_id)
 
 
 @router.post("/suggestions/refresh")
-def refresh_suggestions(user: User = Depends(current_user),
+def refresh_suggestions(product_id: str | None = None,
+                        user: User = Depends(current_user),
                         db: Session = Depends(get_db)):
     """Recompute suggestions from the current funnel view + profile.
 
@@ -162,21 +186,18 @@ def refresh_suggestions(user: User = Depends(current_user),
     suggestions before inserting fresh ones so the cockpit reflects
     today's data — `dismissed` / `actioned` history is preserved.
     """
-    db.execute(
-        scoped(Suggestion, user.org_id)
-        .where(Suggestion.status == "open")
-        .with_only_columns(Suggestion.id)
-    )
-    # SQLAlchemy 2: do the delete in two passes — fetch ids, then delete.
-    open_rows = db.execute(
-        scoped(Suggestion, user.org_id).where(Suggestion.status == "open")
-    ).scalars().all()
-    for s in open_rows:
+    # Per-product refresh: clear only OPEN suggestions in the same scope
+    # (NULL product_id stays separate from product-scoped suggestions, so
+    # an org-level refresh and a product refresh don't trample each other).
+    open_q = scoped(Suggestion, user.org_id).where(Suggestion.status == "open")
+    open_q = (open_q.where(Suggestion.product_id == product_id)
+              if product_id else open_q.where(Suggestion.product_id.is_(None)))
+    for s in db.execute(open_q).scalars().all():
         db.delete(s)
     db.flush()
 
     profile = _profile_dict(db, user.org_id)
-    funnel = funnel_view(db, user.org_id)
+    funnel = funnel_view(db, user.org_id, product_id=product_id)
     fresh = list(trend_suggestions(funnel, profile)) + list(
         industry_suggestions(profile, funnel))
 
@@ -184,6 +205,7 @@ def refresh_suggestions(user: User = Depends(current_user),
     for item in fresh:
         row = Suggestion(
             org_id=user.org_id,
+            product_id=product_id,
             kind=item["kind"],
             recommendation=item["recommendation"],
             evidence=item.get("evidence") or {},
@@ -203,14 +225,16 @@ def refresh_suggestions(user: User = Depends(current_user),
 
 
 @router.get("/suggestions")
-def list_suggestions(status: str = "open",
+def list_suggestions(status: str = "open", product_id: str | None = None,
                      user: User = Depends(current_user),
                      db: Session = Depends(get_db)):
-    rows = db.execute(
-        scoped(Suggestion, user.org_id)
-        .where(Suggestion.status == status)
-        .order_by(Suggestion.created_at.desc())
-    ).scalars().all()
+    q = (scoped(Suggestion, user.org_id)
+         .where(Suggestion.status == status))
+    # An explicit product_id filters to that product; omitting it returns
+    # all suggestions visible to the org (both org-level and product-scoped).
+    if product_id:
+        q = q.where(Suggestion.product_id == product_id)
+    rows = db.execute(q.order_by(Suggestion.created_at.desc())).scalars().all()
     return [_serialize_suggestion(s) for s in rows]
 
 

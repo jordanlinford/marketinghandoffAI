@@ -48,8 +48,9 @@ from app.data_sources.csv import CsvMarketDataSource  # noqa: E402
 from app.db import SessionLocal, create_all  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import (AgentRegistration, Artifact, Guardrail,  # noqa: E402
-                        MetricPoint, Org, OrgProfile, Proposal, ReportUpload,
-                        Run, Suggestion, Upload, User)
+                        MetricPoint, Org, OrgProfile, ProductProfile, Proposal,
+                        ReportUpload, Run, Suggestion, Upload, User)
+from app.products import resolve_product_profile  # noqa: E402
 from app.queue import enqueue  # noqa: E402
 from app.setup import crawl as crawl_mod  # noqa: E402
 from app.setup import draft as draft_mod  # noqa: E402
@@ -1486,6 +1487,328 @@ def main() -> None:
         print("[OK] Dashboard (5): tenant isolation holds — Acme sees 0 of "
               "Onit's metric_points / suggestions / report_uploads via "
               "scoped(), and the API blocks the cross-org read.")
+
+        # ---------------------------------------------------------------------
+        # Product layer — six checks:
+        #   (1) CRUD + confirm. Product-only fields persist; Acme can't see
+        #       or edit Onit's product via scoped().
+        #   (2) Inheritance resolution: no overrides → resolved fields == org;
+        #       with brand_voice_override set → resolved == override; per-
+        #       field provenance reflects which layer drove the value.
+        #   (3) Agent reads resolved profile: a content_engine run with a
+        #       product_id reflects product positioning + product_competitors
+        #       in the draft; an equivalent run with NO product_id is the
+        #       legacy org-level draft (no regression).
+        #   (4) UTM behavior: product utm_source_default + utm_medium_default
+        #       win over the per-type defaults; campaign slug is prefixed
+        #       with the product slug ("<slug>__<topic-slug>").
+        #   (5) Nullable product_id everywhere: existing org-level
+        #       runs/artifacts/metric_points (product_id=NULL) behave
+        #       exactly as before — they're still queryable through the
+        #       org-level funnel and through scoped().
+        #   (6) Dashboard scoping: GET /api/dashboard/funnel?product_id=...
+        #       returns only that product's metric_points / runs / artifacts;
+        #       the unfiltered call returns everything (current behavior).
+        # ---------------------------------------------------------------------
+
+        # (1) Create + confirm. Tenant isolation.
+        create_resp = client.post(
+            "/api/products",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={
+                "name": "Onit Spend Manager",
+                "slug": "spend-manager",
+                "website_url": "https://onit.com/spend",
+                "positioning": "Eliminate outside-counsel spend leaks with "
+                               "real-time matter-budget visibility.",
+                "value_props": ["See spend before invoices land",
+                                "Budgets enforced at the matter level"],
+                "key_features": ["Real-time accruals", "Budget guardrails",
+                                 "Matter-level rollups"],
+                "use_cases": ["Outside counsel spend control",
+                              "Quarterly forecast accuracy"],
+                "product_competitors": [{"name": "BrightFlag",
+                                         "url": "https://brightflag.com"}],
+            },
+        )
+        assert create_resp.status_code == 201, create_resp.text
+        prod_json = create_resp.json()
+        assert prod_json["status"] == "draft", prod_json
+        assert prod_json["slug"] == "spend-manager"
+        assert prod_json["positioning"].startswith("Eliminate outside-counsel"), prod_json
+        assert prod_json["value_props"] == ["See spend before invoices land",
+                                            "Budgets enforced at the matter level"]
+        product_id = prod_json["id"]
+        confirm = client.post(
+            f"/api/products/{product_id}/confirm",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"}, json={})
+        assert confirm.status_code == 200 and confirm.json()["status"] == "confirmed"
+        # Tenant isolation: Acme can neither read nor edit Onit's product.
+        leaked = db.execute(
+            scoped(ProductProfile, other.id)
+        ).scalars().all()
+        assert leaked == [], "TENANT LEAK: Acme can read Onit's products"
+        cross_get = client.get(
+            f"/api/products/{product_id}",
+            headers={"X-Dev-User-Email": "ops@acme.com"})
+        assert cross_get.status_code in (403, 404), \
+            f"cross-org GET /api/products/{{id}} must be denied, got " \
+            f"{cross_get.status_code}: {cross_get.text}"
+        cross_patch = client.patch(
+            f"/api/products/{product_id}",
+            headers={"X-Dev-User-Email": "ops@acme.com",
+                     "Content-Type": "application/json"},
+            json={"positioning": "stolen"})
+        assert cross_patch.status_code in (403, 404), \
+            f"cross-org PATCH /api/products/{{id}} must be denied, got " \
+            f"{cross_patch.status_code}: {cross_patch.text}"
+        print(f"[OK] Product (1): created + confirmed '{prod_json['name']}'; "
+              f"Acme can't read/edit Onit's product (tenant-isolated).")
+
+        # (2) Inheritance resolution.
+        # No overrides: resolved brand_voice should equal Onit's saved
+        # brand_voice ("Plain, confident, no jargon."); provenance = "org".
+        resolved_a = resolve_product_profile(db, onit.id, product_id)
+        assert resolved_a["brand_voice"] == "Plain, confident, no jargon.", \
+            f"with no override, resolved.brand_voice must equal org's; got " \
+            f"{resolved_a['brand_voice']!r}"
+        assert resolved_a["provenance"]["brand_voice"] == "org", \
+            f"provenance must be 'org' when not overridden, got {resolved_a['provenance']}"
+        # The product layer is present (status=confirmed).
+        assert resolved_a["product"] is not None
+        assert resolved_a["product"]["positioning"].startswith(
+            "Eliminate outside-counsel"), resolved_a["product"]
+        # Provenance for product-only fields tagged "product".
+        assert resolved_a["provenance"]["product.positioning"] == "product", \
+            resolved_a["provenance"]
+
+        # Set an override; resolved.brand_voice flips; provenance flips to
+        # "product_override". Other inheritable fields stay 'org'.
+        patch_override = client.patch(
+            f"/api/products/{product_id}",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"brand_voice_override": "Bold, blunt, and very specific."})
+        assert patch_override.status_code == 200, patch_override.text
+        resolved_b = resolve_product_profile(db, onit.id, product_id)
+        assert resolved_b["brand_voice"] == "Bold, blunt, and very specific.", \
+            f"override must win, got {resolved_b['brand_voice']!r}"
+        assert resolved_b["provenance"]["brand_voice"] == "product_override", \
+            resolved_b["provenance"]
+        # banned_claims wasn't overridden → still org provenance.
+        assert resolved_b["provenance"]["banned_claims"] == "org", \
+            resolved_b["provenance"]
+        # No product_id → org-level view, untouched.
+        org_view = resolve_product_profile(db, onit.id, None)
+        assert org_view["brand_voice"] == "Plain, confident, no jargon.", \
+            f"no-product view must equal org's saved brand_voice; got " \
+            f"{org_view['brand_voice']!r}"
+        assert org_view["product"] is None
+        assert org_view["provenance"]["brand_voice"] == "org"
+
+        # Revert the override (PATCH explicit null) — provenance flips back.
+        revert = client.patch(
+            f"/api/products/{product_id}",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"brand_voice_override": None})
+        assert revert.status_code == 200, revert.text
+        assert revert.json()["brand_voice_override"] is None
+        resolved_c = resolve_product_profile(db, onit.id, product_id)
+        assert resolved_c["brand_voice"] == "Plain, confident, no jargon."
+        assert resolved_c["provenance"]["brand_voice"] == "org"
+        print("[OK] Product (2): inheritance resolves correctly — no override "
+              "→ org value, override → product_override + provenance flips, "
+              "explicit-null revert → back to org.")
+
+        # (3) Agent uses the resolved profile.
+        # Set product UTM defaults so test (4) below has something to read.
+        client.patch(
+            f"/api/products/{product_id}",
+            headers={"X-Dev-User-Email": "jordan@onit.com",
+                     "Content-Type": "application/json"},
+            json={"utm_source_default": "search",
+                  "utm_medium_default": "paid-search"})
+
+        # Reset Onit's review mode to guardrail (earlier tests may have left
+        # it elsewhere) so a clean draft auto-passes.
+        _set_review_mode(onit.id, "guardrail")
+        # Run content_engine WITH the product.
+        prod_run = Run(org_id=onit.id, agent_registration_id=onit_content_reg.id,
+                       agent_key="content_engine", trigger="manual",
+                       status="queued", product_id=product_id,
+                       task={"action": "generate", "content_type": "email",
+                             "topic": "Catch spend leaks before invoices land",
+                             "target": "GC"})
+        db.add(prod_run); db.commit(); db.refresh(prod_run)
+        enqueue(db, onit.id, "run_agent", {"run_id": prod_run.id})
+        assert run_once() is True
+        db.refresh(prod_run)
+        assert prod_run.status == "succeeded", \
+            f"product-scoped run failed: {prod_run.error}"
+        assert prod_run.product_id == product_id, prod_run.product_id
+        prod_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.run_id == prod_run.id,
+                                            Artifact.type == "content_draft")
+        ).scalar_one()
+        assert prod_art.product_id == product_id, \
+            f"artifact must inherit run.product_id, got {prod_art.product_id}"
+        body_text = " ".join(b.get("text", "")
+                             for b in prod_art.body["content"]["blocks"])
+        # The product's positioning + first value_prop fold into the template
+        # view, so the draft mentions either positioning content or value_prop.
+        assert ("outside-counsel" in body_text.lower()
+                or "spend leaks" in body_text.lower()
+                or "see spend before invoices land" in body_text.lower()), \
+            f"product positioning/value_prop must surface in draft: {body_text!r}"
+        # Competitors used should be product_competitors (BrightFlag), not
+        # org-level (SimpleLegal).
+        assert "BrightFlag" in body_text, \
+            f"product_competitors must be reflected over org competitors: {body_text!r}"
+        assert "SimpleLegal" not in body_text, \
+            f"with a product set, org competitors should NOT lead: {body_text!r}"
+        # Provenance on the artifact carries the product reference.
+        assert prod_art.body["provenance"]["product_id"] == product_id
+        assert prod_art.body["provenance"]["product_name"] == "Onit Spend Manager"
+        assert "BrightFlag" in prod_art.body["provenance"]["competitors_reflected"]
+
+        # Control: SAME topic + content_type with NO product_id.
+        ctrl_run = Run(org_id=onit.id, agent_registration_id=onit_content_reg.id,
+                       agent_key="content_engine", trigger="manual",
+                       status="queued", product_id=None,
+                       task={"action": "generate", "content_type": "email",
+                             "topic": "Catch spend leaks before invoices land",
+                             "target": "GC"})
+        db.add(ctrl_run); db.commit(); db.refresh(ctrl_run)
+        enqueue(db, onit.id, "run_agent", {"run_id": ctrl_run.id})
+        assert run_once() is True
+        db.refresh(ctrl_run)
+        assert ctrl_run.status == "succeeded"
+        assert ctrl_run.product_id is None
+        ctrl_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.run_id == ctrl_run.id,
+                                            Artifact.type == "content_draft")
+        ).scalar_one()
+        ctrl_text = " ".join(b.get("text", "")
+                             for b in ctrl_art.body["content"]["blocks"])
+        # No product → SimpleLegal (org competitor) leads, not BrightFlag.
+        assert "SimpleLegal" in ctrl_text, \
+            f"no-product run must use org competitors: {ctrl_text!r}"
+        assert "BrightFlag" not in ctrl_text, \
+            "no-product run must NOT reach into product_competitors"
+        assert ctrl_art.product_id is None
+        assert ctrl_art.body["provenance"]["product_id"] is None
+        print("[OK] Product (3): product-scoped run uses positioning + "
+              "product_competitors (BrightFlag); no-product control "
+              "uses org competitors (SimpleLegal); both succeed.")
+
+        # (4) UTM behavior.
+        # utm_source = product's utm_source_default ("search"), NOT the
+        # email type default ("email"). utm_medium = product's ("paid-search").
+        # utm_campaign is prefixed with the product slug.
+        assert prod_art.utm_source == "search", \
+            f"product utm_source_default must override type default; got " \
+            f"{prod_art.utm_source!r}"
+        assert prod_art.utm_medium == "paid-search", \
+            f"product utm_medium_default must override type default; got " \
+            f"{prod_art.utm_medium!r}"
+        assert prod_art.utm_campaign.startswith("spend-manager__"), \
+            f"campaign must be prefixed with product slug; got " \
+            f"{prod_art.utm_campaign!r}"
+        # The non-product control falls back to type defaults.
+        assert ctrl_art.utm_source == "email", ctrl_art.utm_source
+        assert ctrl_art.utm_medium == "email", ctrl_art.utm_medium
+        assert not ctrl_art.utm_campaign.startswith("spend-manager__"), \
+            "no-product run must NOT carry a product-slug prefix"
+        print(f"[OK] Product (4): product utm_source/medium override the "
+              f"type defaults (utm_source={prod_art.utm_source}, "
+              f"utm_medium={prod_art.utm_medium}); campaign slug prefixed "
+              f"with product slug ({prod_art.utm_campaign}).")
+
+        # (5) Nullable product_id everywhere — legacy rows behave as before.
+        # Earlier tests created MANY rows BEFORE the product layer landed,
+        # all with product_id=NULL on artifacts/runs/proposals/metric_points.
+        # They MUST still be readable through scoped() and behave identically.
+        legacy_artifacts = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.product_id.is_(None))
+        ).scalars().all()
+        assert legacy_artifacts, \
+            "expected at least some legacy artifacts with product_id=NULL"
+        legacy_runs = db.execute(
+            scoped(Run, onit.id).where(Run.product_id.is_(None))
+        ).scalars().all()
+        assert legacy_runs, "expected legacy runs with product_id=NULL"
+        legacy_points = db.execute(
+            scoped(MetricPoint, onit.id)
+            .where(MetricPoint.product_id.is_(None))
+        ).scalars().all()
+        assert legacy_points, "expected legacy metric_points with product_id=NULL"
+        # The control content_engine run above ALSO has product_id=NULL —
+        # the orchestration code didn't break the legacy path.
+        assert ctrl_art in legacy_artifacts \
+            or any(a.id == ctrl_art.id for a in legacy_artifacts)
+        print(f"[OK] Product (5): nullable product_id everywhere — "
+              f"{len(legacy_artifacts)} legacy artifacts, "
+              f"{len(legacy_runs)} legacy runs, "
+              f"{len(legacy_points)} legacy metric_points "
+              "all readable through scoped() with no behavior change.")
+
+        # (6) Dashboard scoping.
+        # Upload a small product-scoped report so the funnel can pivot to it.
+        prod_csv = (
+            "Date,Impressions,Visits,Demo Requests,Campaign,UTM Source\n"
+            "2026-05-04,3000,200,4,spend-manager__demo,linkedin\n"
+            "2026-05-11,3500,250,5,spend-manager__demo,linkedin\n"
+        )
+        prod_up = client.post(
+            "/api/dashboard/reports",
+            headers={"X-Dev-User-Email": "jordan@onit.com"},
+            files={"file": ("prod.csv", prod_csv.encode("utf-8"), "text/csv")},
+            data={"mode": "ongoing", "source": "linkedin_ads",
+                  "product_id": product_id},
+        )
+        assert prod_up.status_code == 200, prod_up.text
+        assert prod_up.json()["point_count"] == 6, prod_up.json()
+        # Org-level funnel (no filter) includes BOTH legacy points AND the
+        # new product-scoped ones.
+        org_funnel = client.get(
+            "/api/dashboard/funnel",
+            headers={"X-Dev-User-Email": "jordan@onit.com"}).json()
+        org_top_total = sum(org_funnel["stages"]["top"]["total"])
+        # Product-scoped funnel: ONLY the new 6 points (3000+3500=6500 imps
+        # at top, 200+250=450 sessions at middle, 4+5=9 demos at bottom).
+        prod_funnel = client.get(
+            f"/api/dashboard/funnel?product_id={product_id}",
+            headers={"X-Dev-User-Email": "jordan@onit.com"}).json()
+        prod_top_total = sum(prod_funnel["stages"]["top"]["total"])
+        prod_mid_total = sum(prod_funnel["stages"]["middle"]["total"])
+        prod_bot_total = sum(prod_funnel["stages"]["bottom"]["total"])
+        assert prod_top_total == 6500, \
+            f"product-scoped top funnel must equal product points only, got {prod_top_total}"
+        assert prod_mid_total == 450, prod_mid_total
+        assert prod_bot_total == 9, prod_bot_total
+        # And the org-level total includes the legacy points too — strictly more.
+        assert org_top_total > prod_top_total, \
+            f"org-level total ({org_top_total}) must exceed product-only " \
+            f"({prod_top_total})"
+        # Production lane on the product-scoped view counts only product runs.
+        prod_runs_total = sum(prod_funnel["production"]["runs_total"])
+        assert prod_runs_total >= 1, \
+            f"product-scoped production lane must include the product run, got {prod_runs_total}"
+        # Cross-org filter denied via the auth layer.
+        cross_funnel = client.get(
+            f"/api/dashboard/funnel?product_id={product_id}",
+            headers={"X-Dev-User-Email": "ops@acme.com"})
+        assert cross_funnel.status_code in (403, 404), \
+            f"cross-org product-funnel read must be denied, got " \
+            f"{cross_funnel.status_code}: {cross_funnel.text}"
+        print(f"[OK] Product (6): dashboard filter — product-scoped funnel "
+              f"shows only this product's 6500/450/9 totals; org-level "
+              f"funnel ({org_top_total} top) includes legacy + product "
+              "data; cross-org filter denied.")
 
         print("[OK] Smoke test passed.")
     finally:

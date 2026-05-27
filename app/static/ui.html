@@ -284,6 +284,18 @@
     <button id="tab-dashboard" role="tab">Dashboard</button>
     <button id="tab-setup"     role="tab">Setup</button>
   </div>
+  <!-- Product selector — minimal, header-level so every tab sees it.
+       When (none) is selected everything stays org-level (current behavior).
+       When set, runs + content + dashboard queries scope to the product. -->
+  <div class="who" style="margin-right:8px;">
+    <label for="product-selector"
+           style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1px;">
+      Product
+    </label>
+    <select id="product-selector" style="min-width:180px;">
+      <option value="">(none — org-level)</option>
+    </select>
+  </div>
   <div class="who" id="who">
     <span>loading…</span>
   </div>
@@ -479,6 +491,54 @@
         <button id="save-profile-btn">Save profile</button>
       </div>
     </div>
+
+    <!-- Products — children of the org. Inheritable fields (brand_voice,
+         banned_claims, rubric, conversion_goal, UTM defaults) default to
+         inherit from the org; the override fields let a product win
+         field-by-field. -->
+    <div class="section">
+      <h3>Products</h3>
+      <div id="products-list"></div>
+      <details style="margin-top:10px;">
+        <summary style="cursor:pointer;">New product</summary>
+        <div class="form-grid" style="margin-top:10px;">
+          <div class="field full">
+            <label>Name</label>
+            <input type="text" id="np-name" placeholder="e.g. SimpleLegal CLM" />
+          </div>
+          <div class="field">
+            <label>Slug (optional — used for UTM prefix)</label>
+            <input type="text" id="np-slug" placeholder="auto from name" />
+          </div>
+          <div class="field">
+            <label>Website URL</label>
+            <input type="text" id="np-url" placeholder="https://..." />
+          </div>
+          <div class="field full">
+            <label>Positioning</label>
+            <textarea id="np-positioning"
+              placeholder="What this product does + why a buyer picks it"></textarea>
+          </div>
+          <div class="field full">
+            <label>Value props (one per line)</label>
+            <textarea id="np-value-props"
+              placeholder="One per line"></textarea>
+          </div>
+          <div class="field full">
+            <label>Key features (one per line)</label>
+            <textarea id="np-key-features"></textarea>
+          </div>
+          <div class="field full">
+            <label>Product competitors (one per line: "Name | https://url")</label>
+            <textarea id="np-competitors"></textarea>
+          </div>
+          <div class="field full">
+            <button id="np-create-btn">Create product (draft)</button>
+            <span class="setup-status" id="np-status"></span>
+          </div>
+        </div>
+      </details>
+    </div>
   </section>
 </main>
 
@@ -496,6 +556,11 @@ const state = {
   pollTimer: null,
   uploads: [],
   selectedUploadId: '',  // '' = stub
+  // Product layer: '' means org-level (legacy behavior). When set, every
+  // trigger (runs, content, dashboard upload, funnel, suggestions) scopes
+  // to this product. List is populated from /api/products on boot.
+  products: [],
+  selectedProductId: '',
   // Setup view:
   profile: null,         // server-saved profile (or empty skeleton)
   working: null,         // the working profile being edited (layered drafts + edits)
@@ -635,6 +700,7 @@ async function triggerRun() {
   try {
     const body = { agent_key: 'market_intel' };
     if (state.selectedUploadId) body.upload_id = state.selectedUploadId;
+    if (state.selectedProductId) body.product_id = state.selectedProductId;
     const run = await api('/api/runs', { method: 'POST', body: JSON.stringify(body) });
     await loadRuns();
     selectRun(run.id);
@@ -654,12 +720,13 @@ async function triggerContentSuggest() {
   const status = document.getElementById('content-status');
   status.textContent = 'Enqueueing suggestion run…';
   try {
+    const body = {
+      agent_key: 'content_engine',
+      task: { action: 'suggest' },
+    };
+    if (state.selectedProductId) body.product_id = state.selectedProductId;
     const run = await api('/api/runs', {
-      method: 'POST',
-      body: JSON.stringify({
-        agent_key: 'content_engine',
-        task: { action: 'suggest' },
-      }),
+      method: 'POST', body: JSON.stringify(body),
     });
     switchView('runs');
     await loadRuns();
@@ -681,12 +748,13 @@ async function triggerContentGenerate(typeArg, topicArg, targetArg) {
     return;
   }
   try {
+    const body = {
+      agent_key: 'content_engine',
+      task: { action: 'generate', content_type, topic, target },
+    };
+    if (state.selectedProductId) body.product_id = state.selectedProductId;
     const run = await api('/api/runs', {
-      method: 'POST',
-      body: JSON.stringify({
-        agent_key: 'content_engine',
-        task: { action: 'generate', content_type, topic, target },
-      }),
+      method: 'POST', body: JSON.stringify(body),
     });
     switchView('runs');
     await loadRuns();
@@ -1034,14 +1102,15 @@ function renderRegenerateControl(art) {
 
 async function regenerateDraft(parentArtifactId, critique) {
   try {
+    const body = {
+      agent_key: 'content_engine',
+      task: { action: 'regenerate',
+              parent_artifact_id: parentArtifactId,
+              critique },
+    };
+    if (state.selectedProductId) body.product_id = state.selectedProductId;
     const run = await api('/api/runs', {
-      method: 'POST',
-      body: JSON.stringify({
-        agent_key: 'content_engine',
-        task: { action: 'regenerate',
-                parent_artifact_id: parentArtifactId,
-                critique },
-      }),
+      method: 'POST', body: JSON.stringify(body),
     });
     switchView('runs');
     await loadRuns();
@@ -1069,7 +1138,9 @@ async function loadFunnel() {
   prodRoot.innerHTML = '';
   let funnel;
   try {
-    funnel = await api('/api/dashboard/funnel');
+    const qs = state.selectedProductId
+      ? `?product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+    funnel = await api('/api/dashboard/funnel' + qs);
   } catch (e) {
     funnelRoot.innerHTML = `<div class="err">Failed to load funnel: ${e.message}</div>`;
     return;
@@ -1170,7 +1241,9 @@ async function loadSuggestions() {
   root.innerHTML = '<div class="setup-status">Loading…</div>';
   let items;
   try {
-    items = await api('/api/dashboard/suggestions?status=open');
+    const pq = state.selectedProductId
+      ? `&product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+    items = await api(`/api/dashboard/suggestions?status=open${pq}`);
   } catch (e) {
     root.innerHTML = `<div class="err">Failed to load suggestions: ${e.message}</div>`;
     return;
@@ -1253,6 +1326,9 @@ async function uploadDashboardReport() {
     form.append('file', fileEl.files[0]);
     form.append('mode', mode);
     form.append('source', source);
+    // When a product is selected, the upload + its metric_points are
+    // tagged with it so the dashboard can filter to a product later.
+    if (state.selectedProductId) form.append('product_id', state.selectedProductId);
     const res = await fetch('/api/dashboard/reports', {
       method: 'POST',
       headers: { 'X-Dev-User-Email': state.email },
@@ -1279,7 +1355,9 @@ async function refreshSuggestions() {
   btn.disabled = true;
   btn.textContent = 'Refreshing…';
   try {
-    await api('/api/dashboard/suggestions/refresh', { method: 'POST',
+    const qs = state.selectedProductId
+      ? `?product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+    await api('/api/dashboard/suggestions/refresh' + qs, { method: 'POST',
       body: JSON.stringify({}) });
     await loadSuggestions();
   } catch (e) {
@@ -1297,6 +1375,125 @@ function fmtNumber(n) {
   if (abs >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   if (Number.isInteger(n)) return String(n);
   return n.toFixed(1);
+}
+
+// ---- Products (header selector + Setup section) -------------------------
+// Header selector: when set, every trigger (runs, content, dashboard
+// queries / uploads) scopes to that product. (none) preserves the
+// historical org-level behavior.
+async function loadProducts() {
+  let items = [];
+  try {
+    items = await api('/api/products');
+  } catch (e) {
+    // No org / no profile yet is fine — just no products to show.
+    items = [];
+  }
+  state.products = items;
+  renderProductSelector();
+  renderProductsList();
+}
+
+function renderProductSelector() {
+  const sel = document.getElementById('product-selector');
+  if (!sel) return;
+  sel.innerHTML = '';
+  sel.appendChild(el('option', { value: '' }, '(none — org-level)'));
+  for (const p of state.products) {
+    const status = p.status === 'confirmed' ? '' : ' [draft]';
+    sel.appendChild(el('option', { value: p.id },
+      `${p.name} (${p.slug})${status}`));
+  }
+  sel.value = state.selectedProductId || '';
+}
+
+function renderProductsList() {
+  const root = document.getElementById('products-list');
+  if (!root) return;
+  root.innerHTML = '';
+  if (!state.products.length) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No products yet'),
+      el('div', {}, 'Create one below; it becomes a child of the org and can override brand voice / banned claims / UTMs.'),
+    ));
+    return;
+  }
+  for (const p of state.products) {
+    const card = el('div', { class: 'proposal' },
+      el('div', { class: 'row' },
+        el('strong', {}, p.name),
+        el('span', { class: 'badge ' + (p.status === 'confirmed' ? 'succeeded' : 'pending') },
+          p.status),
+      ),
+      el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
+        `slug: ${p.slug} · ` +
+        `positioning: ${(p.positioning || '(none yet)').slice(0, 100)}`),
+      el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px; margin-top:4px;' },
+        `value_props: ${(p.value_props || []).length} · ` +
+        `features: ${(p.key_features || []).length} · ` +
+        `product_competitors: ${(p.product_competitors || []).length} · ` +
+        `overrides: ${[p.brand_voice_override && 'brand_voice',
+                       p.banned_claims_override && 'banned_claims',
+                       p.conversion_goal_override && 'conversion_goal',
+                       p.rubric_override && 'rubric',
+                       p.utm_source_default && 'utm_source',
+                       p.utm_medium_default && 'utm_medium']
+                       .filter(Boolean).join(', ') || '(all inherit from org)'}`),
+      el('div', { class: 'actions' },
+        p.status === 'confirmed' ? null : el('button',
+          { class: 'approve', onclick: () => confirmProduct(p.id) },
+          'Confirm'),
+        el('button', { class: 'ghost',
+          onclick: () => { state.selectedProductId = p.id; renderProductSelector(); } },
+          'Select for runs'),
+      ),
+    );
+    root.appendChild(card);
+  }
+}
+
+async function confirmProduct(id) {
+  try {
+    await api(`/api/products/${id}/confirm`, { method: 'POST',
+      body: JSON.stringify({}) });
+    await loadProducts();
+  } catch (e) {
+    alert(`Confirm failed: ${e.message}`);
+  }
+}
+
+async function createProduct() {
+  const name = document.getElementById('np-name').value.trim();
+  const slug = document.getElementById('np-slug').value.trim();
+  const website = document.getElementById('np-url').value.trim();
+  const positioning = document.getElementById('np-positioning').value.trim();
+  const value_props = document.getElementById('np-value-props').value
+    .split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const key_features = document.getElementById('np-key-features').value
+    .split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const competitors = document.getElementById('np-competitors').value
+    .split(/\r?\n/).map(line => {
+      const [n, u] = line.split('|').map(x => (x || '').trim());
+      return n ? { name: n, url: u || '' } : null;
+    }).filter(Boolean);
+  if (!name) { alert('Name is required.'); return; }
+  const status = document.getElementById('np-status');
+  status.textContent = 'Creating…';
+  try {
+    const body = { name, website_url: website, positioning,
+                   value_props, key_features, product_competitors: competitors };
+    if (slug) body.slug = slug;
+    await api('/api/products', { method: 'POST', body: JSON.stringify(body) });
+    // Clear form so the next create starts blank.
+    for (const id of ['np-name','np-slug','np-url','np-positioning',
+                      'np-value-props','np-key-features','np-competitors']) {
+      document.getElementById(id).value = '';
+    }
+    status.textContent = 'Created (draft). Click Confirm in the list to use it for runs.';
+    await loadProducts();
+  } catch (e) {
+    status.innerHTML = `<span class="err">${e.message}</span>`;
+  }
 }
 
 function renderDetail() {
@@ -2077,7 +2274,7 @@ function switchView(view) {
 // ---- Boot -----------------------------------------------------------------
 async function refreshAll() {
   await loadMe();
-  await Promise.all([loadRuns(), loadProposals(), loadUploads()]);
+  await Promise.all([loadRuns(), loadProposals(), loadUploads(), loadProducts()]);
   if (state.selectedRunId) await loadDetail(state.selectedRunId);
 }
 
@@ -2095,6 +2292,14 @@ document.getElementById('content-generate-btn').addEventListener('click',
   () => triggerContentGenerate());
 document.getElementById('dash-upload-btn').addEventListener('click', uploadDashboardReport);
 document.getElementById('dash-refresh-btn').addEventListener('click', refreshSuggestions);
+document.getElementById('product-selector').addEventListener('change', (ev) => {
+  state.selectedProductId = ev.target.value || '';
+  // Re-render anything that's product-scoped. Runs/content trigger reads
+  // state at click time, so they don't need a re-render here.
+  const dashEl = document.getElementById('dashboard-view');
+  if (dashEl && dashEl.style.display !== 'none') loadDashboard();
+});
+document.getElementById('np-create-btn').addEventListener('click', createProduct);
 document.getElementById('path-manual').addEventListener('click', () => {
   // "Fill in manually" just closes any open enrichment diff and lets the user
   // edit the working form directly. It does NOT wipe layered-in work.

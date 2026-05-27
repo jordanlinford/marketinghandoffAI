@@ -104,6 +104,10 @@ CREATE TABLE runs (
     cost_usd              DOUBLE PRECISION NOT NULL DEFAULT 0,
     created_by            TEXT,
     upload_id             TEXT REFERENCES uploads(id),
+    -- OPTIONAL product scope. NULL = org-level run. ON DELETE SET NULL
+    -- means deleting a product reverts existing rows to org-level instead
+    -- of erasing the run.
+    product_id            TEXT REFERENCES product_profiles(id) ON DELETE SET NULL,
     -- Per-run input passed in by the API caller via TriggerRunIn.task.
     -- Read by the agent through ctx.task.
     task                  JSONB NOT NULL DEFAULT '{}',
@@ -118,6 +122,8 @@ CREATE TABLE artifacts (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id),
     run_id      TEXT NOT NULL REFERENCES runs(id),
+    -- OPTIONAL product scope (mirrors runs.product_id).
+    product_id  TEXT REFERENCES product_profiles(id) ON DELETE SET NULL,
     type        TEXT NOT NULL,
     title       TEXT NOT NULL,
     body        JSONB NOT NULL DEFAULT '{}',
@@ -149,6 +155,8 @@ CREATE TABLE proposals (
     id               TEXT PRIMARY KEY,
     org_id           TEXT NOT NULL REFERENCES orgs(id),
     run_id           TEXT NOT NULL REFERENCES runs(id),
+    -- OPTIONAL product scope (mirrors runs.product_id).
+    product_id       TEXT REFERENCES product_profiles(id) ON DELETE SET NULL,
     action_type      TEXT NOT NULL,
     payload          JSONB NOT NULL DEFAULT '{}',
     guardrail_scope  TEXT,
@@ -161,6 +169,40 @@ CREATE TABLE proposals (
     executed_at      TIMESTAMPTZ,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- ---- Product layer ------------------------------------------------------
+-- A product is a child of an org with its own profile. Every downstream
+-- object carries an OPTIONAL product_id so it can be scoped to a product OR
+-- remain org-level (product_id IS NULL). app/products.resolve_product_profile
+-- is the single source of truth for the inheritance merge.
+CREATE TABLE product_profiles (
+    id                       TEXT PRIMARY KEY,
+    org_id                   TEXT NOT NULL REFERENCES orgs(id),
+    name                     TEXT NOT NULL,
+    slug                     TEXT NOT NULL,
+    status                   TEXT NOT NULL DEFAULT 'draft',
+    website_url              TEXT NOT NULL DEFAULT '',
+    -- product-only fields (no inheritance)
+    positioning              TEXT NOT NULL DEFAULT '',
+    target_persona           JSONB NOT NULL DEFAULT '{}',
+    value_props              JSONB NOT NULL DEFAULT '[]',
+    proof_points             JSONB NOT NULL DEFAULT '[]',
+    differentiators          JSONB NOT NULL DEFAULT '[]',
+    key_features             JSONB NOT NULL DEFAULT '[]',
+    use_cases                JSONB NOT NULL DEFAULT '[]',
+    product_competitors      JSONB NOT NULL DEFAULT '[]',
+    -- inheritable overrides: NULL = inherit from org, non-null = product wins
+    brand_voice_override     TEXT,
+    banned_claims_override   JSONB,
+    conversion_goal_override TEXT,
+    rubric_override          JSONB,
+    utm_source_default       TEXT,
+    utm_medium_default       TEXT,
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (org_id, slug)
+);
+CREATE INDEX idx_product_profiles_org ON product_profiles(org_id);
 
 CREATE TABLE guardrails (
     id          TEXT PRIMARY KEY,
@@ -199,6 +241,9 @@ CREATE TABLE report_uploads (
     column_mapping  JSONB NOT NULL DEFAULT '{}',
     point_count     INTEGER NOT NULL DEFAULT 0,
     uploaded_by     TEXT,
+    -- OPTIONAL product scope: an upload can be flagged as belonging to a
+    -- specific product so its rows flow into that product's funnel view.
+    product_id      TEXT REFERENCES product_profiles(id) ON DELETE SET NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -221,6 +266,8 @@ CREATE TABLE metric_points (
     -- True for points from a 'baseline' upload — backdrop only, never
     -- attributed to produced content.
     is_baseline       BOOLEAN NOT NULL DEFAULT false,
+    -- OPTIONAL product scope (inherited from the parent ReportUpload).
+    product_id        TEXT REFERENCES product_profiles(id) ON DELETE SET NULL,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -240,14 +287,21 @@ CREATE TABLE suggestions (
     idea_topic          TEXT,
     idea_target         TEXT,
     status              TEXT NOT NULL DEFAULT 'open',
+    -- OPTIONAL product scope: suggestions from a product-filtered funnel.
+    product_id          TEXT REFERENCES product_profiles(id) ON DELETE SET NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_metric_points_org_date    ON metric_points(org_id, date);
 CREATE INDEX idx_metric_points_campaign    ON metric_points(org_id, utm_campaign);
 CREATE INDEX idx_metric_points_metric_name ON metric_points(org_id, metric_name);
+CREATE INDEX idx_metric_points_product     ON metric_points(org_id, product_id);
 CREATE INDEX idx_report_uploads_org        ON report_uploads(org_id, created_at);
 CREATE INDEX idx_suggestions_org_status    ON suggestions(org_id, status);
+CREATE INDEX idx_suggestions_product       ON suggestions(org_id, product_id);
+CREATE INDEX idx_runs_product              ON runs(org_id, product_id);
+CREATE INDEX idx_artifacts_product         ON artifacts(org_id, product_id);
+CREATE INDEX idx_proposals_product         ON proposals(org_id, product_id);
 
 CREATE TABLE jobs (
     id          TEXT PRIMARY KEY,
@@ -278,7 +332,7 @@ BEGIN
   FOREACH t IN ARRAY ARRAY['users','connections','agents','runs','artifacts',
                            'proposals','guardrails','audit_log','jobs','uploads',
                            'org_profiles','report_uploads','metric_points',
-                           'suggestions']
+                           'suggestions','product_profiles']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', t);

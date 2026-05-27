@@ -82,6 +82,14 @@ class AgentContext:
     # which case agents fall back to seed config. In-agent precedence is
     # explicit: confirmed org_profile > seed config.
     org_profile: dict[str, Any] | None = None
+    # The ResolvedProfile from app/products.resolve_product_profile — the
+    # ONLY way agents should read profile-level config. With no product
+    # selected this is effectively the org-level view; with a product set
+    # it carries inherited fields, product-only fields under
+    # profile["product"], and per-field provenance. ctx.org_profile stays
+    # for backwards compat but agents on the new path read ctx.profile.
+    profile: dict[str, Any] | None = None
+    product_id: str | None = None
     # Recently-completed artifacts for this org that an agent may reason from
     # (e.g. content_engine reads the latest market_brief). Loaded by the
     # worker via scoped(); the agent never queries the DB.
@@ -102,6 +110,10 @@ class TriggerRunIn(BaseModel):
     # Optional: bind this run to a previously uploaded account list. Validated
     # against the caller's org via scoped() before the run is created.
     upload_id: str | None = None
+    # Optional: scope this run to a product (child of the org). NULL keeps
+    # the legacy org-level behavior — the runs.py endpoint validates the
+    # product id belongs to the caller's org via scoped() before persisting.
+    product_id: str | None = None
 
 
 class RunOut(BaseModel):
@@ -112,6 +124,7 @@ class RunOut(BaseModel):
     cost_usd: float
     error: str | None = None
     upload_id: str | None = None
+    product_id: str | None = None
     created_at: str
 
     @classmethod
@@ -119,6 +132,7 @@ class RunOut(BaseModel):
         return cls(
             id=r.id, agent_key=r.agent_key, status=r.status, trigger=r.trigger,
             cost_usd=r.cost_usd, error=r.error, upload_id=r.upload_id,
+            product_id=r.product_id,
             created_at=r.created_at.isoformat(),
         )
 

@@ -105,8 +105,14 @@ def _matching_artifact(point: MetricPoint,
 
 
 def funnel_view(db: Session, org_id: str, *, bucket: str = "week",
-                limit_buckets: int = 12) -> dict:
+                limit_buckets: int = 12,
+                product_id: str | None = None) -> dict:
     """Compute the dashboard's main view for an org.
+
+    `product_id` filters every series (metric_points + artifacts + runs)
+    to that product. None (the historical default) returns the full
+    org-level view. The filter is applied IN-SQL via scoped(): we never
+    pull org-level rows and then filter in Python.
 
     Returns:
       {
@@ -132,13 +138,16 @@ def funnel_view(db: Session, org_id: str, *, bucket: str = "week",
         "ungrouped_metrics": [str, ...]   # metrics seen but not in any stage
       }
     """
-    points = db.execute(
-        scoped(MetricPoint, org_id).order_by(MetricPoint.date.asc())
-    ).scalars().all()
-    artifacts = db.execute(
-        scoped(Artifact, org_id).where(Artifact.type == "content_draft")
-    ).scalars().all()
-    runs = db.execute(scoped(Run, org_id)).scalars().all()
+    points_q = scoped(MetricPoint, org_id).order_by(MetricPoint.date.asc())
+    artifacts_q = scoped(Artifact, org_id).where(Artifact.type == "content_draft")
+    runs_q = scoped(Run, org_id)
+    if product_id:
+        points_q = points_q.where(MetricPoint.product_id == product_id)
+        artifacts_q = artifacts_q.where(Artifact.product_id == product_id)
+        runs_q = runs_q.where(Run.product_id == product_id)
+    points = db.execute(points_q).scalars().all()
+    artifacts = db.execute(artifacts_q).scalars().all()
+    runs = db.execute(runs_q).scalars().all()
 
     # Index artifacts by utm_campaign — the primary join key. Several
     # versions of a piece share the same campaign (v1, v2, v3 of "Give me

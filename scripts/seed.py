@@ -10,7 +10,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.db import SessionLocal, create_all
-from app.models import AgentRegistration, Guardrail, Org, User
+from app.models import AgentRegistration, Guardrail, Org, ProductProfile, User
 
 ONIT_ICP = {
     "category": "legal operations software",
@@ -71,6 +71,47 @@ def main() -> None:
         # Default guardrail rules. "content" stays here as the SCOPE shell;
         # OrgProfile.banned_claims is merged in at worker time so the profile
         # remains the single source of truth for which phrases trip the rule.
+        # Seed one example product under Onit so the dev DB demonstrates
+        # the product layer end-to-end (overrides → resolver → agent UTM
+        # prefix) without anyone hand-creating it. Idempotent on (org_id,
+        # slug). Status=confirmed so agents will read it.
+        product = db.execute(
+            select(ProductProfile).where(
+                ProductProfile.org_id == org.id,
+                ProductProfile.slug == "simplelegal-clm")
+        ).scalar_one_or_none()
+        if product is None:
+            db.add(ProductProfile(
+                org_id=org.id, name="SimpleLegal CLM", slug="simplelegal-clm",
+                status="confirmed", website_url="https://onit.com/products/clm",
+                positioning=(
+                    "Contract lifecycle management built for in-house teams who "
+                    "live in matters, not in legal-tech jargon."),
+                target_persona={
+                    "role": "General Counsel / Head of Legal Ops",
+                    "seniority": "Director+",
+                    "pains": ["Spreadsheet sprawl", "Lost contract context",
+                              "Slow approvals"],
+                },
+                value_props=[
+                    "One source of truth for contracts and approvals.",
+                    "Cuts contract turnaround time in half within 90 days.",
+                    "No-code workflows your legal team can own.",
+                ],
+                key_features=["Clause library", "Approval routing",
+                              "Renewal tracking", "Integrations with DMS + CLM tools"],
+                use_cases=["NDAs at scale", "Vendor onboarding",
+                           "Renewals + obligations management"],
+                product_competitors=[
+                    {"name": "Ironclad", "url": "https://ironclad.com"},
+                    {"name": "Agiloft", "url": "https://agiloft.com"},
+                ],
+                # No overrides: brand_voice/banned_claims/rubric/etc. inherit
+                # from OrgProfile by default. UTM defaults left null too.
+            ))
+            db.commit()
+            print("Seeded example product 'SimpleLegal CLM' under Onit")
+
         for scope, rules in [("spend", {"max_change_usd": 250}),
                              ("publish", {"require_human_review": True}),
                              ("content", {"banned_claims": []})]:

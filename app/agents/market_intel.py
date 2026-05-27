@@ -25,13 +25,20 @@ class MarketIntelAgent(Agent):
         log = ctx.log
         log(f"Starting market-intel run for {ctx.org_name}")
 
-        # Input precedence (do not drift): a CONFIRMED OrgProfile, loaded by the
-        # worker and handed in via ctx.org_profile, wins over the seed agent
-        # config field by field. With no confirmed profile, ctx.org_profile is
-        # None and we use the seed config unchanged (no regression). The agent
-        # reads the profile ONLY through ctx — never the DB.
+        # Input precedence (do not drift): a CONFIRMED OrgProfile (resolved
+        # via ctx.profile when a product is selected, otherwise the org
+        # layer itself) wins over the seed agent config field by field.
+        # With no confirmed profile, fall back to the seed config unchanged
+        # (no regression). The agent reads the profile ONLY through ctx —
+        # never the DB.
+        #
+        # The resolver always returns a dict (with provenance + _org keys),
+        # so "no confirmed profile" is detected via _org being empty rather
+        # than the outer dict being falsy.
+        resolved = ctx.profile or {}
+        profile_in = resolved if resolved.get("_org") else ctx.org_profile
         icp, product_summary, competitors, inputs_source = self._effective_inputs(
-            ctx.icp or {}, ctx.org_profile)
+            ctx.icp or {}, profile_in)
         log("Using confirmed org profile over seed config"
             if inputs_source == "org_profile"
             else "No confirmed org profile — using seed agent config")

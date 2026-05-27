@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import current_user
 from app.db import get_db
-from app.models import AgentRegistration, Artifact, Run, Upload, User
+from app.models import AgentRegistration, Artifact, ProductProfile, Run, Upload, User
 from app.queue import enqueue
 from app.schemas import RunOut, TriggerRunIn
 from app.tenancy import scoped
@@ -34,12 +34,25 @@ def trigger_run(body: TriggerRunIn, user: User = Depends(current_user),
             raise HTTPException(404, f"Upload '{body.upload_id}' not found for this org")
         upload_id = up.id
 
+    # Optional product scope. Validated against the caller's org via
+    # scoped() — never trust a client-supplied id to belong to the right
+    # tenant. NULL preserves the historical org-level behavior.
+    product_id: str | None = None
+    if body.product_id:
+        prod = db.execute(
+            scoped(ProductProfile, user.org_id)
+            .where(ProductProfile.id == body.product_id)
+        ).scalar_one_or_none()
+        if prod is None:
+            raise HTTPException(404, f"Product '{body.product_id}' not found for this org")
+        product_id = prod.id
+
     # Persist the caller's per-run task on the Run row so the worker can hand
     # it to the agent through ctx.task. Closes the previous "task is dropped"
     # gap — the content_engine relies on this for action/content_type/topic.
     run = Run(org_id=user.org_id, agent_registration_id=reg.id, agent_key=reg.key,
               trigger="manual", status="queued", created_by=user.id,
-              upload_id=upload_id, task=body.task or {})
+              upload_id=upload_id, product_id=product_id, task=body.task or {})
     db.add(run)
     db.commit()
     db.refresh(run)

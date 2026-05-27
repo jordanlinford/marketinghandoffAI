@@ -39,14 +39,24 @@ def _slug(text: str, max_len: int = 60) -> str:
 
 
 def suggest_utms(content_type: str, topic: str, *, version: int = 1,
-                 overrides: dict | None = None) -> dict:
+                 overrides: dict | None = None,
+                 campaign_prefix: str | None = None) -> dict:
     """Compute a sensible UTM set for a freshly-generated draft. Auto-slugs
     `topic` into `utm_campaign` and emits a versioned `utm_content` so v2 of
     the same draft is distinguishable. `overrides` (from task.utm or a future
-    PATCH) win field-by-field, so the user always has the final say."""
+    PATCH) win field-by-field, so the user always has the final say.
+
+    `campaign_prefix` (the product's slug from the resolved profile) is
+    prepended to the auto-derived campaign as "<prefix>__<slug>" so reports
+    naturally segment by product. An explicit `utm_campaign` override still
+    wins outright — the prefix only applies to the auto-derived slug."""
     source, medium = _CHANNEL_DEFAULTS.get(
         content_type, ("organic", "organic-social"))
     campaign_slug = _slug(topic) or "untitled"
+    if campaign_prefix:
+        prefix_slug = _slug(campaign_prefix)
+        if prefix_slug:
+            campaign_slug = f"{prefix_slug}__{campaign_slug}"
     content_slug = _slug(f"{content_type}-{topic}", max_len=100) or content_type
     if version > 1:
         content_slug = f"{content_slug[:140]}-v{version}"

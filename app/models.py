@@ -11,7 +11,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (JSON, Boolean, Date, DateTime, Float, ForeignKey,
+                        Integer, String, Text, UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db import Base
@@ -95,6 +96,15 @@ class Run(Base, TimestampMixin):
     # null => stub source (preserves prior behavior). Set when the trigger binds
     # this run to a user-uploaded account list (the CSV data-source seam).
     upload_id: Mapped[str | None] = mapped_column(ForeignKey("uploads.id"), nullable=True)
+    # OPTIONAL product scope. NULL = org-level run (current default for
+    # everything that existed before the product layer landed). When set,
+    # the worker hands the agent a resolved profile that inherits from the
+    # org and applies any product overrides. ondelete=SET NULL: deleting a
+    # product is a soft event for already-emitted artifacts — they revert
+    # to org-level rather than disappearing.
+    product_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True)
     # Per-run input the API caller supplied via TriggerRunIn.task. Read by the
     # agent through ctx.task (the content_engine uses it for action +
     # content_type + topic; market_intel ignores it). Was previously dropped.
@@ -127,6 +137,12 @@ class Artifact(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    # OPTIONAL product scope (mirrors Run.product_id). NULL = org-level.
+    # Set by the worker from run.product_id so attribution + filtering work
+    # consistently across the dashboard.
+    product_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True)
     type: Mapped[str] = mapped_column(String(50))
     title: Mapped[str] = mapped_column(String(300))
     body: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -165,6 +181,10 @@ class Proposal(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
+    # OPTIONAL product scope (mirrors Run.product_id). NULL = org-level.
+    product_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True)
     action_type: Mapped[str] = mapped_column(String(80))
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     guardrail_scope: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -234,6 +254,70 @@ class OrgProfile(Base, TimestampMixin):
     content_rubric: Mapped[list] = mapped_column(JSON, default=list)
 
 
+# ---------------------------------------------------------------------------
+# Product layer — a child of the org with its own profile. Every downstream
+# object (runs, artifacts, proposals, metric_points, suggestions,
+# report_uploads) carries an OPTIONAL product_id so it can be scoped to a
+# product OR remain org-level (product_id IS NULL) — the historical default.
+#
+# Inheritance:
+#   - Product-only fields live ONLY here (positioning, persona, value_props,
+#     etc.) — there is no org-level equivalent.
+#   - "Inheritable overrides" are NULL by default, which means "inherit from
+#     OrgProfile". When set, the product overrides the org. The single
+#     source of truth that does the merge is app/products.resolve_product_profile().
+#
+# Cross-tenant safety: scoped() on org_id. The (org_id, slug) unique
+# constraint keeps URLs / UTM prefixes unambiguous per org.
+# ---------------------------------------------------------------------------
+class ProductProfile(Base, TimestampMixin):
+    __tablename__ = "product_profiles"
+    __table_args__ = (
+        UniqueConstraint("org_id", "slug", name="uq_product_slug_per_org"),
+    )
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    name: Mapped[str] = mapped_column(String(200))
+    slug: Mapped[str] = mapped_column(String(120))
+    # draft → confirmed mirrors the OrgProfile pattern: a draft isn't read
+    # by agents until the user explicitly confirms it. Lets the UI surface
+    # "this product is still a draft" without leaking unfinished positioning
+    # into a run.
+    status: Mapped[str] = mapped_column(String(20), default="draft")
+    website_url: Mapped[str] = mapped_column(Text, default="")
+
+    # ---- Product-only fields (no org equivalent; no inheritance) -------
+    positioning: Mapped[str] = mapped_column(Text, default="")
+    # Persona is small structured data — role / seniority / pains. JSON
+    # rather than columns so PMM can iterate on shape without a migration.
+    target_persona: Mapped[dict] = mapped_column(JSON, default=dict)
+    value_props: Mapped[list] = mapped_column(JSON, default=list)
+    proof_points: Mapped[list] = mapped_column(JSON, default=list)
+    differentiators: Mapped[list] = mapped_column(JSON, default=list)
+    key_features: Mapped[list] = mapped_column(JSON, default=list)
+    use_cases: Mapped[list] = mapped_column(JSON, default=list)
+    # Distinct from OrgProfile.competitors — these are the competitors for
+    # THIS product specifically (the broader org may compete with others).
+    product_competitors: Mapped[list] = mapped_column(JSON, default=list)
+
+    # ---- Inheritable overrides: NULL = inherit; non-null = product wins -
+    # Each of these has a counterpart on OrgProfile that the resolver falls
+    # back to when the override is None. NEVER read these directly from an
+    # agent — go through resolve_product_profile().
+    brand_voice_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+    banned_claims_override: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    conversion_goal_override: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rubric_override: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # UTM defaults — the content engine prefers these over the per-content-
+    # type channel defaults, so a product's pieces share a coherent channel
+    # signature in reports.
+    utm_source_default: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    utm_medium_default: Mapped[str | None] = mapped_column(String(60), nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now)
+
+
 class Guardrail(Base, TimestampMixin):
     __tablename__ = "guardrails"
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
@@ -287,6 +371,12 @@ class ReportUpload(Base, TimestampMixin):
     column_mapping: Mapped[dict] = mapped_column(JSON, default=dict)
     point_count: Mapped[int] = mapped_column(Integer, default=0)
     uploaded_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # OPTIONAL product scope: when the upload is recognized as belonging to
+    # a specific product (e.g. the user uploaded "SimpleLegal CLM" perf
+    # rows under that product), this flags it for downstream filtering.
+    product_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True)
 
 
 class MetricPoint(Base, TimestampMixin):
@@ -321,6 +411,11 @@ class MetricPoint(Base, TimestampMixin):
     # never attributed to produced content. Mirrors the honesty discipline
     # used for csv vs csv+intent in the market_intel ingest.
     is_baseline: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # OPTIONAL product scope. Inherited from the parent ReportUpload at
+    # ingest time so the dashboard can filter the funnel to a product.
+    product_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True)
 
 
 class Suggestion(Base, TimestampMixin):
@@ -351,6 +446,11 @@ class Suggestion(Base, TimestampMixin):
     idea_topic: Mapped[str | None] = mapped_column(String(300), nullable=True)
     idea_target: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="open")  # open|dismissed|actioned
+    # OPTIONAL product scope: suggestions computed from a product-filtered
+    # funnel carry this so the cockpit can show "X suggestions for SimpleLegal".
+    product_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True)
 
 
 # ---------------------------------------------------------------------------

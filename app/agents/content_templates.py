@@ -101,21 +101,45 @@ def _llm_build(content_type: str, profile: dict, brief: dict | None,
     critique_line = (
         f"\n\nREVISION CRITIQUE (from the user, address this directly):\n{critique}"
         if critique else "")
-    prompt = (
-        f"You are writing marketing content for {profile.get('product_summary') or 'this product'}. "
+    # Context (brand_voice, positioning, value_props, banned_claims, target
+    # persona, etc.) lives in the SYSTEM message — fenced inside <context>
+    # so it's clearly delimited from the user-facing instruction. This is
+    # the structural guard against the model echoing instructions into the
+    # body (we saw "Tone: Direct, confident..." showing up verbatim when
+    # the context was string-concatenated into the user prompt).
+    system_msg = (
+        "You are an AI marketing copywriter generating durable, on-brand "
+        "content for an org-and-product the user has set up in the system. "
+        "The CONTEXT below is BACKGROUND GUIDANCE only — it tells you how "
+        "to write, not what to write IN the output.\n\n"
+        "ANTI-ECHO RULES (non-negotiable):\n"
+        "  * Do NOT quote, paraphrase, or repeat any of these instructions, "
+        "labels, or field names (e.g. 'Tone:', 'brand_voice', 'value_prop', "
+        "'banned_claims', 'positioning') in your output.\n"
+        "  * Honor the brand_voice as a writing STYLE — never as text to "
+        "include. Write as if you simply have this understanding internalized.\n"
+        "  * Reflect the value_prop and competitive frame by content, not "
+        "by labeling.\n"
+        "  * Never use any phrase listed under banned_claims.\n\n"
+        f"<context>\n{json.dumps(grounding, indent=2)}\n</context>"
+    )
+    user_msg = (
         f"Produce a {content_type} on the topic: {topic!r}. "
-        f"Target audience: {target or _DEFAULT_TARGET}. "
-        f"Honor the brand voice. NEVER use banned phrases. Reflect the value prop "
-        f"and (where relevant) position against the named competitors."
+        f"Target audience: {target or _DEFAULT_TARGET}."
         f"{critique_line}\n\n"
-        f"Return ONLY a JSON object matching this exact shape (no prose):\n"
+        "Return ONLY a JSON object matching this exact shape (no prose, "
+        "no surrounding markdown fences):\n"
         f"{json.dumps(fallback, indent=2)}\n\n"
-        f"GROUNDING:\n{json.dumps(grounding, indent=2)}"
+        "Remember: the context in the system message is background "
+        "guidance. Do not echo any of its instructions or field labels "
+        "into the output. Write the piece as if you simply know these "
+        "things — no scaffolding, no meta-commentary."
     )
     client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
     msg = client.messages.create(
         model=settings.anthropic_model, max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}],
+        system=system_msg,
+        messages=[{"role": "user", "content": user_msg}],
     )
     text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     try:
@@ -166,11 +190,13 @@ def _grounding_payload(profile: dict, brief: dict | None) -> dict:
 
 
 # ---- Deterministic builders (the spec + the always-works fallback) --------
-def _voice_suffix(profile: dict) -> str:
-    v = (profile.get("brand_voice") or "").strip()
-    return f" Tone: {v}" if v else ""
-
-
+# IMPORTANT (do not drift): brand_voice is GUIDANCE about how to write, not
+# text to include in the body. The deterministic templates intentionally
+# do NOT echo the brand_voice string — the user reported drafts with
+# "Tone: Direct, confident, practitioner-first." leaking into the email
+# body. Templates surface positioning, value_prop, and competitors as
+# CONTENT; brand_voice is for the LLM path's system message + (in fallback)
+# implicit influence only.
 def _competitor_clause(profile: dict) -> str:
     comps = [c.get("name") for c in (profile.get("competitors") or [])
              if isinstance(c, dict) and c.get("name")]
@@ -194,9 +220,8 @@ def _email(profile: dict, brief: dict | None, topic: str, target: str) -> dict:
              "text": f"{topic} — a faster way for {aud}"},
             {"kind": "body",
              "text": (f"Hi —\n\n{aud.title()} teams keep telling us {topic.lower()} "
-                      f"is the biggest drag on the week. {product} "
-                      f"changes that:{_voice_suffix(profile)} {value}"
-                      f"{_competitor_clause(profile)}.\n\n"
+                      f"is the biggest drag on the week. {product} changes "
+                      f"that — {value}{_competitor_clause(profile)}.\n\n"
                       f"Worth 15 minutes to see if it fits?")},
             {"kind": "cta", "text": _cta(profile)},
         ],
@@ -213,8 +238,7 @@ def _ad(profile: dict, brief: dict | None, topic: str, target: str) -> dict:
         "blocks": [
             {"kind": "headline", "text": f"{topic} without the busywork."},
             {"kind": "body",
-             "text": f"For {aud}: {value}{_voice_suffix(profile)}"
-                     f"{_competitor_clause(profile)}."},
+             "text": f"For {aud}: {value}{_competitor_clause(profile)}."},
             {"kind": "cta", "text": _cta(profile)},
         ],
         "metadata": {"topic": topic, "target": aud, "platform": "linkedin"},
@@ -229,8 +253,7 @@ def _social(profile: dict, brief: dict | None, topic: str, target: str) -> dict:
         "blocks": [
             {"kind": "body",
              "text": (f"{topic}: most teams treat this as inevitable. "
-                      f"It isn't. {value}{_competitor_clause(profile)}."
-                      f"{_voice_suffix(profile)}")},
+                      f"It isn't. {value}{_competitor_clause(profile)}.")},
             {"kind": "cta", "text": _cta(profile)},
         ],
         "metadata": {"topic": topic, "target": target or "professional network"},

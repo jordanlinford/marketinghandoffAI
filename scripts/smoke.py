@@ -922,9 +922,17 @@ def main() -> None:
             f"email blocks must be ordered (subject…cta); got {kinds}"
         body_text = " ".join(b.get("text", "") for b in blocks)
         # Onit's saved profile carries brand_voice="Plain, confident, no jargon."
-        # and competitors=[{"name":"SimpleLegal"}] — both must surface.
-        assert "Plain, confident, no jargon" in body_text, \
-            f"brand_voice not reflected in draft: {body_text!r}"
+        # and competitors=[{"name":"SimpleLegal"}]. NO-ECHO DISCIPLINE: the
+        # brand_voice string is GUIDANCE about HOW to write, NOT text to
+        # include in the body. Drafts that quote the brand_voice verbatim
+        # ("Tone: Plain, confident, no jargon.") fail the grader and look
+        # like a copy-pasted prompt template; we explicitly assert that
+        # discipline here. Competitors ARE content and SHOULD surface.
+        assert "Plain, confident, no jargon" not in body_text, \
+            f"brand_voice phrase must NOT echo verbatim into the body " \
+            f"(no-echo discipline): {body_text!r}"
+        assert "Tone:" not in body_text, \
+            f"the body must not carry a 'Tone:' instruction label: {body_text!r}"
         assert "SimpleLegal" in body_text, \
             f"competitors not reflected in draft: {body_text!r}"
         assert gen_art.status == "ready", \
@@ -935,8 +943,8 @@ def main() -> None:
         assert clean_proposals == [], \
             f"clean draft must NOT create a proposal, got {clean_proposals}"
         print(f"[OK] Content engine (1): {content_obj['content_type']} draft with "
-              f"{len(blocks)} ordered blocks, brand_voice + competitors reflected, "
-              f"cost=${gen_run.cost_usd:.4f}.")
+              f"{len(blocks)} ordered blocks, brand_voice NOT echoed verbatim, "
+              f"competitors reflected, cost=${gen_run.cost_usd:.4f}.")
 
         # (2) Gate routing.
         # guardrail + banned phrase → queue. Inject the banned phrase via the
@@ -2217,6 +2225,68 @@ def main() -> None:
         print(f"[OK] Document (10): content_engine run for SimpleLegal CLM "
               "reflects promoted positioning + value_props in the draft "
               "(north-star demo, mechanical form).")
+
+        # ---------------------------------------------------------------------
+        # No-echo discipline (regression guard) — explicit lockdown:
+        # generate a draft for a product whose brand_voice contains a
+        # distinctive marker. The marker MUST NOT appear in any block of
+        # the produced content. brand_voice is GUIDANCE for HOW to write,
+        # not text to include. This locks the discipline so a future prompt
+        # or template change can't silently regress the bug.
+        # ---------------------------------------------------------------------
+        # SimpleLegal inherits brand_voice from the org. We set a product-
+        # level override that carries the marker, so it lands in the
+        # resolver as the effective brand_voice for runs scoped to this
+        # product. (The override path through the resolver is already
+        # tested elsewhere; here we only assert echo behavior.)
+        TONE_MARKER = "TONE_MARKER_DO_NOT_ECHO_xyzzy42"
+        simplelegal.brand_voice_override = (
+            "Direct, confident, practitioner-first. " + TONE_MARKER)
+        db.commit()
+        try:
+            no_echo_run = Run(
+                org_id=onit.id, agent_registration_id=onit_content_reg.id,
+                agent_key="content_engine", trigger="manual",
+                status="queued", product_id=sl_id,
+                task={"action": "generate", "content_type": "email",
+                      "topic": "Cut weekly review overhead",
+                      "target": "GC"})
+            db.add(no_echo_run); db.commit(); db.refresh(no_echo_run)
+            enqueue(db, onit.id, "run_agent", {"run_id": no_echo_run.id})
+            assert run_once() is True, "no-echo run was not picked up"
+            db.refresh(no_echo_run)
+            assert no_echo_run.status == "succeeded", \
+                f"no-echo run failed: {no_echo_run.error}"
+            no_echo_art = db.execute(
+                scoped(Artifact, onit.id)
+                .where(Artifact.run_id == no_echo_run.id,
+                       Artifact.type == "content_draft")
+            ).scalar_one()
+            for block in no_echo_art.body["content"]["blocks"]:
+                btext = block.get("text") or ""
+                assert TONE_MARKER not in btext, \
+                    f"NO-ECHO BREACH: brand_voice marker leaked into a " \
+                    f"{block.get('kind')!r} block: {btext!r}"
+            # Defense-in-depth: also assert no "Tone:" label and no other
+            # obvious instruction-shape ("brand_voice", "value_prop") in
+            # the body text.
+            joined = " ".join(b.get("text", "")
+                              for b in no_echo_art.body["content"]["blocks"])
+            for forbidden in ("Tone:", "brand_voice", "value_prop:",
+                              "banned_claims", "positioning:"):
+                assert forbidden not in joined, \
+                    f"NO-ECHO BREACH: instruction label {forbidden!r} " \
+                    f"leaked into body: {joined!r}"
+        finally:
+            # Revert the override so any later assertions about default
+            # inheritance behavior aren't disturbed (we're at end of smoke,
+            # but explicit cleanup keeps this test independent).
+            db.refresh(simplelegal)
+            simplelegal.brand_voice_override = None
+            db.commit()
+        print(f"[OK] No-echo discipline: brand_voice marker "
+              f"{TONE_MARKER!r} did NOT leak into any block; no "
+              "instruction labels (Tone:, brand_voice, etc.) in body.")
 
         print("[OK] Smoke test passed.")
     finally:

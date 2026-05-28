@@ -186,6 +186,8 @@ def list_assets(
     product_id: str | None = Query(None),
     asset_kind: str | None = Query(None),
     asset_type: str | None = Query(None),
+    asset_type_prefix: str | None = Query(
+        None, description="prefix match on content_type (e.g. 'report_')"),
     status: str | None = Query(None),
     campaign: str | None = Query(None),
     date_from: str | None = Query(None),
@@ -241,6 +243,11 @@ def list_assets(
                         .get("content_type", "") != asset_type \
                         and asset_type != a.type:
                     continue
+                if asset_type_prefix:
+                    ct = (a.body or {}).get("content", {}) \
+                        .get("content_type", "") or ""
+                    if not ct.startswith(asset_type_prefix):
+                        continue
                 run_ids.add(a.run_id)
                 projected.append(("__content__", a))
             elif a.type == _BRIEF_TYPE:

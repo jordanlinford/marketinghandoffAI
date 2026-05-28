@@ -105,6 +105,11 @@ class AgentContext:
     # prior_artifacts + guardrail_rules. Empty list = no telemetry yet
     # (backwards compat: agents behave exactly as they always have).
     memory_patterns: list[dict[str, Any]] = field(default_factory=list)
+    # Pre-computed ReportIntelligence object for report_composer runs.
+    # Like memory_patterns, this is loaded by the worker (which has the
+    # db session) and handed to the agent — agents never touch the DB.
+    # None for non-report runs.
+    report_intelligence: dict[str, Any] | None = None
     get_market_data: Callable[[], Any] | None = None
     log: Callable[[str], None] = lambda msg: None
 

@@ -177,6 +177,24 @@ def process_run(db: Session, run: Run) -> None:
         campaign_type=(task.get("campaign_type") if isinstance(task, dict) else None),
         content_type=(task.get("content_type") if isinstance(task, dict) else None),
     )
+    # Reports are the only agent that needs a pre-computed intelligence
+    # object on ctx (same chassis contract as memory_patterns — the agent
+    # never queries the DB). Only fire the engine for report_composer
+    # runs so we don't waste a query on every market_intel/content_engine
+    # tick.
+    report_intelligence = None
+    if run.agent_key == "report_composer" and isinstance(task, dict):
+        from app.reports import build_report_intelligence  # local import
+        scope = task.get("scope") or {}
+        try:
+            report_intelligence = build_report_intelligence(
+                db, run.org_id, product_id=run.product_id, scope=scope,
+                lookback_days=int(task.get("lookback_days") or 30))
+        except Exception as exc:
+            # Don't take down the worker on a bad scope — let the agent
+            # see the empty intelligence and raise a meaningful error.
+            logs.append(f"report intelligence engine raised: {exc!r}")
+            report_intelligence = None
     ctx = AgentContext(
         org_id=run.org_id,
         org_name=org_name,
@@ -202,6 +220,7 @@ def process_run(db: Session, run: Run) -> None:
         ) if a],
         guardrail_rules=rules_by_scope,
         memory_patterns=memory_patterns,
+        report_intelligence=report_intelligence,
         get_market_data=lambda: _resolve_market_data(db, run.org_id, run.upload_id),
         log=logs.append,
     )

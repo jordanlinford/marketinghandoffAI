@@ -69,6 +69,20 @@ def main() -> None:
             db.commit()
             print("Registered content_engine agent for Onit")
 
+        report_reg = db.execute(
+            select(AgentRegistration).where(
+                AgentRegistration.org_id == org.id,
+                AgentRegistration.key == "report_composer")
+        ).scalar_one_or_none()
+        if report_reg is None:
+            db.add(AgentRegistration(
+                org_id=org.id, key="report_composer", display_name="Report composer",
+                kind="builtin", enabled=True, schedule_cron=None,
+                config={},  # storytelling layer; reads from substrate + memory
+            ))
+            db.commit()
+            print("Registered report_composer agent for Onit")
+
         # Default guardrail rules. "content" stays here as the SCOPE shell;
         # OrgProfile.banned_claims is merged in at worker time so the profile
         # remains the single source of truth for which phrases trip the rule.

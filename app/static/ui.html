@@ -623,6 +623,57 @@
       </div>
       <div id="dash-memory"></div>
     </div>
+    <div class="section">
+      <h3>Reports</h3>
+      <div class="setup-status" style="margin-bottom:6px;">
+        The storytelling layer — turn the substrate + memory + production
+        lane into a narrative readout. Pick an audience (Board / CEO weekly /
+        Sales leadership) and a scope; preview the structured intelligence
+        the report will be based on before generating; the rendered report
+        lands in the Library alongside content, routes through the same
+        approval gate, and is regenerable via "give me something better."
+      </div>
+      <div class="setup-paths" style="margin-bottom:10px;">
+        <div class="setup-path">
+          <h4>Compose</h4>
+          <div class="row" style="gap:6px; flex-wrap:wrap;">
+            <select id="rpt-audience">
+              <option value="board">Board update</option>
+              <option value="ceo_weekly">CEO weekly digest</option>
+              <option value="sales_leadership">Sales leadership update</option>
+            </select>
+            <select id="rpt-scope-kind">
+              <option value="time_window">Time window</option>
+              <option value="campaign">Campaign</option>
+            </select>
+          </div>
+          <div class="row" style="gap:6px; margin-top:6px;" id="rpt-time-row">
+            <input type="date" id="rpt-start" />
+            <input type="date" id="rpt-end" />
+          </div>
+          <div class="row" style="gap:6px; margin-top:6px; display:none;" id="rpt-camp-row">
+            <select id="rpt-campaign-id"><option value="">— pick a campaign —</option></select>
+          </div>
+          <div class="row" style="gap:6px; margin-top:6px;">
+            <button id="rpt-preview-btn" class="ghost">Preview intelligence</button>
+            <button id="rpt-generate-btn">Generate report</button>
+          </div>
+          <div id="rpt-compose-status" class="setup-status"
+               style="margin-top:6px;"></div>
+        </div>
+        <div class="setup-path">
+          <h4>What this is</h4>
+          <p>Three audiences, ONE intelligence engine. The same data renders
+             three different ways — defensive for the board, signal-dense for
+             the CEO, collaborative for sales — because what they need is
+             different. Thin patterns surface as "watching"; untagged
+             volume is funnel backdrop only, never quoted as marketing action.</p>
+        </div>
+      </div>
+      <div id="rpt-intelligence-preview" style="margin-bottom:10px;"></div>
+      <h4 style="margin:8px 0;">Recent reports</h4>
+      <div id="rpt-list"></div>
+    </div>
   </section>
 </main>
 
@@ -1384,8 +1435,212 @@ async function regenerateDraft(parentArtifactId, critique) {
 // actually connected. Same chassis as csv vs csv+intent.
 
 async function loadDashboard() {
-  await Promise.all([loadFunnel(), loadSuggestions(), loadMemory()]);
+  await Promise.all([loadFunnel(), loadSuggestions(), loadMemory(), loadReports()]);
 }
+
+// "Reports" — list of generated reports for the org, scoped by product.
+async function loadReports() {
+  const root = document.getElementById('rpt-list');
+  if (!root) return;
+  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  const qs = state.selectedProductId
+    ? `?product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+  let rows;
+  try { rows = await api('/api/reports' + qs); }
+  catch (e) {
+    root.innerHTML = `<div class="err">Couldn't load reports: ${e.message}</div>`;
+    return;
+  }
+  await _populateReportCampaignPicker();
+  root.innerHTML = '';
+  if (!rows.length) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No reports yet'),
+      el('div', {}, 'Compose one above — Board, CEO weekly, or Sales leadership.')));
+    return;
+  }
+  const list = el('div', { style: 'display:flex; flex-direction:column; gap:6px;' });
+  for (const r of rows) {
+    const grade = r.grade != null ? ` · grade ${r.grade}` : '';
+    const strat = r.render_strategy ? ` · ${r.render_strategy}` : '';
+    const scopeSummary = r.scope && r.scope.kind === 'campaign'
+      ? `campaign=${r.scope.campaign_name || r.scope.campaign_id || '?'}`
+      : `${(r.scope && r.scope.start) || '?'} → ${(r.scope && r.scope.end) || '?'}`;
+    const card = el('div', { class: 'panel',
+      style: 'padding:10px; min-width:0; overflow-wrap:anywhere;' },
+      el('div', { class: 'row', style: 'margin-bottom:4px;' },
+        el('strong', {}, r.title || '(untitled report)'),
+        el('span', { class: 'badge ' + (r.status === 'ready' ? 'succeeded' : 'pending') },
+          r.status)),
+      el('div', { class: 'sub',
+        style: 'color:var(--muted); font-size:12px;' },
+        `${r.audience} · ${scopeSummary}${grade}${strat}`),
+      el('div', { class: 'row', style: 'margin-top:6px; gap:6px;' },
+        el('a', { href: `/api/assets/content/${r.id}/download?format=md`,
+                  target: '_blank' }, 'Download .md'),
+        el('a', { onclick: () => openReportDetail(r.id) }, 'Open →')),
+    );
+    list.appendChild(card);
+  }
+  root.appendChild(list);
+}
+
+async function _populateReportCampaignPicker() {
+  const sel = document.getElementById('rpt-campaign-id');
+  if (!sel) return;
+  // Populate once per load; clear stale options.
+  let camps;
+  try { camps = await api('/api/campaigns'); } catch (e) { return; }
+  sel.innerHTML = '<option value="">— pick a campaign —</option>';
+  for (const c of camps || []) {
+    const o = document.createElement('option');
+    o.value = c.id;
+    o.textContent = `${c.name} (${c.status})`;
+    sel.appendChild(o);
+  }
+}
+
+function _readReportScope() {
+  const kind = document.getElementById('rpt-scope-kind').value;
+  if (kind === 'campaign') {
+    const cid = document.getElementById('rpt-campaign-id').value;
+    if (!cid) throw new Error('Pick a campaign for the campaign scope.');
+    return { kind: 'campaign', campaign_id: cid };
+  }
+  const start = document.getElementById('rpt-start').value;
+  const end = document.getElementById('rpt-end').value;
+  return { kind: 'time_window', start: start || null, end: end || null };
+}
+
+async function previewReportIntelligence() {
+  const status = document.getElementById('rpt-compose-status');
+  const out = document.getElementById('rpt-intelligence-preview');
+  out.innerHTML = '';
+  status.textContent = 'Loading intelligence…';
+  try {
+    const scope = _readReportScope();
+    const body = {
+      scope,
+      product_id: state.selectedProductId || null,
+      lookback_days: 30,
+    };
+    const intel = await api('/api/reports/intelligence', {
+      method: 'POST', body: JSON.stringify(body) });
+    status.textContent = 'Intelligence preview loaded.';
+    const wrap = el('div', { class: 'panel',
+      style: 'padding:10px; min-width:0; overflow-wrap:anywhere;' });
+    const ps = intel.period_summary || {};
+    const attr = ps.attributed || {};
+    const back = ps.backdrop || {};
+    wrap.appendChild(el('h4', { style: 'margin:0 0 6px 0;' },
+      'Intelligence preview'));
+    wrap.appendChild(el('div', {},
+      `Attributed: ${attr.clicks || 0} clicks, ${attr.conversions || 0} conversions, `
+      + `rate ${(attr.conversion_rate != null
+        ? (attr.conversion_rate * 100).toFixed(1) + '%' : '—')}.`));
+    if ((back.data_points || 0) > 0) {
+      wrap.appendChild(el('div', { class: 'sub',
+        style: 'color:var(--muted); font-size:12px;' },
+        `Backdrop (untagged + baseline, excluded from attributed): `
+        + `${back.clicks || 0} clicks, ${back.conversions || 0} conversions, `
+        + `${back.data_points} row(s).`));
+    }
+    if ((intel.memory_highlights || []).length) {
+      wrap.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
+        `Memory highlights (${intel.memory_highlights.length})`));
+      for (const h of intel.memory_highlights.slice(0, 4)) {
+        wrap.appendChild(el('div', {}, '• ' + (h.observation || '')));
+      }
+    }
+    if ((intel.watching || []).length) {
+      wrap.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
+        `Watching — thin data (${intel.watching.length})`));
+      for (const w of intel.watching.slice(0, 3)) {
+        wrap.appendChild(el('div', { class: 'sub' },
+          '• ' + (w.observation || '')));
+      }
+    }
+    if ((intel.campaigns || []).length) {
+      wrap.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
+        `Campaigns in scope (${intel.campaigns.length})`));
+      for (const c of intel.campaigns.slice(0, 4)) {
+        wrap.appendChild(el('div', {},
+          `• ${c.name} (${c.status}) — `
+          + `${c.attributed.conversions || 0} attributed conv, `
+          + `${c.attributed.clicks || 0} clicks`));
+      }
+    }
+    if ((intel.honesty_notes || []).length) {
+      wrap.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
+        'Honesty notes'));
+      for (const n of intel.honesty_notes) {
+        wrap.appendChild(el('div', { class: 'sub' }, '• ' + n));
+      }
+    }
+    out.appendChild(wrap);
+  } catch (e) {
+    status.innerHTML = `<span class="err">Preview failed: ${e.message}</span>`;
+  }
+}
+
+async function generateReport() {
+  const status = document.getElementById('rpt-compose-status');
+  status.textContent = 'Enqueueing report…';
+  try {
+    const audience = document.getElementById('rpt-audience').value;
+    const scope = _readReportScope();
+    const body = {
+      audience, scope,
+      product_id: state.selectedProductId || null,
+      lookback_days: 30,
+    };
+    const r = await api('/api/reports/generate', {
+      method: 'POST', body: JSON.stringify(body) });
+    status.textContent = `Queued as run ${r.run_id.slice(0,8)}… — polling.`;
+    // Poll the report list until the run lands (rough; 30s budget).
+    for (let i = 0; i < 30; i++) {
+      await new Promise((res) => setTimeout(res, 1000));
+      try {
+        const rows = await api('/api/reports');
+        const found = (rows || []).find(x => (x.audience === audience));
+        if (found) {
+          status.textContent = `Report ready: ${found.title}`;
+          await loadReports();
+          return;
+        }
+      } catch (e) { /* keep polling */ }
+    }
+    status.textContent = 'Report did not land within 30s — refresh the list.';
+    await loadReports();
+  } catch (e) {
+    status.innerHTML = `<span class="err">Generate failed: ${e.message}</span>`;
+  }
+}
+
+async function openReportDetail(artifactId) {
+  // Reuse the library detail rendering — reports are content_draft assets.
+  // The library asset detail handles markdown + grade + regenerate.
+  switchView('library');
+  // Defer slightly so the library view loads before we ask it to open.
+  setTimeout(() => {
+    if (window.openLibraryDetail) window.openLibraryDetail(artifactId, 'content');
+  }, 200);
+}
+
+document.addEventListener('change', (ev) => {
+  if (ev.target && ev.target.id === 'rpt-scope-kind') {
+    const k = ev.target.value;
+    document.getElementById('rpt-time-row').style.display =
+      k === 'time_window' ? '' : 'none';
+    document.getElementById('rpt-camp-row').style.display =
+      k === 'campaign' ? '' : 'none';
+  }
+});
+document.addEventListener('click', (ev) => {
+  if (!ev.target) return;
+  if (ev.target.id === 'rpt-preview-btn') previewReportIntelligence();
+  if (ev.target.id === 'rpt-generate-btn') generateReport();
+});
 
 // "What the system has learned" — calls GET /api/memory with the current
 // product scope. Renders each pattern as evidence-first prose (observation

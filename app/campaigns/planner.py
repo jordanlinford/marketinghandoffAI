@@ -161,117 +161,162 @@ def recommend_channels(campaign_type: str,
     """Best-practice channel mix, reordered by the org's own historical
     performance when the data supports it.
 
-    `performance_context` is the list of patterns returned by
-    `app.memory.query_memory()`. With NO patterns (empty list, None, or
-    nothing above `insufficient`), we fall through to the deterministic
-    v1 best-practice mix and say so. When at-least-`low`-confidence
-    channel patterns exist, the mix is reordered by observed conversion
-    rate and the rationale for each reordered channel CITES the
-    metric_basis (clicks, conversions, rate, sample size). `insufficient`
-    patterns are NEVER allowed to reorder — they're informational.
+    Confidence-tier gating (the anti-overclaim discipline — same rule the
+    observations layer enforces, applied to recommendations):
 
-    Backwards compat: the legacy `dict | None` shape is still accepted
-    so older callers don't break; only the `list` shape is treated as
-    memory patterns.
+      * `high` + observed rate → primary.
+      * `moderate` + observed rate (or conversion volume) → primary.
+      * `moderate` with neither → secondary.
+      * `low` → CAPPED at "watching." Never reorders defaults.
+      * `insufficient` → CAPPED at "watching." Never reorders defaults.
+
+    When memory IS informing the mix, best-practice channels with NO
+    data of their own fall back to "support" (we have no evidence they
+    work for THIS org — keeping them at primary would silently inherit
+    a finding we don't have). User-picked channels without data are
+    bumped to "secondary" to honor the explicit pick. When NO memory
+    above 'insufficient' exists at all, the deterministic v1 best-
+    practice ordering is preserved (full backwards compat).
+
+    `performance_context` is the list of patterns returned by
+    `app.memory.query_memory()`. The legacy `dict | None` shape is
+    still accepted for older callers.
 
     Returns:
       {"recommended_channels": [...],
        "channel_mix": [{channel, weight, rationale}, ...],
        "rationale": "<one-line summary>",
-       "memory_evidence": [...],   # the patterns that drove reorder, when
-                                   # applicable; empty list otherwise
+       "memory_evidence": [...],   # every channel pattern surfaced,
+                                   # including watching/insufficient
        "memory_status": "best_practice" | "memory_informed"}
     """
     ctype = (campaign_type or "other").lower()
-    weights = dict(_TYPE_CHANNEL_WEIGHTS.get(ctype, _TYPE_CHANNEL_WEIGHTS["other"]))
-    selected = [c.lower() for c in (selected_channels or []) if c]
-    for c in selected:
-        weights.setdefault(c, "secondary")
+    type_weights = dict(_TYPE_CHANNEL_WEIGHTS.get(
+        ctype, _TYPE_CHANNEL_WEIGHTS["other"]))
+    selected = {c.lower() for c in (selected_channels or []) if c}
 
-    # Pull the channel-only patterns out of performance_context. We
-    # ignore everything that isn't `low`/`moderate`/`high`. `insufficient`
-    # patterns are kept in `memory_evidence` so the UI can show "watching
-    # this dimension" honestly without letting it move the mix.
-    channel_patterns: list[dict] = []
-    informational: list[dict] = []
+    # Index channel patterns from performance_context.
+    chan_patterns_by_key: dict[str, dict] = {}
     if isinstance(performance_context, list):
         for p in performance_context:
-            if p.get("dimension") != "channel":
-                continue
-            if p.get("confidence") in ("low", "moderate", "high"):
-                channel_patterns.append(p)
-            elif p.get("confidence") == "insufficient":
-                informational.append(p)
+            if p.get("dimension") == "channel":
+                chan_patterns_by_key[p["key"]] = p
 
-    memory_status = "best_practice"
+    # Memory is "informed" only when at least one channel pattern reaches
+    # moderate or high. Low and insufficient never tip the system into
+    # claiming a memory-driven recommendation — they're informational only.
+    actionable_keys = {k for k, p in chan_patterns_by_key.items()
+                       if p.get("confidence") in ("moderate", "high")}
+    memory_informed = bool(actionable_keys)
+
+    # Candidate channels: union of best-practice for the type, the user's
+    # explicit picks, and anything memory has even a thin pattern on.
+    channels = (set(type_weights.keys()) | selected
+                | set(chan_patterns_by_key.keys()))
+
+    # Tier rank — used for both weight assignment and final sort.
+    _TIER_RANK = {"primary": 0, "secondary": 1, "support": 2, "watching": 3}
+
+    weights: dict[str, str] = {}
+    basis_by_channel: dict[str, dict] = {}
     memory_evidence: list[dict] = []
 
-    if channel_patterns:
-        # Reorder: any channel with an OBSERVED conversion rate beats
-        # the best-practice ordering. Strongest signal first. We DO NOT
-        # invent new channels — the mix is still drawn from
-        # _TYPE_CHANNEL_WEIGHTS + user-selected; memory only re-weights
-        # the existing slate.
-        memory_status = "memory_informed"
-        rate_by_channel: dict[str, float] = {}
-        basis_by_channel: dict[str, dict] = {}
-        for p in channel_patterns:
+    for chan in channels:
+        p = chan_patterns_by_key.get(chan)
+        if p:
+            conf = p.get("confidence")
             mb = p.get("metric_basis") or {}
-            rate = mb.get("conversion_rate")
-            if rate is None:
-                # No denominator — fall back to conversion volume as a
-                # weak signal so a channel with real conversions but
-                # missing click data still gets a nudge.
-                rate = (mb.get("conversions") or 0) / 1000.0
-            rate_by_channel[p["key"]] = rate
-            basis_by_channel[p["key"]] = mb
+            rate = mb.get("conversion_rate") or 0.0
+            conv_volume = mb.get("conversions") or 0
             memory_evidence.append({
-                "key": p["key"], "key_display": p.get("key_display") or p["key"],
+                "key": chan,
+                "key_display": p.get("key_display") or chan,
                 "observation": p.get("observation", ""),
                 "metric_basis": mb,
-                "confidence": p.get("confidence"),
+                "confidence": conf,
             })
-
-        # Promote channels that had a measurably-better rate than the
-        # best of their best-practice weight tier. We only PROMOTE — we
-        # never demote a best-practice primary based on a single low-
-        # confidence row, because the user picked primaries for a
-        # reason and our signal has to clear a bar before it overrides.
-        for chan, rate in rate_by_channel.items():
-            if chan in weights and weights[chan] == "primary":
-                continue  # already top of the heap
-            if rate > 0:
-                # If memory says this channel converts, bump it to
-                # primary. Best-practice primaries stay primary; this
-                # adds a *second* primary alongside the type defaults.
+            basis_by_channel[chan] = mb
+            if conf == "high":
                 weights[chan] = "primary"
+            elif conf == "moderate":
+                if rate > 0 or conv_volume > 0:
+                    weights[chan] = "primary"
+                else:
+                    weights[chan] = "secondary"
+            elif conf in ("low", "insufficient"):
+                # Confidence-tier gating: low + insufficient are capped
+                # at "watching" — they never reorder defaults to primary.
+                weights[chan] = "watching"
+            else:
+                # Unknown confidence — be conservative.
+                weights[chan] = "support"
+        else:
+            # No memory data for this channel.
+            bp_w = type_weights.get(chan)
+            if memory_informed:
+                # When memory IS shaping the mix, channels without their
+                # own data cannot be silently retained at primary — we
+                # have no evidence they work for THIS org. Fall back to
+                # "support" so they appear in the recommendation list
+                # framed honestly rather than being silently dropped.
+                weights[chan] = "support"
+            else:
+                # No memory at all → pure best-practice ordering.
+                weights[chan] = bp_w or "support"
+
+    # User-explicit picks: bump from "support" to "secondary" so the
+    # user's intent is visible. NEVER override a watching cap (thin-data
+    # channels stay capped even when picked — picking a channel doesn't
+    # generate evidence) and NEVER demote a memory-determined tier.
+    for chan in selected:
+        cur = weights.get(chan, "support")
+        if cur == "watching":
+            continue  # confidence cap wins over user pick
+        if chan in chan_patterns_by_key:
+            continue  # memory tier is authoritative
+        if _TIER_RANK[cur] > _TIER_RANK["secondary"]:
+            weights[chan] = "secondary"
 
     mix = [{"channel": c, "weight": w,
             "rationale": _channel_rationale_with_memory(
-                c, ctype, primary_cta, basis=(
-                    basis_by_channel.get(c) if memory_status == "memory_informed"
-                    else None))}
+                c, ctype, primary_cta,
+                basis=basis_by_channel.get(c),
+                confidence=(chan_patterns_by_key.get(c) or {}).get("confidence"),
+                memory_informed=memory_informed,
+                user_selected=(c in selected),
+            )}
            for c, w in weights.items()]
-    # Sort: primaries first, then memory-promoted channels by observed
-    # rate within the primary tier; secondary; support. Deterministic.
-    _W = {"primary": 0, "secondary": 1, "support": 2}
-    if memory_status == "memory_informed":
-        rate_by_channel_local = {p["key"]: (p.get("metric_basis") or {}).get(
-            "conversion_rate") or 0.0 for p in channel_patterns}
-        mix.sort(key=lambda m: (
-            _W.get(m["weight"], 99),
-            -(rate_by_channel_local.get(m["channel"]) or 0.0),
-            m["channel"],
-        ))
-    else:
-        mix.sort(key=lambda m: (_W.get(m["weight"], 99), m["channel"]))
+    # Sort: primary → secondary → support → watching. Within a tier,
+    # higher observed conversion rate first, then alphabetical for
+    # determinism.
+    mix.sort(key=lambda m: (
+        _TIER_RANK.get(m["weight"], 99),
+        -((basis_by_channel.get(m["channel"]) or {}).get("conversion_rate") or 0.0),
+        m["channel"],
+    ))
 
-    if memory_status == "memory_informed":
-        rationale = (
+    informational = [p for p in chan_patterns_by_key.values()
+                     if p.get("confidence") in ("low", "insufficient")]
+
+    if memory_informed:
+        watching_keys = [m["channel"] for m in mix if m["weight"] == "watching"]
+        support_keys = [m["channel"] for m in mix if m["weight"] == "support"]
+        bits = [
             f"{ctype.replace('_', ' ').title()} mix reordered by your own "
-            f"performance history — channels with observed conversion "
-            f"data were promoted (see memory_evidence for the 'because')."
-        )
+            f"performance history — channels with observed conversion data "
+            f"were promoted (see memory_evidence for the 'because')."
+        ]
+        if support_keys:
+            bits.append(
+                f"No performance history yet for "
+                f"{', '.join(support_keys[:3])} — kept in the mix at "
+                f"'support' rather than recommended.")
+        if watching_keys:
+            bits.append(
+                f"Watching: {', '.join(watching_keys[:3])} — not enough "
+                f"data yet to call a pattern, never recommended at "
+                f"primary.")
+        rationale = " ".join(bits)
     else:
         suffix = ""
         if informational:
@@ -285,6 +330,8 @@ def recommend_channels(campaign_type: str,
             f"No performance history above the 'insufficient' threshold "
             f"for this combination yet.{suffix}")
 
+    memory_status = "memory_informed" if memory_informed else "best_practice"
+
     return {
         "recommended_channels": [m["channel"] for m in mix],
         "channel_mix": mix,
@@ -295,24 +342,42 @@ def recommend_channels(campaign_type: str,
 
 
 def _channel_rationale_with_memory(channel: str, campaign_type: str,
-                                   primary_cta: str,
-                                   basis: dict | None = None) -> str:
+                                   primary_cta: str, *,
+                                   basis: dict | None = None,
+                                   confidence: str | None = None,
+                                   memory_informed: bool = False,
+                                   user_selected: bool = False) -> str:
     base = _channel_rationale(channel, campaign_type, primary_cta)
-    if not basis:
-        return base
-    # Always cite the numbers when memory informed the slot. Past tense.
-    rate = basis.get("conversion_rate")
-    clicks = basis.get("clicks") or 0
-    convs = basis.get("conversions") or 0
-    n = basis.get("data_points") or 0
-    if rate is not None and clicks:
-        return (f"{base} Memory: {rate * 100:.1f} conv/100 clicks "
-                f"({clicks:g} clicks, {convs:g} conversions across "
-                f"{n} data points).")
-    if convs:
-        return (f"{base} Memory: {convs:g} conversion"
-                f"{'s' if convs != 1 else ''} attributed across "
-                f"{n} data points (no click denominator).")
+    n = (basis or {}).get("data_points") if basis else None
+    if confidence == "insufficient":
+        return (f"Watching: only {n if n else 'a few'} data point"
+                f"{'s' if (n or 0) != 1 else ''} so far for {channel} — "
+                f"not enough yet to recommend as a primary channel.")
+    if confidence == "low":
+        return (f"Watching: only {n if n else 'a few'} data points so far "
+                f"for {channel} — not enough yet to call it a "
+                f"recommendation.")
+    if confidence in ("moderate", "high") and basis:
+        rate = basis.get("conversion_rate")
+        clicks = basis.get("clicks") or 0
+        convs = basis.get("conversions") or 0
+        if rate is not None and clicks:
+            return (f"{base} Memory: {rate * 100:.1f} conv/100 clicks "
+                    f"({clicks:g} clicks, {convs:g} conversions across "
+                    f"{n or 0} data points).")
+        if convs:
+            return (f"{base} Memory: {convs:g} conversion"
+                    f"{'s' if convs != 1 else ''} attributed across "
+                    f"{n or 0} data points (no click denominator).")
+    if memory_informed and basis is None:
+        # Best-practice fallback when memory is otherwise speaking. Be
+        # honest about it: this channel is kept in the mix, but at
+        # "support" tier — we don't claim it works without evidence.
+        tier_note = ("kept at 'secondary' because you picked it"
+                     if user_selected
+                     else "kept at 'support' until data confirms it")
+        return (f"{base} No performance history yet for {channel} in "
+                f"your data — {tier_note}.")
     return base
 
 

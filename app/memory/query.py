@@ -164,9 +164,13 @@ def _observation_thick(dimension: str, key_display: str, agg: dict) -> str:
 
 
 def _observation_thin(key_display: str, n: int) -> str:
-    # Honest thin-data framing. Reads as "watching" — never as a finding.
+    # Honest thin-data framing — used for BOTH `insufficient` and `low`
+    # confidence patterns. Reads as "watching," never as a finding.
     # The forbidden shape (per brief) is e.g. "LinkedIn: 0.7 effectiveness
-    # (low confidence)" — that reads as a finding with a small number.
+    # (low confidence)" or "Reddit drove 1.4 conv/100 clicks" with a LOW
+    # badge — both read as findings with small numbers attached. The
+    # numbers stay in metric_basis for the inspectable detail; the
+    # user-facing one-liner defers rather than quantifies.
     return (
         f"Only {n} data point{'s' if n != 1 else ''} so far for "
         f"{key_display} — not enough to call a pattern yet. Watching "
@@ -273,6 +277,15 @@ def query_memory(db: Session, org_id: str, *,
             # judge channel performance. Including them would inflate
             # the denominator and wash out the actual signal.
             continue
+        if not (mp.utm_campaign or "").strip():
+            # Untagged rows are the same kind of backdrop as baselines:
+            # they have NO campaign attribution, so they cannot honestly
+            # claim "this channel worked for this audience for this CTA."
+            # The dashboard already keeps them out of the attributed
+            # view (baseline-vs-attributed discipline); memory extends
+            # the same rule. They remain visible in the funnel; they do
+            # NOT generate confidence scores or actionable patterns.
+            continue
         w = _recency_weight(mp.date, today, lookback_days)
         chan = (mp.utm_source or "").lower()
         ctype = (mp.utm_medium or "").lower()
@@ -321,7 +334,7 @@ def query_memory(db: Session, org_id: str, *,
             "key": chan,
             "key_display": display,
             "observation": (_observation_thin(display, n)
-                            if conf == "insufficient"
+                            if conf in ("insufficient", "low")
                             else _observation_thick("channel", display, agg)),
             "metric_basis": {
                 "channel": chan,
@@ -354,7 +367,7 @@ def query_memory(db: Session, org_id: str, *,
             "key": f"{chan}|{pers}",
             "key_display": key_display,
             "observation": (_observation_thin(key_display, n)
-                            if conf == "insufficient"
+                            if conf in ("insufficient", "low")
                             else _observation_thick("channel x audience",
                                                     key_display, agg)),
             "metric_basis": {
@@ -387,7 +400,7 @@ def query_memory(db: Session, org_id: str, *,
             "key": ctype,
             "key_display": display,
             "observation": (_observation_thin(display, n)
-                            if conf == "insufficient"
+                            if conf in ("insufficient", "low")
                             else _observation_thick("content_type", display, agg)),
             "metric_basis": {
                 "content_type": ctype,
@@ -419,7 +432,7 @@ def query_memory(db: Session, org_id: str, *,
             "key": ctk,
             "key_display": display,
             "observation": (_observation_thin(display, n)
-                            if conf == "insufficient"
+                            if conf in ("insufficient", "low")
                             else _observation_thick("campaign_type", display, agg)),
             "metric_basis": {
                 "campaign_type": ctk,

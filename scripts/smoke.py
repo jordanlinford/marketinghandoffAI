@@ -3292,6 +3292,25 @@ def main() -> None:
         # entirely or the conversion-rate denominator would be inflated.
         _mp("clicks", 9999, 1, utm_source="linkedin", utm_medium="social_post",
             is_baseline=True)
+        # Reddit — 4 rows (3 ≤ n < 10) → low confidence. The planner's
+        # tier gate MUST cap this at "watching" — it must NEVER be
+        # weighted "primary" in channel_mix, even when the observed
+        # rate is non-zero.
+        for i in range(2):
+            _mp("clicks", 50, i, utm_source="reddit", utm_medium="ad")
+            _mp("conversions", 1, i, utm_source="reddit", utm_medium="ad")
+        # Organic — 10 rows with utm_source set but NO utm_campaign.
+        # These are the "untagged backdrop" the dashboard already keeps
+        # out of the attributed view; memory must apply the SAME
+        # discipline. Without the Bug 1 fix, these would have inflated
+        # organic into a moderate-confidence pattern (n=10, positive
+        # rate) and the planner would have surfaced it as a recommended
+        # channel — a false finding from untagged data.
+        for i in range(5):
+            _mp("clicks", 100, i, utm_source="organic",
+                utm_medium="blog_outline", utm_campaign=None)
+            _mp("conversions", 8, i, utm_source="organic",
+                utm_medium="blog_outline", utm_campaign=None)
         # Acme metric points — should NEVER appear in Onit's memory.
         _mp("conversions", 100, 1, utm_source="linkedin", utm_medium="social_post",
             org=acme_org.id, product=None)
@@ -3299,12 +3318,17 @@ def main() -> None:
 
         # (1) Retrieval + weighting. Patterns come back, channel buckets
         # rank by confidence then sample size + rate. LinkedIn beats
-        # email; google is at the bottom (insufficient).
+        # email; google is at the bottom (insufficient). Reddit is in
+        # the middle (low). Organic is NOT here at all — untagged rows
+        # are excluded from pattern computation (Bug 1 discipline).
         patterns = _query_memory(db, onit.id, product_id=sl_id)
         chans = [p for p in patterns if p["dimension"] == "channel"]
         chan_keys = [p["key"] for p in chans]
         assert "linkedin" in chan_keys and "email" in chan_keys and "google" in chan_keys, \
             f"expected linkedin/email/google in channel patterns, got {chan_keys}"
+        assert "organic" not in chan_keys, \
+            f"untagged organic must NOT generate a channel pattern; got " \
+            f"{chan_keys}"
         # LinkedIn comes first (moderate, fresh, higher rate); google last
         # (insufficient sinks to the end no matter what).
         assert chan_keys[0] == "linkedin", \
@@ -3328,6 +3352,10 @@ def main() -> None:
         # (2) Honest confidence framing — thin data is "watching", not a
         # finding with a small number. Forbidden shape (per brief):
         # "<key>: 0.x effectiveness (low confidence)" — must NOT appear.
+        # The deferring discipline applies to BOTH insufficient AND low
+        # confidence: a LOW pattern (3 ≤ n < 10) must also defer, not
+        # quote a rate. Numbers stay in metric_basis for inspection; the
+        # one-liner reads "Watching."
         google = next(p for p in chans if p["key"] == "google")
         assert google["confidence"] == "insufficient", \
             f"google has 2 points; must be insufficient, got {google['confidence']}"
@@ -3336,6 +3364,21 @@ def main() -> None:
             f"{google['observation']!r}"
         assert "effectiveness" not in google["observation"].lower(), \
             "forbidden small-number framing leaked: " + google["observation"]
+        # Bug 3: low-confidence observations defer just like insufficient.
+        reddit = next(p for p in chans if p["key"] == "reddit")
+        assert reddit["confidence"] == "low", \
+            f"reddit has 4 points; must be low, got {reddit['confidence']}"
+        assert "not enough" in reddit["observation"].lower(), \
+            f"LOW-confidence observation must defer like insufficient; got " \
+            f"{reddit['observation']!r}"
+        assert "per 100 clicks" not in reddit["observation"].lower(), (
+            "Bug 3 regression: low-confidence observation MUST NOT quote a "
+            "rate (reads as a finding with a small number). Numbers belong "
+            "in metric_basis for inspection. Got: " + reddit["observation"])
+        # The numbers ARE still in metric_basis so the inspectable detail
+        # works — only the user-facing one-liner defers.
+        assert reddit["metric_basis"]["clicks"] > 0, reddit["metric_basis"]
+        assert reddit["metric_basis"]["conversions"] > 0, reddit["metric_basis"]
         # Well-supported pattern reads as a finding with metric_basis.
         assert li["confidence"] in ("moderate", "high"), li["confidence"]
         assert li["metric_basis"]["conversion_rate"] is not None
@@ -3344,11 +3387,11 @@ def main() -> None:
         # points is ALWAYS insufficient, regardless of how recent.
         c_thin, _ = _confidence_for(1, 0)
         assert c_thin == "insufficient", c_thin
-        print(f"[OK] Memory (2): honest confidence — google (n=2) framed as "
-              f"'not enough yet' (insufficient); linkedin (n="
-              f"{li['sample_size']}) is a finding with rate="
-              f"{li['metric_basis']['conversion_rate']:.3f} and metric_basis "
-              "intact.")
+        print(f"[OK] Memory (2): honest confidence — google (n=2, "
+              f"insufficient) AND reddit (n={reddit['sample_size']}, low) "
+              f"both framed as 'not enough yet' (no rate in the one-liner); "
+              f"linkedin (n={li['sample_size']}) is a finding with rate="
+              f"{li['metric_basis']['conversion_rate']:.3f}.")
 
         # (3) Campaign influence — propose's channel rec is reordered by
         # memory WITH evidence-citing rationale; insufficient data falls
@@ -3574,6 +3617,101 @@ def main() -> None:
               f"{data['summary']['actionable']} actionable + "
               f"{data['summary']['watching']} watching patterns with the full "
               f"shape; empty filter returns [] + zeroed summary.")
+
+        # (9) Bug 1 — untagged metric_points are EXCLUDED from channel /
+        # audience / content_type patterns and from the planner reorder.
+        # 10 untagged organic rows were seeded above with a positive
+        # conversion rate; without the fix, they would have produced a
+        # moderate-confidence organic pattern + a recommended channel
+        # in propose. This test pins the discipline.
+        chan_keys_now = {p["key"] for p in patterns
+                         if p["dimension"] == "channel"}
+        assert "organic" not in chan_keys_now, (
+            "Bug 1 regression: untagged organic rows produced a channel "
+            "pattern. Got channels: " + str(chan_keys_now))
+        # And content_type / audience buckets do not see them either.
+        ctype_keys = {p["key"] for p in patterns
+                      if p["dimension"] == "content_type"}
+        assert "blog_outline" not in ctype_keys, (
+            "Bug 1 regression: untagged content_type bucket leaked. Got "
+            "content_types: " + str(ctype_keys))
+        # Planner does NOT reorder organic into recommended_channels —
+        # the rec is built from best-practice + memory + user picks, and
+        # organic is not in demand_gen's best-practice. The smoke
+        # campaign seeded earlier picked ["linkedin", "email", "google"]
+        # (no organic). With organic excluded from memory, it cannot
+        # sneak in via the patterns route either.
+        rec_no_organic = planner_mod.recommend_channels(
+            "demand_gen", ["linkedin", "email", "google"], "book a demo",
+            performance_context=patterns)
+        assert "organic" not in rec_no_organic["recommended_channels"], (
+            "Bug 1 regression: untagged organic was recommended by the "
+            "planner. Got: " + str(rec_no_organic["recommended_channels"]))
+        assert all(e["key"] != "organic" for e in rec_no_organic["memory_evidence"]), (
+            "untagged organic must not appear in memory_evidence")
+        print(f"[OK] Memory (9): Bug 1 — untagged rows excluded from "
+              f"patterns AND from the planner reorder; organic absent "
+              f"from channel/content_type patterns, absent from "
+              f"recommended_channels ({rec_no_organic['recommended_channels']}), "
+              f"absent from memory_evidence.")
+
+        # (10) Bug 2 — confidence-tier gating in the planner.
+        # With linkedin (moderate), email (moderate), google (insufficient),
+        # reddit (low) in memory, the planner must:
+        #   * Promote linkedin + email to primary (moderate + rate).
+        #   * CAP reddit at "watching" — never primary, even though the
+        #     observed rate > 0. (This is the exact regression the live
+        #     UI showed: reddit was at primary with a confident citation.)
+        #   * CAP google at "watching" too (insufficient).
+        # Awareness campaign_type best-practice includes "organic" which
+        # has NO memory data after Bug 1's fix — assert it falls back to
+        # "support" rather than being silently dropped from the mix.
+        rec_aware = planner_mod.recommend_channels(
+            "awareness", [], "book a demo", performance_context=patterns)
+        weights_by = {m["channel"]: m["weight"] for m in rec_aware["channel_mix"]}
+        assert weights_by.get("linkedin") == "primary", weights_by
+        assert weights_by.get("reddit") == "watching", \
+            (f"Bug 2 regression: reddit (LOW) must be capped at "
+             f"'watching', got {weights_by.get('reddit')!r}; full: "
+             f"{weights_by}")
+        assert weights_by.get("google") == "watching", weights_by
+        assert weights_by.get("organic") == "support", (
+            "Bug 2: best-practice channel with NO memory data must fall "
+            "back to 'support' (visible, not dropped). Got: " + str(weights_by))
+        # Memory-informed rationale calls out watching + support honestly.
+        rat = rec_aware["rationale"].lower()
+        assert "watching" in rat, rec_aware["rationale"]
+        assert "support" in rat or "no performance history" in rat, \
+            rec_aware["rationale"]
+        # Per-channel rationale for reddit defers — does NOT quote a rate.
+        reddit_rat = next(m["rationale"] for m in rec_aware["channel_mix"]
+                          if m["channel"] == "reddit")
+        assert "per 100 clicks" not in reddit_rat.lower(), (
+            "Bug 2/3: reddit rationale must defer, not quote a rate. "
+            "Got: " + reddit_rat)
+        assert "watching" in reddit_rat.lower(), reddit_rat
+        # Tier-sort order: primaries before watching/support.
+        weight_order = [m["weight"] for m in rec_aware["channel_mix"]]
+        _TIER = {"primary": 0, "secondary": 1, "support": 2, "watching": 3}
+        assert weight_order == sorted(weight_order,
+                                       key=lambda w: _TIER.get(w, 99)), \
+            f"channel_mix must be sorted by tier; got {weight_order}"
+        # User-pick honoring on a no-data channel: meta isn't in awareness
+        # best-practice, has no memory; user-pick should bump it to
+        # secondary (not silently support).
+        rec_pick = planner_mod.recommend_channels(
+            "awareness", ["meta"], "book a demo", performance_context=patterns)
+        meta_weight = {m["channel"]: m["weight"] for m in rec_pick["channel_mix"]}
+        assert meta_weight.get("meta") == "secondary", (
+            "User-picked channel without memory data should be honored "
+            "at 'secondary'; got " + str(meta_weight.get("meta")))
+        print(f"[OK] Memory (10): Bug 2 — confidence-tier gating holds — "
+              f"linkedin={weights_by['linkedin']}, email={weights_by['email']}, "
+              f"reddit={weights_by['reddit']} (capped), "
+              f"google={weights_by['google']} (capped), "
+              f"organic={weights_by['organic']} (best-practice fallback, "
+              "not dropped); user-picked no-data channel honored at "
+              f"'secondary' ({meta_weight.get('meta')}).")
 
         print("[OK] Smoke test passed.")
     finally:

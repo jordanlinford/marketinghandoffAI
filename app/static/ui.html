@@ -3949,7 +3949,13 @@ function composeNextActions(products, docCounts, perProduct, runs, contentReview
 // ---- Boot ---------------------------------------------------------------
 async function refreshAll() {
   await loadMe();
-  await Promise.all([loadRuns(), loadProposals(), loadUploads(), loadProducts()]);
+  // Pre-warm state.profile alongside products/runs so the Organization
+  // view's badge renders 'confirmed' on first paint instead of flashing
+  // a blank badge + 'loading…' for the ~20ms it takes /api/profile to
+  // resolve. loadProfile catches internally so a failure here can't
+  // break the rest of boot.
+  await Promise.all([loadRuns(), loadProposals(), loadUploads(),
+                     loadProducts(), loadProfile()]);
   if (state.selectedRunId) await loadDetail(state.selectedRunId);
   // After everything loads, render the Command Center cards.
   if (state.currentView === 'home' || !state.currentView) loadCommandCenter();

@@ -118,6 +118,10 @@
   .badge.kind-content    { background: #1f3b6b; color: #c8dcff; }
   .badge.kind-document   { background: #3a2c14; color: #f0c97a; }
   .badge.kind-brief      { background: #2d1f3b; color: #d4c8ff; }
+  /* Library detail panel: clamp long content (tagged URLs especially)
+     so it can never scroll the rest of the page sideways. */
+  #lib-detail .panel { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+  #lib-detail code, #lib-detail pre { max-width: 100%; min-width: 0; }
   .detail-empty { color: var(--muted); padding: 40px 0; text-align: center; }
   .detail h1 { font-size: 18px; margin: 0 0 4px; }
   .detail .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
@@ -2160,10 +2164,27 @@ async function openAssetDetail(asset) {
 function _renderAssetDetail(asset, detail) {
   const wrap = el('section', { class: 'panel detail',
     style: 'margin-top:18px;' });
-  wrap.appendChild(el('h3', {},
+  const headerKids = [
     asset.title || '(untitled)',
     el('span', { class: `badge kind-${asset.asset_kind}`,
-      style: 'margin-left:8px;' }, asset.asset_kind)));
+      style: 'margin-left:8px;' }, asset.asset_kind),
+  ];
+  // Grade pill in the header for content assets — surfaces "78/100" or
+  // an honest "ungraded" so the user always sees the rubric verdict.
+  if (asset.asset_kind === 'content') {
+    const g = detail.grade;
+    const overall = (g && g.overall != null) ? g.overall : null;
+    const label = overall != null
+      ? `Grade ${overall}/100`
+      : (g && g.status === 'ungraded' ? `ungraded` : `not graded`);
+    const badgeCls = overall == null
+      ? 'pending'
+      : (overall >= 80 ? 'passed' : (overall >= 60 ? 'pending_review' : 'blocked'));
+    headerKids.push(el('span',
+      { class: `badge ${badgeCls}`, style: 'margin-left:8px;' },
+      label));
+  }
+  wrap.appendChild(el('h3', {}, ...headerKids));
   wrap.appendChild(el('div', { class: 'sub',
     style: 'color:var(--muted); font-size:12px; margin-bottom:10px;' },
     `${asset.asset_type || '—'} · ` +
@@ -2189,14 +2210,22 @@ function _renderContentDetailInto(wrap, asset, detail) {
       el('div', { style: 'white-space:pre-wrap;' }, b.text || ''),
     ));
   }
-  // Grade.
+  // Grade details (per-criterion + suggestions). The overall pill is
+  // in the header above; here we surface the breakdown when present.
   const grade = detail.grade;
-  if (grade && grade.overall != null) {
-    wrap.appendChild(el('div', { class: 'sub',
-      style: 'color:var(--muted); margin-top:8px;' },
-      `Grade ${grade.overall}/100 (advisory)`));
+  if (grade && (grade.per_criterion || []).length) {
+    const ul = el('ul', { class: 'recs', style: 'margin-top:6px;' });
+    for (const c of grade.per_criterion) {
+      const name = c.name || '';
+      const score = c.score != null ? c.score : '—';
+      ul.appendChild(el('li', {}, `${name} — ${score}/100 · ${c.reason || ''}`));
+    }
+    wrap.appendChild(ul);
   }
-  // UTMs + tagged URL.
+  // UTMs + tagged URL. The tagged URL is the one that consistently
+  // overflowed the panel — we wrap it in a flex row with a Copy button
+  // and constrain wrapping with overflow-wrap: anywhere so a single
+  // long URL never scrolls the parent panel sideways.
   const utmRow = [];
   if (detail.utm_campaign) utmRow.push(`campaign=${detail.utm_campaign}`);
   if (detail.utm_source) utmRow.push(`source=${detail.utm_source}`);
@@ -2204,14 +2233,29 @@ function _renderContentDetailInto(wrap, asset, detail) {
   if (detail.utm_content) utmRow.push(`content=${detail.utm_content}`);
   if (utmRow.length) {
     wrap.appendChild(el('div', { class: 'sub',
-      style: 'color:var(--muted); margin-top:4px;' },
+      style: 'color:var(--muted); margin-top:8px; ' +
+             'overflow-wrap: anywhere;' },
       'UTM: ' + utmRow.join(' · ')));
   }
   if (detail.tagged_url) {
-    wrap.appendChild(el('div', { class: 'sub',
-      style: 'color:var(--muted); font-family: ui-monospace, monospace; ' +
-             'word-break: break-all; margin-top:4px;' },
-      detail.tagged_url));
+    const urlRow = el('div', { style: 'display:flex; gap:8px; ' +
+      'margin-top:6px; align-items:flex-start; max-width:100%;' });
+    const urlCode = el('code',
+      { style: 'flex:1; min-width:0; background:#1f263a; padding:6px 8px; ' +
+               'border-radius:4px; font-family: ui-monospace, monospace; ' +
+               'font-size:12px; color:var(--muted); overflow-wrap: anywhere; ' +
+               'word-break: break-all; white-space: pre-wrap;' },
+      detail.tagged_url);
+    const copyUrlBtn = el('button', { class: 'ghost',
+      style: 'flex-shrink:0;' }, 'Copy URL');
+    copyUrlBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(detail.tagged_url).catch(() => {});
+      copyUrlBtn.textContent = 'Copied!';
+      setTimeout(() => { copyUrlBtn.textContent = 'Copy URL'; }, 1200);
+    });
+    urlRow.appendChild(urlCode);
+    urlRow.appendChild(copyUrlBtn);
+    wrap.appendChild(urlRow);
   }
   const composedText = blocks.map(b => b.text || '').join('\n\n');
   wrap.appendChild(_actionsRow(asset, {
@@ -2316,7 +2360,7 @@ function _actionsRow(asset, opts) {
   }
   // Regenerate (content + brief).
   if (opts.showRegenerate) {
-    const regenBtn = el('button', { class: 'approve' }, 'Regenerate from this');
+    const regenBtn = el('button', { class: 'approve' }, 'Use as basis (pre-fill Create)');
     regenBtn.addEventListener('click', () =>
       regenerateFromAsset(asset.asset_kind, asset.id));
     row.appendChild(regenBtn);
@@ -2364,15 +2408,60 @@ async function duplicateAsset(artifactId) {
 }
 
 async function regenerateFromAsset(kind, assetId) {
+  // PRE-FILL ONLY — we do NOT auto-fire the regenerate endpoint. The
+  // backend POST /api/assets/{kind}/{id}/regenerate still exists (smoke
+  // exercises it directly) but the UI gives the user a chance to review
+  // and tweak content_type / topic / target before spending the LLM call.
   try {
-    const r = await api(`/api/assets/${kind}/${assetId}/regenerate`,
-      { method: 'POST', body: JSON.stringify({}) });
-    // Hop to Create and select the new run so the user can watch it land.
+    const detail = await api(`/api/assets/${kind}/${assetId}`);
+    let content_type = 'email';
+    let topic = '';
+    let target = '';
+    if (kind === 'content') {
+      const content = (detail.body || {}).content || {};
+      const metadata = content.metadata || {};
+      content_type = content.content_type || 'email';
+      topic = metadata.topic || detail.title || '';
+      target = metadata.target || '';
+    } else if (kind === 'brief') {
+      const structured = (detail.body || {}).structured || {};
+      const recs = structured.recommendations || [];
+      content_type = 'email';
+      // Briefs don't have a content topic; lead with their first
+      // recommendation (same logic the backend regenerate endpoint uses).
+      topic = recs[0] || detail.title || '';
+      target = '';
+    }
+    // Match the source asset's product scope in the header selector so
+    // the run that the user fires from Create will use the right
+    // product layer.
+    state.selectedProductId = detail.product_id || '';
+    renderProductSelector();
     switchView('create');
-    await loadRuns();
-    if (r && r.id) selectRun(r.id);
+    // Set the form values AFTER switchView so the inputs are visible.
+    const typeEl = document.getElementById('content-type');
+    const topicEl = document.getElementById('content-topic');
+    const targetEl = document.getElementById('content-target');
+    if (typeEl) typeEl.value = content_type;
+    if (topicEl) topicEl.value = topic;
+    if (targetEl) targetEl.value = target;
+    // Status note: clear signal that the form is pre-filled, but the
+    // run isn't queued yet — user clicks Generate to spend the call.
+    const statusEl = document.getElementById('content-status');
+    if (statusEl) {
+      statusEl.innerHTML = '';
+      const note = el('div', {},
+        el('strong', {}, 'Pre-filled from: '),
+        ` ${detail.title || assetId}. `,
+        el('span', { class: 'sub',
+          style: 'color:var(--muted); font-size:12px;' },
+          'Adjust the form above and click Generate when ready.'));
+      statusEl.appendChild(note);
+    }
+    // Focus the topic field so an immediate edit is one keystroke away.
+    if (topicEl && topicEl.focus) topicEl.focus();
   } catch (e) {
-    alert(`Regenerate failed: ${e.message}`);
+    alert(`Pre-fill failed: ${e.message}`);
   }
 }
 

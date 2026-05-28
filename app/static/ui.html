@@ -113,6 +113,11 @@
   .badge.ready           { background: #143a26; color: #7ce0a3; }
   .badge.pending_review  { background: #3a2c14; color: #f0c97a; }
   .badge.rejected        { background: #4a1a1a; color: #ff9b9b; }
+  /* Library asset kinds — three visually distinct colors so the three
+     kinds don't blur together at a glance. */
+  .badge.kind-content    { background: #1f3b6b; color: #c8dcff; }
+  .badge.kind-document   { background: #3a2c14; color: #f0c97a; }
+  .badge.kind-brief      { background: #2d1f3b; color: #d4c8ff; }
   .detail-empty { color: var(--muted); padding: 40px 0; text-align: center; }
   .detail h1 { font-size: 18px; margin: 0 0 4px; }
   .detail .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
@@ -454,6 +459,11 @@
      visible but inactive." When Phase 3 ships, the same DOM hooks slot
      into the active build. -->
 <main id="campaigns-view" class="setup-main" style="display:none;">
+  <!-- Staged-asset banner: when an asset was routed here from the Library
+       via "Add to campaign", surface it so the user sees the wire actually
+       worked. Hidden when no asset is staged. -->
+  <div id="campaigns-staged" class="placeholder-banner"
+       style="display:none; background:#1f3b6b; border-color:var(--accent);"></div>
   <div class="placeholder-banner">
     <strong>Campaign Builder — coming next.</strong>
     This is where content becomes execution. Pick an approved asset,
@@ -2100,10 +2110,11 @@ async function fetchLibraryList() {
 }
 
 function _renderAssetCard(a) {
+  // Three distinct colors (CSS .badge.kind-content / -document / -brief)
+  // so the three kinds don't blur together at a glance — same generic
+  // 'succeeded' palette had been reused for both content + document.
   const kindBadge = el('span',
-    { class: 'badge ' +
-      ({content: 'succeeded', document: 'passed', brief: 'pending'}[a.asset_kind] || 'pending') },
-    a.asset_kind);
+    { class: `badge kind-${a.asset_kind}` }, a.asset_kind);
   const statusBadge = a.status
     ? el('span', { class: `badge ${a.status}` }, a.status)
     : null;
@@ -2151,7 +2162,7 @@ function _renderAssetDetail(asset, detail) {
     style: 'margin-top:18px;' });
   wrap.appendChild(el('h3', {},
     asset.title || '(untitled)',
-    el('span', { class: 'badge ' + (asset.asset_kind),
+    el('span', { class: `badge kind-${asset.asset_kind}`,
       style: 'margin-left:8px;' }, asset.asset_kind)));
   wrap.appendChild(el('div', { class: 'sub',
     style: 'color:var(--muted); font-size:12px; margin-bottom:10px;' },
@@ -2371,11 +2382,47 @@ async function routeToCampaign(kind, assetId) {
       { method: 'POST', body: JSON.stringify({}) });
     // Campaign Builder is a placeholder. We land there with the asset id
     // tucked into module-local state so the (future) builder can pick it up.
-    state.pendingCampaignAsset = { kind: r.asset_kind, id: r.asset_id };
+    // We also stash a friendly title so the staged banner can show it.
+    state.pendingCampaignAsset = {
+      kind: r.asset_kind, id: r.asset_id,
+      title: (await api(`/api/assets/${r.asset_kind}/${r.asset_id}`)).title
+        || r.asset_id,
+    };
     switchView('campaigns');
   } catch (e) {
     alert(`Route to campaign failed: ${e.message}`);
   }
+}
+
+// Render the "staged for Campaign Builder" banner — shown only when an
+// asset was routed here via "Add to campaign" in the Library. Makes the
+// wire visible: without it, the Add-to-campaign click looks like nothing
+// happened (the placeholder grid below is the same in both states).
+function renderCampaignsStaged() {
+  const el_ = document.getElementById('campaigns-staged');
+  if (!el_) return;
+  const pa = state.pendingCampaignAsset;
+  if (!pa) {
+    el_.style.display = 'none';
+    el_.innerHTML = '';
+    return;
+  }
+  el_.style.display = '';
+  el_.innerHTML = '';
+  el_.appendChild(el('strong', {}, 'Staged for Campaign Builder:'));
+  el_.appendChild(el('span', {}, ` ${pa.title} `));
+  el_.appendChild(el('span', { class: `badge kind-${pa.kind}`,
+    style: 'margin-left:4px;' }, pa.kind));
+  el_.appendChild(el('div', { style: 'margin-top:6px; font-size:12px;' },
+    'Campaign creation isn\'t built yet — but when it ships, this asset ' +
+    'will be the starting point. '));
+  const clearBtn = el('button', { class: 'ghost',
+    style: 'margin-top:6px;' }, 'Clear');
+  clearBtn.addEventListener('click', () => {
+    state.pendingCampaignAsset = null;
+    renderCampaignsStaged();
+  });
+  el_.appendChild(clearBtn);
 }
 
 async function createProduct() {
@@ -3159,7 +3206,7 @@ const _VIEWS = {
   organization: { panel: 'organization-view', tab: 'tab-organization',  onEnter: () => { if (!state.profile) loadProfile(); } },
   products:     { panel: 'products-view',     tab: 'tab-products',      onEnter: () => { loadProducts(); loadProductDocs(); renderProductsBreadcrumb(); } },
   create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); } },
-  campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: () => {} },
+  campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: renderCampaignsStaged },
   library:      { panel: 'library-view',      tab: 'tab-library',       onEnter: loadLibrary },
   insights:     { panel: 'insights-view',     tab: 'tab-insights',      onEnter: () => { renderInsightsBreadcrumb(); loadDashboard(); } },
 };

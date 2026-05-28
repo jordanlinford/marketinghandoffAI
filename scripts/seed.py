@@ -207,7 +207,11 @@ def main() -> None:
                 # Empty list — populated as the worker generates assets.
                 # The detail endpoint refreshes from current artifacts.
                 generated_asset_ids=[],
-                utm_campaign="simplelegal-clm__campaign-simplelegal-clm-launch",
+                # Slug convention matches the API: campaign-<product>__<name>.
+                # The earlier order (<product>__campaign-<name>) was a one-off
+                # in seed only and made the dev DB inconsistent with anything
+                # created through /api/campaigns.
+                utm_campaign="campaign-simplelegal-clm__simplelegal-clm-launch",
             ))
             db.commit()
             print("Seeded example campaign 'SimpleLegal CLM Launch' (status=planned)")

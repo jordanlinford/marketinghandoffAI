@@ -439,6 +439,39 @@ def _social(profile: dict, brief: dict | None, topic: str, target: str) -> dict:
     }
 
 
+@register("carousel")
+def _carousel(profile: dict, brief: dict | None, topic: str, target: str) -> dict:
+    # Structure-only — the brief calls this out explicitly: generate the
+    # per-slide block structure, do NOT render visuals. A future "render
+    # layer" turns this list into PNGs / a deck. Until then the human ships
+    # it to a designer or uses the copy as-is in a swipe carousel tool.
+    value = profile.get("value_prop") or "Cut hours of manual work."
+    aud = target or "your audience"
+    cc = _competitor_clause(profile)
+    slides = [
+        {"kind": "slide_cover", "title": topic,
+         "subtitle": f"For {aud}"},
+        {"kind": "slide", "headline": "The default isn't working",
+         "body": f"Most {aud} teams treat slow {topic.lower()} as inevitable."},
+        {"kind": "slide", "headline": "What good looks like",
+         "body": f"{value}{cc}."},
+        {"kind": "slide", "headline": "Three signals you'd see",
+         "body": "Cycle time falls. Hand-offs shrink. Approvals close in days, not weeks."},
+        {"kind": "slide_cta", "text": _cta(profile)},
+    ]
+    return {
+        "content_type": "carousel",
+        "blocks": slides,
+        "metadata": {
+            "topic": topic, "target": aud, "platform": "linkedin",
+            "structure_only": True,
+            "note": ("Structure-only — visual rendering is a future layer. "
+                     "Each slide is a content block; ship to a designer or "
+                     "paste into a swipe-carousel tool."),
+        },
+    }
+
+
 @register("blog_outline")
 def _blog_outline(profile: dict, brief: dict | None, topic: str, target: str) -> dict:
     aud = target or "buyers"

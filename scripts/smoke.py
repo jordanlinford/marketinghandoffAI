@@ -98,6 +98,11 @@ def main() -> None:
             profile, brief, topic_for_template, target), 0.0007
     content_templates_mod._llm_build = _stub_content_llm
 
+    # Capture the real grader so the fenced-JSON test (Campaign 9) can
+    # exercise the actual parse path while the rest of smoke stays on the
+    # cheap stub.
+    _ORIGINAL_LLM_GRADE = content_grader_mod._llm_grade
+
     # Grader stub: returns a real-looking graded result so we can assert the
     # structure on the artifact. Tests that want to exercise the
     # "ungraded fallback" path swap this for one that raises.
@@ -2929,8 +2934,15 @@ def main() -> None:
         # The campaign's generated_asset_ids is refreshed on detail read.
         detail = client.get(f"/api/campaigns/{camp['id']}", headers=H_ONIT)
         assert detail.status_code == 200
-        gen_ids = detail.json()["generated_asset_ids"]
+        detail_j = detail.json()
+        gen_ids = detail_j["generated_asset_ids"]
         assert set(gen_ids) == {a.id for a in camp_arts}
+        # Detail GET also flips generating → active once every plan item has
+        # produced an artifact. Without this, the campaign sticks at
+        # 'generating' forever even though the batch has completed.
+        assert detail_j["status"] == "active", (
+            f"campaign status should flip to 'active' once all 3 items "
+            f"have artifacts; got {detail_j['status']!r}")
         # Library projection picks the artifacts up — they are NORMAL
         # content artifacts (the load-bearing principle).
         lib = client.get(
@@ -3083,6 +3095,100 @@ def main() -> None:
               "campaign-generated draft lands status=pending_review and a "
               "campaign-tagged content_review proposal sits in the approval "
               "queue.")
+
+        # (9) Grader fence tolerance — Anthropic frequently wraps grader
+        # JSON in ```json fences. The grader used to refuse those and stamp
+        # status='ungraded' (this is what every campaign-generated draft hit
+        # on the first manual walkthrough). Same envelope parser as the
+        # propose path now handles them. We stub the LLM directly so this
+        # test is hermetic and doesn't depend on a key.
+        import types as _types
+        fenced_response = (
+            "```json\n"
+            "{\n"
+            '  "status": "graded",\n'
+            '  "overall": 78,\n'
+            '  "per_criterion": [\n'
+            '    {"name": "on_brand", "score": 80, "reason": "ok"},\n'
+            '    {"name": "clarity", "score": 76, "reason": "tight"}\n'
+            "  ],\n"
+            '  "suggestions": ["tighten the CTA"]\n'
+            "}\n"
+            "```"
+        )
+
+        class _FakeBlock:
+            type = "text"
+            def __init__(self, t): self.text = t
+        class _FakeMsg:
+            content = [_FakeBlock(fenced_response)]
+            usage = _types.SimpleNamespace(input_tokens=10, output_tokens=20)
+        class _FakeMessages:
+            def create(self, **_k): return _FakeMsg()
+        class _FakeClient:
+            messages = _FakeMessages()
+            def __init__(self, **_k): pass
+
+        # Patch anthropic.Anthropic for the one call _llm_grade makes.
+        import anthropic as _anth_mod
+        original_anthropic_cls = _anth_mod.Anthropic
+        _anth_mod.Anthropic = _FakeClient
+        try:
+            from app.agents.content_grader import DEFAULT_RUBRIC
+            from app.config import get_settings as _gs_grader
+            # Call the REAL _llm_grade (smoke's startup stub has been
+            # installed for the rest of the suite). The whole point of
+            # this test is that the actual parse path tolerates fences.
+            grade, cost = _ORIGINAL_LLM_GRADE(
+                content={"content_type": "social_post",
+                         "blocks": [{"kind": "body", "text": "draft text"}],
+                         "metadata": {}},
+                profile={},
+                rubric=list(DEFAULT_RUBRIC),
+                settings=_gs_grader())
+        finally:
+            _anth_mod.Anthropic = original_anthropic_cls
+        assert grade["status"] == "graded", \
+            f"fenced ```json``` should parse cleanly; got {grade}"
+        assert grade["overall"] == 78, grade
+        assert grade["suggestions"] == ["tighten the CTA"], grade
+        print("[OK] Campaign (9): grader tolerates ```json fences — fenced "
+              f"response parsed into status='graded', overall={grade['overall']} "
+              "(was 'ungraded' before the fix).")
+
+        # (10) Carousel as a structure-only content_type — the planner can
+        # propose 'carousel' but until this fix the content engine raised
+        # ValueError("Unknown content_type 'carousel'"). Now it produces a
+        # multi-block slide structure with structure_only=True metadata; no
+        # visual rendering (brief: "structure now, render later").
+        from app.agents.content_templates import build as build_content
+        car_content, car_cost = build_content(
+            content_type="carousel",
+            profile={"product_summary": "Our platform",
+                     "value_prop": "Cut hours of busywork.",
+                     "conversion_goal": "book a demo"},
+            brief=None,
+            topic="Contract review benchmarks",
+            target="in-house legal ops",
+        )
+        assert car_content["content_type"] == "carousel"
+        blocks = car_content.get("blocks") or []
+        assert len(blocks) >= 3, \
+            f"carousel must produce a multi-slide structure; got {len(blocks)}"
+        kinds = {b.get("kind") for b in blocks}
+        assert "slide_cover" in kinds and "slide_cta" in kinds, \
+            f"carousel needs a cover + cta slide; got {kinds}"
+        assert car_content["metadata"].get("structure_only") is True, \
+            "carousel must mark structure_only=True so the UI does not " \
+            "promise a rendered visual"
+        # Smoke registry check — make sure the type shows up in available
+        # types so the UI's content-type picker can offer it.
+        from app.agents.content_templates import available_types
+        assert "carousel" in available_types(), available_types()
+        print(f"[OK] Campaign (10): carousel registered as structure-only — "
+              f"{len(blocks)} blocks (slides={sorted(k for k in kinds)}), "
+              "metadata.structure_only=True; visual rendering deferred to a "
+              "future layer per the brief.")
 
         print("[OK] Smoke test passed.")
     finally:

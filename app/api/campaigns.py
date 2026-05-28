@@ -100,6 +100,18 @@ def _refresh_generated_asset_ids(db: Session, c: Campaign) -> None:
     c.generated_asset_ids = [a.id for a in rows]
 
 
+def _maybe_flip_generating_to_active(c: Campaign) -> None:
+    # When every approved plan item has produced an artifact, the batch
+    # is done — flip to active. Only acts on status == 'generating' so we
+    # never overwrite draft / planned / archived. Counts side: pulling
+    # from c.generated_asset_ids assumes _refresh ran first.
+    if c.status != "generating":
+        return
+    expected = len(((c.plan or {}).get("derivative_assets")) or [])
+    if expected and len(c.generated_asset_ids or []) >= expected:
+        c.status = "active"
+
+
 # ---- Create ---------------------------------------------------------------
 class CampaignCreateIn(BaseModel):
     name: str = Field(..., min_length=1)
@@ -184,7 +196,20 @@ def list_campaigns(product_id: str | None = Query(None),
         q = q.where(Campaign.product_id == product_id)
     if status:
         q = q.where(Campaign.status == status)
-    return [_serialize(c) for c in db.execute(q).scalars().all()]
+    rows = db.execute(q).scalars().all()
+    # Auto-flip generating → active on read (same logic as detail GET) so the
+    # list view doesn't lag behind reality. List page is what the UI hits
+    # while the user is waiting for a batch to finish.
+    flipped = False
+    for c in rows:
+        if c.status == "generating":
+            _refresh_generated_asset_ids(db, c)
+            _maybe_flip_generating_to_active(c)
+            if c.status == "active":
+                flipped = True
+    if flipped:
+        db.commit()
+    return [_serialize(c) for c in rows]
 
 
 # ---- Detail (auto-refresh generated_asset_ids) ---------------------------
@@ -194,6 +219,7 @@ def get_campaign(campaign_id: str,
                  db: Session = Depends(get_db)) -> dict:
     c = _get(db, user, campaign_id)
     _refresh_generated_asset_ids(db, c)
+    _maybe_flip_generating_to_active(c)
     db.commit()
     db.refresh(c)
     return _serialize(c)

@@ -122,6 +122,13 @@
      so it can never scroll the rest of the page sideways. */
   #lib-detail .panel { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
   #lib-detail code, #lib-detail pre { max-width: 100%; min-width: 0; }
+  /* Same containment for campaign detail: long UTM URLs and long item
+     rationales were horizontally scrolling the whole page. Wrap on
+     anywhere so the page never grows wider than the viewport. */
+  #camp-detail, #camp-detail .panel { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+  #camp-detail code, #camp-detail pre { max-width: 100%; min-width: 0; word-break: break-all; }
+  #camp-detail textarea { max-width: 100%; min-width: 0; width: 100%; box-sizing: border-box;
+                          overflow-wrap: anywhere; word-break: break-word; }
   .detail-empty { color: var(--muted); padding: 40px 0; text-align: center; }
   .detail h1 { font-size: 18px; margin: 0 0 4px; }
   .detail .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }

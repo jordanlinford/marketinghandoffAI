@@ -49,6 +49,36 @@ def resolve_rubric(profile: dict | None) -> list[dict]:
     return list(DEFAULT_RUBRIC)
 
 
+def _parse_json_envelope(raw: str):
+    # Same shape as the propose path's parser: tolerate raw JSON, a
+    # ```json``` fence, or JSON embedded in surrounding prose. Anthropic
+    # frequently wraps structured output in markdown fences even when the
+    # prompt asks for JSON; that should not silently drop a grade.
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        pass
+    if s.startswith("```"):
+        inner = s.strip("`").strip()
+        if "\n" in inner and inner.split("\n", 1)[0].strip().lower() in (
+                "json", "jsonc"):
+            inner = inner.split("\n", 1)[1]
+        try:
+            return json.loads(inner.strip())
+        except Exception:
+            pass
+    start, end = s.find("{"), s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(s[start:end + 1])
+        except Exception:
+            pass
+    return None
+
+
 def _ungraded(rubric: list[dict], reason: str) -> dict:
     """Neutral, honest "we didn't grade this" placeholder. The UI renders the
     reason; the artifact is still usable. Returns the same shape as a real
@@ -127,9 +157,8 @@ def _llm_grade(content: dict, profile: dict, rubric: list[dict],
         messages=[{"role": "user", "content": prompt}],
     )
     raw = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
-    try:
-        parsed = json.loads(raw)
-    except Exception:
+    parsed = _parse_json_envelope(raw)
+    if parsed is None:
         return _ungraded(rubric, f"Grader returned non-JSON: {raw[:200]!r}"), 0.0
     if not isinstance(parsed, dict) or "overall" not in parsed:
         return _ungraded(rubric, f"Grader JSON missing fields: {raw[:200]!r}"), 0.0

@@ -10,7 +10,8 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.db import SessionLocal, create_all
-from app.models import AgentRegistration, Guardrail, Org, ProductProfile, User
+from app.models import (AgentRegistration, Campaign, Guardrail, Org,
+                        ProductProfile, User)
 
 ONIT_ICP = {
     "category": "legal operations software",
@@ -135,6 +136,81 @@ def main() -> None:
             }]
             db.commit()
             print("Seeded a demonstrative field_history entry on SimpleLegal CLM")
+
+        # Seed one example campaign under SimpleLegal CLM so the dev DB
+        # demonstrates the campaign shape (a small approved plan + the
+        # generated_asset_ids container) without anyone running through
+        # Step 1 → Propose → Approve manually. Idempotent on (org_id, name).
+        existing_campaign = db.execute(
+            select(Campaign).where(Campaign.org_id == org.id,
+                                   Campaign.name == "SimpleLegal CLM Launch")
+        ).scalar_one_or_none()
+        if existing_campaign is None:
+            plan = {
+                "derivative_assets": [
+                    {"id": "1-linkedin-launch-announce",
+                     "content_type": "social_post", "channel": "linkedin",
+                     "topic": "Modern matter management for in-house teams",
+                     "angle": "Launch announcement — name what's new + why now.",
+                     "audience": "General Counsel, Head of Legal Ops",
+                     "rationale": "Lead the motion with in-feed credibility.",
+                     "cadence_hint": "Day 0"},
+                    {"id": "2-email-cta-demo",
+                     "content_type": "email", "channel": "email",
+                     "topic": "See SimpleLegal CLM in 15 minutes",
+                     "angle": "Pain-led outbound: cost of doing nothing.",
+                     "audience": "GC + Legal Ops directors",
+                     "rationale": "Highest-control channel for the demo CTA.",
+                     "cadence_hint": "Day 0 + Day 3 follow-up"},
+                    {"id": "3-ad-retarget",
+                     "content_type": "ad", "channel": "linkedin",
+                     "topic": "Cut contract turnaround by half — within 90 days",
+                     "angle": "Single-claim retargeting ad pointing at the demo.",
+                     "audience": "Visitors who engaged with the launch posts",
+                     "rationale": "Capture engaged visitors after the launch.",
+                     "cadence_hint": "Weeks 1–3, continuous"},
+                ],
+                "channel_mix": [
+                    {"channel": "email", "weight": "primary",
+                     "rationale": "Highest-control for the demo CTA."},
+                    {"channel": "linkedin", "weight": "primary",
+                     "rationale": "Reach + retargeting; B2B credibility."},
+                    {"channel": "organic", "weight": "support",
+                     "rationale": "SEO anchor compounds over time."},
+                ],
+                "cadence_guidance": (
+                    "Lead with the LinkedIn launch post on Day 0, paired with "
+                    "the announcement email. Retarget engaged visitors with "
+                    "the LinkedIn ad through week 3. Re-evaluate after week "
+                    "2 against the Insights funnel."),
+                "source": "seed",
+            }
+            db.add(Campaign(
+                org_id=org.id, product_id=product.id,
+                name="SimpleLegal CLM Launch",
+                description=("Coordinated launch motion for the SimpleLegal "
+                             "CLM product — seeded example so the dev DB "
+                             "demonstrates the orchestration shape."),
+                campaign_type="launch",
+                objective="Drive 25 qualified demo requests in the first 30 days.",
+                status="planned",
+                owner="jordan@onit.com",
+                primary_cta="book a demo",
+                target_personas=["General Counsel", "Head of Legal Ops"],
+                target_industries=["Legal Services", "Financial Services"],
+                selected_channels=["linkedin", "email", "organic"],
+                channel_recommendations={
+                    "recommended_channels": ["linkedin", "email", "organic"],
+                    "rationale": "Best-practice B2B launch mix; no performance data consulted in v1.",
+                },
+                plan=plan,
+                # Empty list — populated as the worker generates assets.
+                # The detail endpoint refreshes from current artifacts.
+                generated_asset_ids=[],
+                utm_campaign="simplelegal-clm__campaign-simplelegal-clm-launch",
+            ))
+            db.commit()
+            print("Seeded example campaign 'SimpleLegal CLM Launch' (status=planned)")
 
         for scope, rules in [("spend", {"max_change_usd": 250}),
                              ("publish", {"require_human_review": True}),

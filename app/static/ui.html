@@ -458,82 +458,34 @@
 </main>
 
 <!-- ============================ Campaigns (Step 4) ======================
-     Real placeholder — the workflow is visible but inactive. The brief
-     calls this out explicitly: not a 404, a "feature whose machinery is
-     visible but inactive." When Phase 3 ships, the same DOM hooks slot
-     into the active build. -->
+     Real Campaign Builder. Propose-first workflow:
+       draft → /propose (one LLM call → plan) → human-edited plan →
+       /generate (calls content_engine PER plan item, shared utm_campaign).
+     THE load-bearing principle: campaigns REFERENCE assets, they do NOT
+     own content-generation logic. Generated assets are normal content
+     artifacts that carry artifacts.campaign_id as a back-reference and
+     remain first-class library citizens. -->
 <main id="campaigns-view" class="setup-main" style="display:none;">
   <!-- Staged-asset banner: when an asset was routed here from the Library
-       via "Add to campaign", surface it so the user sees the wire actually
-       worked. Hidden when no asset is staged. -->
+       via "Add to campaign", show it as the parent for a new campaign. -->
   <div id="campaigns-staged" class="placeholder-banner"
        style="display:none; background:#1f3b6b; border-color:var(--accent);"></div>
-  <div class="placeholder-banner">
-    <strong>Campaign Builder — coming next.</strong>
-    This is where content becomes execution. Pick an approved asset,
-    define the CTA, target channels and audience, and the system will
-    spawn derivative copy + distribution + tracking.
-  </div>
-  <section class="panel placeholder-grid">
-    <div class="setup-paths">
-      <div class="setup-path">
-        <h4>Start with an asset</h4>
-        <p>Pick a published or approved asset to build a campaign around.</p>
-        <select disabled>
-          <option>(no campaign yet — select an asset)</option>
-        </select>
-      </div>
-      <div class="setup-path">
-        <h4>Define the CTA</h4>
-        <p>The single action this campaign drives toward.</p>
-        <input type="text" disabled
-          placeholder="e.g. Book a demo, Download the guide" />
-      </div>
-      <div class="setup-path">
-        <h4>Channels</h4>
-        <p>Where this campaign runs.</p>
-        <select disabled multiple size="6">
-          <option>LinkedIn</option>
-          <option>Google Ads</option>
-          <option>Email</option>
-          <option>Meta</option>
-          <option>Reddit</option>
-          <option>Webinar</option>
-        </select>
-      </div>
+
+  <section class="panel">
+    <div class="row" style="margin-bottom:8px;">
+      <h2 style="margin:0">Campaigns</h2>
+      <span class="setup-status">
+        Pick a parent asset + CTA + audience + channels → Propose a plan →
+        edit it → Generate the derivative assets via the content engine,
+        tagged to one coordinated UTM scheme.
+      </span>
     </div>
-    <div class="setup-paths" style="margin-top:14px;">
-      <div class="setup-path">
-        <h4>Audience</h4>
-        <p>Segment this campaign targets.</p>
-        <select disabled>
-          <option>(no segments defined)</option>
-        </select>
-      </div>
-      <div class="setup-path">
-        <h4>Campaign objective</h4>
-        <p>What pipeline outcome this maps to.</p>
-        <select disabled>
-          <option>Pick an objective</option>
-          <option>Awareness</option>
-          <option>Engagement</option>
-          <option>Pipeline / MQLs</option>
-          <option>Closed-won</option>
-        </select>
-      </div>
-      <div class="setup-path">
-        <h4>We will generate</h4>
-        <ul style="margin:0; padding-left:18px; color:var(--muted); font-size:13px;">
-          <li>Derivative assets per channel</li>
-          <li>Channel-specific copy variations</li>
-          <li>Distribution recommendations</li>
-          <li>Tracking structure (UTMs)</li>
-        </ul>
-      </div>
+    <div class="row" style="gap:8px; margin-top:6px;">
+      <button id="camp-new-btn">+ New campaign</button>
+      <button id="camp-refresh-btn" class="ghost">Refresh</button>
     </div>
-    <div class="setup-actions" style="margin-top:14px;">
-      <button disabled>Build campaign (coming next)</button>
-    </div>
+    <div id="camp-list" style="margin-top:14px;"></div>
+    <div id="camp-detail" style="margin-top:18px;"></div>
   </section>
 </main>
 
@@ -2514,6 +2466,411 @@ function renderCampaignsStaged() {
   el_.appendChild(clearBtn);
 }
 
+// ---- Campaigns (step 4) -------------------------------------------------
+// Propose-first workflow. The header product selector scopes everything.
+// State.campaigns holds the org's campaigns; state.selectedCampaignId
+// drives which detail panel renders.
+let _campState = { selectedId: null };
+
+async function loadCampaigns() {
+  // Surface any asset routed here via the Library "Add to campaign" wire.
+  renderCampaignsStaged();
+  await fetchCampaignsList();
+}
+
+async function fetchCampaignsList() {
+  const root = document.getElementById('camp-list');
+  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  let items = [];
+  try {
+    const qs = state.selectedProductId
+      ? `?product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+    items = await api('/api/campaigns' + qs);
+  } catch (e) {
+    root.innerHTML = `<div class="err">Failed: ${e.message}</div>`;
+    return;
+  }
+  state.campaigns = items;
+  root.innerHTML = '';
+  if (!items.length) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No campaigns yet'),
+      el('div', {}, 'Click "+ New campaign" to start a coordinated motion.'),
+    ));
+    return;
+  }
+  for (const c of items) {
+    root.appendChild(_renderCampaignCard(c));
+  }
+}
+
+function _renderCampaignCard(c) {
+  const planItems = ((c.plan || {}).derivative_assets || []).length;
+  const card = el('div', { class: 'proposal', style: 'cursor:pointer;',
+    onclick: () => openCampaignDetail(c.id) },
+    el('div', { class: 'row' },
+      el('strong', {}, c.name),
+      el('span', { class: `badge ${_campStatusClass(c.status)}` }, c.status),
+    ),
+    el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
+      `${c.campaign_type} · ${c.product_id ? 'product-scoped' : 'org-level'} · ` +
+      `${planItems} plan item(s) · ${(c.generated_asset_ids || []).length} generated · ` +
+      `${fmtTime(c.created_at)}`),
+    c.utm_campaign ? el('div', { class: 'sub',
+      style: 'color:var(--muted); font-size:12px; margin-top:4px;' },
+      `utm_campaign=${c.utm_campaign}`) : null,
+  );
+  return card;
+}
+
+function _campStatusClass(s) {
+  return ({
+    draft: 'pending', planned: 'kind-content', generating: 'running',
+    active: 'succeeded', complete: 'succeeded', archived: 'rejected',
+  })[s] || 'pending';
+}
+
+async function openCampaignDetail(id) {
+  _campState.selectedId = id;
+  const root = document.getElementById('camp-detail');
+  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  let c;
+  try {
+    c = await api(`/api/campaigns/${id}`);
+  } catch (e) {
+    root.innerHTML = `<div class="err">${e.message}</div>`;
+    return;
+  }
+  root.innerHTML = '';
+  root.appendChild(_renderCampaignDetail(c));
+  root.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function _renderCampaignDetail(c) {
+  const wrap = el('section', { class: 'panel detail',
+    style: 'margin-top:14px;' });
+  wrap.appendChild(el('h3', {},
+    c.name,
+    el('span', { class: `badge ${_campStatusClass(c.status)}`,
+      style: 'margin-left:8px;' }, c.status)));
+  wrap.appendChild(el('div', { class: 'sub',
+    style: 'color:var(--muted); font-size:12px; margin-bottom:10px;' },
+    `${c.campaign_type} · cta: ${c.primary_cta || '—'} · ` +
+    `channels: ${(c.selected_channels || []).join(', ') || '—'} · ` +
+    `utm_campaign=${c.utm_campaign}`));
+  if (c.objective) {
+    wrap.appendChild(el('div', { style: 'margin-bottom:10px;' }, c.objective));
+  }
+
+  // Step-2 trigger: only meaningful for draft (no plan or one to redo).
+  const plan = c.plan || {};
+  const items = plan.derivative_assets || [];
+  if (c.status === 'draft' && !items.length) {
+    wrap.appendChild(_renderProposeBlock(c));
+  }
+  if (items.length) {
+    wrap.appendChild(_renderPlanEditor(c, plan, items));
+    // Step-4 trigger appears once plan exists. Generation requires a
+    // non-empty plan + (server-side) not-already-generating status.
+    if (c.status === 'planned' || c.status === 'draft') {
+      wrap.appendChild(_renderGenerateBlock(c));
+    }
+  }
+  // Generated assets list (refreshed by GET so this is current).
+  if (c.generated_asset_ids && c.generated_asset_ids.length) {
+    wrap.appendChild(_renderGeneratedAssets(c));
+  }
+  // KPI/performance hooks — reserved, visible, NOT built. Mirrors the
+  // dimensions-column discipline from Build B.
+  wrap.appendChild(el('div', { class: 'section',
+    style: 'border-top:1px solid #232a3d; padding-top:10px; margin-top:14px;' },
+    el('h4', { style: 'margin:0 0 6px;' }, 'Performance tracking'),
+    el('div', { class: 'setup-status',
+      style: 'color:var(--muted); font-size:12px;' },
+      'Reserved — connects to Insights once reports are uploaded that ' +
+      'carry this campaign\'s utm_campaign. KPI + attribution hooks are ' +
+      'present (kpis, linked_metric_point_query) but unbuilt in v1.'),
+  ));
+  // Footer actions.
+  const footer = el('div', { class: 'actions', style: 'margin-top:14px;' });
+  if (c.status !== 'archived') {
+    const arch = el('button', { class: 'reject' }, 'Archive');
+    arch.addEventListener('click', () => archiveCampaign(c.id));
+    footer.appendChild(arch);
+  }
+  wrap.appendChild(footer);
+  return wrap;
+}
+
+function _renderProposeBlock(c) {
+  const box = el('div', { class: 'section' });
+  box.appendChild(el('h4', {}, 'Step 2 — Propose plan'));
+  box.appendChild(el('div', { class: 'sub',
+    style: 'color:var(--muted); font-size:12px; margin-bottom:6px;' },
+    'One cheap LLM call returns a structured plan (no content generated yet). ' +
+    'With no API key, you get a deterministic rule-based plan from the ' +
+    'campaign type + channels.'));
+  const btn = el('button', { class: 'approve' }, 'Propose plan');
+  btn.addEventListener('click', () => proposeCampaign(c.id));
+  box.appendChild(btn);
+  return box;
+}
+
+function _renderPlanEditor(c, plan, items) {
+  const box = el('div', { class: 'section' });
+  box.appendChild(el('h4', {}, `Plan (${items.length} item${items.length === 1 ? '' : 's'})`));
+  if (plan.cadence_guidance) {
+    box.appendChild(el('div', { class: 'sub',
+      style: 'color:var(--muted); margin-bottom:8px;' },
+      plan.cadence_guidance));
+  }
+  if (plan.channel_mix && plan.channel_mix.length) {
+    const mix = el('ul', { class: 'recs' });
+    for (const m of plan.channel_mix) {
+      mix.appendChild(el('li', {},
+        `${m.channel} — ${m.weight}: ${m.rationale}`));
+    }
+    box.appendChild(mix);
+  }
+  // Each item editable inline. Edits flow into local form state; user
+  // clicks Save plan to PATCH the campaign. Keeps the API surface small.
+  const formItems = items.map(x => ({ ...x }));
+  const list = el('div');
+  function renderList() {
+    list.innerHTML = '';
+    formItems.forEach((item, idx) => {
+      const row = el('div', { class: 'cluster',
+        style: 'padding:8px; background:#1a2030; border-radius:6px; margin-bottom:8px;' });
+      row.appendChild(el('div', { class: 'row',
+        style: 'margin-bottom:6px;' },
+        el('strong', {}, `#${idx + 1} ${item.content_type} · ${item.channel}`),
+        el('button', { class: 'reject',
+          onclick: () => { formItems.splice(idx, 1); renderList(); } },
+          'Remove'),
+      ));
+      const grid = el('div', { class: 'form-grid' });
+      const fields = [
+        ['content_type', 'Content type', 'select',
+          ['email','ad','social_post','blog_outline','carousel']],
+        ['channel', 'Channel', 'text'],
+        ['topic', 'Topic', 'text', null, true],
+        ['angle', 'Angle', 'text', null, true],
+        ['audience', 'Audience', 'text'],
+        ['cadence_hint', 'Cadence', 'text'],
+        ['rationale', 'Rationale', 'textarea', null, true],
+      ];
+      for (const [key, label, kind, options, full] of fields) {
+        const field = el('div', { class: 'field' + (full ? ' full' : '') });
+        field.appendChild(el('label', {}, label));
+        let input;
+        if (kind === 'select') {
+          input = el('select');
+          for (const opt of options) {
+            input.appendChild(el('option', { value: opt }, opt));
+          }
+          input.value = item[key] || options[0];
+        } else if (kind === 'textarea') {
+          input = el('textarea', {}, item[key] || '');
+        } else {
+          input = el('input', { type: 'text', value: item[key] || '' });
+        }
+        input.addEventListener('input', () => { item[key] = input.value; });
+        field.appendChild(input);
+        grid.appendChild(field);
+      }
+      row.appendChild(grid);
+      list.appendChild(row);
+    });
+  }
+  renderList();
+  box.appendChild(list);
+  // Add-item button.
+  const addBtn = el('button', { class: 'ghost', style: 'margin-top:6px;' },
+    '+ Add plan item');
+  addBtn.addEventListener('click', () => {
+    formItems.push({ id: `item-${formItems.length + 1}`,
+      content_type: 'email', channel: 'email', topic: '', angle: '',
+      audience: '', rationale: '', cadence_hint: '' });
+    renderList();
+  });
+  box.appendChild(addBtn);
+  // Save / Approve.
+  const saveBtn = el('button', { class: 'approve', style: 'margin-top:10px;' },
+    'Save plan (approve & advance to planned)');
+  saveBtn.addEventListener('click', () =>
+    savePlan(c.id, { ...plan, derivative_assets: formItems }));
+  box.appendChild(saveBtn);
+  return box;
+}
+
+function _renderGenerateBlock(c) {
+  const box = el('div', { class: 'section' });
+  box.appendChild(el('h4', {}, 'Step 4 — Generate campaign'));
+  box.appendChild(el('div', { class: 'sub',
+    style: 'color:var(--muted); margin-bottom:6px;' },
+    'Queues one content_engine run per approved plan item, tagged to ' +
+    'the shared campaign UTM scheme. Drafts honor your content review mode.'));
+  const btn = el('button', { class: 'approve' }, 'Generate campaign');
+  btn.addEventListener('click', () => generateCampaign(c.id));
+  box.appendChild(btn);
+  return box;
+}
+
+function _renderGeneratedAssets(c) {
+  const box = el('div', { class: 'section' });
+  box.appendChild(el('h4', {},
+    `Generated assets (${(c.generated_asset_ids || []).length})`));
+  const ids = c.generated_asset_ids || [];
+  const ul = el('ul', { class: 'recs' });
+  for (const aid of ids) {
+    const li = el('li', { style: 'cursor:pointer;',
+      onclick: () => {
+        // Hop to the library detail for this asset.
+        switchView('library');
+        setTimeout(async () => {
+          try {
+            const detail = await api(`/api/assets/content/${aid}`);
+            openAssetDetail({ id: aid, asset_kind: 'content',
+              title: detail.title, asset_type: ((detail.body || {})
+                .content || {}).content_type || 'content',
+              created_at: detail.created_at,
+              product_name: null, status: detail.status });
+          } catch (e) {}
+        }, 100);
+      } }, `${aid.slice(0, 8)}… → open in Library`);
+    ul.appendChild(li);
+  }
+  box.appendChild(ul);
+  return box;
+}
+
+// ---- Campaign actions ----------------------------------------------------
+async function proposeCampaign(id) {
+  try {
+    await api(`/api/campaigns/${id}/propose`,
+      { method: 'POST', body: JSON.stringify({}) });
+    await openCampaignDetail(id);
+    await fetchCampaignsList();
+  } catch (e) { alert(`Propose failed: ${e.message}`); }
+}
+
+async function savePlan(id, plan) {
+  try {
+    await api(`/api/campaigns/${id}`, {
+      method: 'PATCH', body: JSON.stringify({ plan, status: 'planned' }) });
+    await openCampaignDetail(id);
+    await fetchCampaignsList();
+  } catch (e) { alert(`Save plan failed: ${e.message}`); }
+}
+
+async function generateCampaign(id) {
+  try {
+    const r = await api(`/api/campaigns/${id}/generate`,
+      { method: 'POST', body: JSON.stringify({}) });
+    alert(`Queued ${r.queued_count} content_engine run(s). ` +
+          'Watch them land in Create (Runs) and the Library.');
+    await openCampaignDetail(id);
+    await fetchCampaignsList();
+  } catch (e) { alert(`Generate failed: ${e.message}`); }
+}
+
+async function archiveCampaign(id) {
+  if (!confirm('Archive this campaign? Generated assets remain in the Library.')) {
+    return;
+  }
+  try {
+    await api(`/api/campaigns/${id}`, { method: 'DELETE' });
+    _campState.selectedId = null;
+    document.getElementById('camp-detail').innerHTML = '';
+    await fetchCampaignsList();
+  } catch (e) { alert(`Archive failed: ${e.message}`); }
+}
+
+// ---- New campaign form ---------------------------------------------------
+function openNewCampaignForm() {
+  const detail = document.getElementById('camp-detail');
+  detail.innerHTML = '';
+  const pre = state.pendingCampaignAsset || null;
+  const form = el('section', { class: 'panel detail', style: 'margin-top:14px;' });
+  form.appendChild(el('h3', {}, 'New campaign'));
+  if (pre) {
+    form.appendChild(el('div', { class: 'sub',
+      style: 'color:var(--muted); margin-bottom:8px;' },
+      `Parent asset pre-filled from the Library: ${pre.title}`));
+  }
+  const grid = el('div', { class: 'form-grid' });
+  const fields = [
+    ['name', 'Name', 'text', null, true],
+    ['campaign_type', 'Type', 'select',
+      ['awareness','demand_gen','launch','nurture','competitive','other']],
+    ['primary_cta', 'Primary CTA', 'text'],
+    ['objective', 'Objective', 'textarea', null, true],
+    ['personas', 'Target personas (one per line)', 'lines', null, true],
+    ['channels', 'Channels (comma-separated)', 'text', null, true],
+  ];
+  const formState = {
+    name: pre ? `Campaign for "${pre.title}"` : '',
+    campaign_type: 'demand_gen',
+    primary_cta: 'book a demo',
+    objective: '',
+    personas: '',
+    channels: 'linkedin, email',
+  };
+  for (const [key, label, kind, options, full] of fields) {
+    const field = el('div', { class: 'field' + (full ? ' full' : '') });
+    field.appendChild(el('label', {}, label));
+    let input;
+    if (kind === 'select') {
+      input = el('select');
+      for (const opt of options) {
+        input.appendChild(el('option', { value: opt }, opt));
+      }
+      input.value = formState[key];
+    } else if (kind === 'textarea' || kind === 'lines') {
+      input = el('textarea', {}, formState[key]);
+    } else {
+      input = el('input', { type: 'text', value: formState[key] });
+    }
+    input.addEventListener('input', () => { formState[key] = input.value; });
+    field.appendChild(input);
+    grid.appendChild(field);
+  }
+  form.appendChild(grid);
+  const status = el('span', { class: 'setup-status',
+    style: 'margin-left:8px;' });
+  const submit = el('button', { class: 'approve' }, 'Create campaign');
+  submit.addEventListener('click', async () => {
+    try {
+      const body = {
+        name: formState.name.trim() || 'Untitled campaign',
+        campaign_type: formState.campaign_type,
+        primary_cta: formState.primary_cta.trim(),
+        objective: formState.objective.trim(),
+        target_personas: formState.personas.split('\n')
+          .map(s => s.trim()).filter(Boolean),
+        selected_channels: formState.channels.split(',')
+          .map(s => s.trim()).filter(Boolean),
+      };
+      if (state.selectedProductId) body.product_id = state.selectedProductId;
+      if (pre) body.parent_asset_id = pre.id;
+      const created = await api('/api/campaigns', {
+        method: 'POST', body: JSON.stringify(body) });
+      state.pendingCampaignAsset = null;
+      renderCampaignsStaged();
+      await fetchCampaignsList();
+      await openCampaignDetail(created.id);
+    } catch (e) {
+      status.innerHTML = `<span class="err">${e.message}</span>`;
+    }
+  });
+  const cancel = el('button', { class: 'ghost' }, 'Cancel');
+  cancel.addEventListener('click', () => { detail.innerHTML = ''; });
+  form.appendChild(el('div', { class: 'actions',
+    style: 'margin-top:10px;' }, submit, cancel, status));
+  detail.appendChild(form);
+  detail.scrollIntoView({ behavior: 'smooth' });
+}
+
 async function createProduct() {
   const name = document.getElementById('np-name').value.trim();
   const slug = document.getElementById('np-slug').value.trim();
@@ -3295,7 +3652,7 @@ const _VIEWS = {
   organization: { panel: 'organization-view', tab: 'tab-organization',  onEnter: () => { if (!state.profile) loadProfile(); } },
   products:     { panel: 'products-view',     tab: 'tab-products',      onEnter: () => { loadProducts(); loadProductDocs(); renderProductsBreadcrumb(); } },
   create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); } },
-  campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: renderCampaignsStaged },
+  campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: loadCampaigns },
   library:      { panel: 'library-view',      tab: 'tab-library',       onEnter: loadLibrary },
   insights:     { panel: 'insights-view',     tab: 'tab-insights',      onEnter: () => { renderInsightsBreadcrumb(); loadDashboard(); } },
 };
@@ -3618,7 +3975,12 @@ document.getElementById('product-selector').addEventListener('change', (ev) => {
   if (v === 'products')  { loadProductDocs(); renderProductsBreadcrumb(); }
   if (v === 'home')      loadCommandCenter();
   if (v === 'library')   loadLibrary();
+  if (v === 'campaigns') loadCampaigns();
 });
+const _campNewBtn = document.getElementById('camp-new-btn');
+if (_campNewBtn) _campNewBtn.addEventListener('click', openNewCampaignForm);
+const _campRefreshBtn = document.getElementById('camp-refresh-btn');
+if (_campRefreshBtn) _campRefreshBtn.addEventListener('click', fetchCampaignsList);
 const _libApplyBtn = document.getElementById('lib-apply-btn');
 if (_libApplyBtn) {
   _libApplyBtn.addEventListener('click', fetchLibraryList);

@@ -195,6 +195,14 @@ def process_run(db: Session, run: Run) -> None:
     agent = get_agent(run.agent_key)        # builtin resolution (http/mcp kinds: P3)
     result = agent.run(ctx)
 
+    # Optional campaign back-reference. Campaign Builder enqueues runs
+    # with task.campaign_id so the artifact + proposal carry the back-ref.
+    # NULL = the run wasn't part of a campaign (the historical default).
+    # Per the brief, the artifact stays a first-class asset even with a
+    # back-ref — archiving the campaign SET NULLs the column rather than
+    # deleting the asset.
+    task_campaign_id = (run.task or {}).get("campaign_id")
+
     # Persist artifacts (with status — defaults to "ready", content_engine may
     # set "pending_review" for drafts that need queue review).
     artifact_rows: list[Artifact] = []
@@ -204,6 +212,7 @@ def process_run(db: Session, run: Run) -> None:
             # Stamp the product on every artifact so the dashboard can
             # filter by product without re-joining through Run.
             product_id=run.product_id,
+            campaign_id=task_campaign_id,
             type=a.type, title=a.title,
             body=a.body, citations=[c.model_dump() for c in a.citations],
             status=getattr(a, "status", "ready"),
@@ -227,6 +236,7 @@ def process_run(db: Session, run: Run) -> None:
         db.add(Proposal(
             org_id=run.org_id, run_id=run.id,
             product_id=run.product_id,
+            campaign_id=task_campaign_id,
             action_type=p.action_type, payload=p.payload,
             guardrail_scope=p.guardrail_scope, guardrail_status=status, guardrail_detail=detail,
             reasoning=p.reasoning, status="pending",

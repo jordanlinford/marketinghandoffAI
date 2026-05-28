@@ -374,6 +374,56 @@ CREATE INDEX idx_runs_product              ON runs(org_id, product_id);
 CREATE INDEX idx_artifacts_product         ON artifacts(org_id, product_id);
 CREATE INDEX idx_proposals_product         ON proposals(org_id, product_id);
 
+-- ---- Campaigns (Phase 3 / step 4) ----------------------------------------
+-- Orchestration layer. Campaigns REFERENCE artifacts; they do not own
+-- generation logic — the content engine is still the only generator.
+-- See app/models.py for the workflow.
+CREATE TABLE campaigns (
+    id                       TEXT PRIMARY KEY,
+    org_id                   TEXT NOT NULL REFERENCES orgs(id),
+    product_id               TEXT REFERENCES product_profiles(id) ON DELETE SET NULL,
+    name                     TEXT NOT NULL,
+    description              TEXT NOT NULL DEFAULT '',
+    -- awareness | demand_gen | launch | nurture | competitive | other
+    campaign_type            TEXT NOT NULL DEFAULT 'other',
+    objective                TEXT NOT NULL DEFAULT '',
+    -- draft | planned | generating | active | complete | archived
+    status                   TEXT NOT NULL DEFAULT 'draft',
+    owner                    TEXT NOT NULL DEFAULT '',
+    start_date               DATE,
+    end_date                 DATE,
+    parent_asset_id          TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
+    primary_cta              TEXT NOT NULL DEFAULT '',
+    target_personas          JSONB NOT NULL DEFAULT '[]',
+    target_segments          JSONB NOT NULL DEFAULT '[]',
+    target_industries        JSONB NOT NULL DEFAULT '[]',
+    target_account_ref       JSONB,
+    selected_channels        JSONB NOT NULL DEFAULT '[]',
+    channel_recommendations  JSONB NOT NULL DEFAULT '{}',
+    channel_notes            JSONB,
+    plan                     JSONB NOT NULL DEFAULT '{}',
+    generated_asset_ids      JSONB NOT NULL DEFAULT '[]',
+    utm_campaign             TEXT NOT NULL DEFAULT '',
+    -- Performance hooks RESERVED — present, unused, no branching in v1.
+    -- Same discipline as the dimensions column from Build B.
+    kpis                     JSONB,
+    linked_metric_point_query JSONB,
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_campaigns_org_status      ON campaigns(org_id, status);
+CREATE INDEX idx_campaigns_product         ON campaigns(org_id, product_id);
+
+-- Back-references on the content tables — nullable so artifacts /
+-- proposals remain independent of any campaign (archiving a campaign
+-- SET NULLs the back-ref; the asset stays in the library).
+ALTER TABLE artifacts ADD COLUMN campaign_id TEXT
+    REFERENCES campaigns(id) ON DELETE SET NULL;
+ALTER TABLE proposals ADD COLUMN campaign_id TEXT
+    REFERENCES campaigns(id) ON DELETE SET NULL;
+CREATE INDEX idx_artifacts_campaign        ON artifacts(org_id, campaign_id);
+CREATE INDEX idx_proposals_campaign        ON proposals(org_id, campaign_id);
+
 CREATE TABLE jobs (
     id          TEXT PRIMARY KEY,
     org_id      TEXT NOT NULL REFERENCES orgs(id),
@@ -404,7 +454,7 @@ BEGIN
                            'proposals','guardrails','audit_log','jobs','uploads',
                            'org_profiles','report_uploads','metric_points',
                            'suggestions','product_profiles','product_documents',
-                           'extracted_insights']
+                           'extracted_insights','campaigns']
   LOOP
     EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', t);
     EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', t);

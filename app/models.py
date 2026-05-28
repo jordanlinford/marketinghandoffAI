@@ -153,6 +153,14 @@ class Artifact(Base, TimestampMixin):
     # NOTE: "ready" never means "published" — publishing is a separately-gated,
     # future action. See content_engine for the precedence rules.
     status: Mapped[str] = mapped_column(String(20), default="ready")
+    # OPTIONAL campaign back-reference. NULL = the artifact is org/product-
+    # level and not produced under any campaign. Campaigns REFERENCE artifacts;
+    # the artifact remains a first-class asset that exists with or without
+    # the campaign (Library treats them as independent). On campaign delete
+    # this is SET NULL so archiving a campaign never erases its assets.
+    campaign_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"),
+        nullable=True, index=True)
     # Version chain for content drafts: each "Give me something better" run
     # creates a NEW artifact whose parent_id points to the prior version. The
     # original is preserved (never destroyed) so the user can compare. Nullable
@@ -184,6 +192,12 @@ class Proposal(Base, TimestampMixin):
     # OPTIONAL product scope (mirrors Run.product_id). NULL = org-level.
     product_id: Mapped[str | None] = mapped_column(
         ForeignKey("product_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True)
+    # OPTIONAL campaign back-reference. Carried alongside the artifact's
+    # campaign_id so the approval queue can filter / surface "review the
+    # SimpleLegal CLM Launch drafts" without re-joining via the artifact.
+    campaign_id: Mapped[str | None] = mapped_column(
+        ForeignKey("campaigns.id", ondelete="SET NULL"),
         nullable=True, index=True)
     action_type: Mapped[str] = mapped_column(String(80))
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -558,6 +572,94 @@ class Suggestion(Base, TimestampMixin):
     product_id: Mapped[str | None] = mapped_column(
         ForeignKey("product_profiles.id", ondelete="SET NULL"),
         nullable=True, index=True)
+
+
+# ---------------------------------------------------------------------------
+# Campaigns — the orchestration layer (Phase 3 / step 4).
+#
+# THE LOAD-BEARING ARCHITECTURAL PRINCIPLE: campaigns REFERENCE assets;
+# they do NOT own content-generation logic. Campaign Builder CALLS the
+# existing content_engine for each approved plan item — never reimplements,
+# forks, or embeds generation. Generated assets are normal content
+# artifacts that happen to carry a back-reference (artifacts.campaign_id);
+# they remain first-class library citizens that exist with or without any
+# campaign. Archiving a campaign leaves its assets intact (see SET NULL
+# on the artifact back-ref).
+#
+# Workflow:
+#   1. Create draft (Step 1 inputs).
+#   2. /propose — ONE cheap LLM call returns a structured plan (no content
+#      generated yet). Deterministic rule-based plan on no-key.
+#   3. PATCH plan — human edits items, then status → planned.
+#   4. /generate — for each plan item, enqueue a content_engine Run with
+#      task.utm + task.campaign_id so the worker stamps the back-ref and
+#      the agent applies the shared campaign UTM scheme.
+# ---------------------------------------------------------------------------
+class Campaign(Base, TimestampMixin):
+    __tablename__ = "campaigns"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(ForeignKey("orgs.id"), index=True)
+    product_id: Mapped[str | None] = mapped_column(
+        ForeignKey("product_profiles.id", ondelete="SET NULL"),
+        nullable=True, index=True)
+
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # awareness | demand_gen | launch | nurture | competitive | other
+    campaign_type: Mapped[str] = mapped_column(String(40), default="other")
+    objective: Mapped[str] = mapped_column(Text, default="")
+    # draft | planned | generating | active | complete | archived
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    owner: Mapped[str] = mapped_column(String(320), default="")
+    start_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    end_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+
+    # The anchor asset the campaign drives toward (a blog, report, white
+    # paper, etc.). ON DELETE SET NULL so archiving the parent asset
+    # doesn't erase the campaign. `use_alter=True` defers this FK to a
+    # post-table-create ALTER so the campaigns↔artifacts cycle (both
+    # tables reference each other) doesn't break create_all() ordering.
+    parent_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("artifacts.id", ondelete="SET NULL",
+                   use_alter=True, name="fk_campaigns_parent_asset"),
+        nullable=True, index=True)
+    primary_cta: Mapped[str] = mapped_column(Text, default="")
+
+    # Targeting (JSON — schemaless until usage earns the structure).
+    target_personas: Mapped[list] = mapped_column(JSON, default=list)
+    target_segments: Mapped[list] = mapped_column(JSON, default=list)
+    target_industries: Mapped[list] = mapped_column(JSON, default=list)
+    # Reserved future-ready placeholder for ABM/account references.
+    target_account_ref: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Channels — selected by user; recommendations from the planner.
+    selected_channels: Mapped[list] = mapped_column(JSON, default=list)
+    channel_recommendations: Mapped[dict] = mapped_column(JSON, default=dict)
+    channel_notes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Execution state.
+    # plan = the approved proposal: list of derivative items with
+    # per-item channel/type/angle/cadence. Edited via PATCH during Step 3.
+    plan: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Convenience back-references — generated_asset_ids is refreshed from
+    # scoped(Artifact).where(campaign_id == self.id) on detail reads so
+    # it never drifts from the truth.
+    generated_asset_ids: Mapped[list] = mapped_column(JSON, default=list)
+    # The coordinated campaign slug all child assets share. The
+    # content_engine merges task.utm overrides so per-item source / medium
+    # / content vary while utm_campaign stays shared.
+    utm_campaign: Mapped[str] = mapped_column(String(120), default="")
+
+    # ----- Performance hooks RESERVED (do NOT branch on these in v1) ----
+    # Same discipline as the dimensions column from Build B: the columns
+    # exist so a future build can wire substrate-grounded attribution;
+    # v1 reads/writes nothing here. See app/campaigns/planner.py
+    # `performance_context` for the matching code seam.
+    kpis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    linked_metric_point_query: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now)
 
 
 # ---------------------------------------------------------------------------

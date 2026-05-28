@@ -52,10 +52,11 @@ from app.data_sources.csv import CsvMarketDataSource  # noqa: E402
 from app.db import SessionLocal, create_all  # noqa: E402
 from app.documents import extract as extract_mod  # noqa: E402
 from app.main import app  # noqa: E402
-from app.models import (AgentRegistration, Artifact, ExtractedInsight,  # noqa: E402
-                        Guardrail, MetricPoint, Org, OrgProfile, ProductDocument,
-                        ProductProfile, Proposal, ReportUpload, Run, Suggestion,
-                        Upload, User)
+from app.campaigns import planner as planner_mod  # noqa: E402
+from app.models import (AgentRegistration, Artifact, Campaign,  # noqa: E402
+                        ExtractedInsight, Guardrail, MetricPoint, Org,
+                        OrgProfile, ProductDocument, ProductProfile, Proposal,
+                        ReportUpload, Run, Suggestion, Upload, User)
 from app.products import resolve_product_profile  # noqa: E402
 from app.queue import enqueue  # noqa: E402
 from app.setup import crawl as crawl_mod  # noqa: E402
@@ -2719,6 +2720,369 @@ def main() -> None:
         print(f"[OK] Library (6): product-scoped view returns "
               f"{all_scoped.json()['total']} of {assets_total} assets "
               "(strict subset; org-level rows excluded).")
+
+        # ---------------------------------------------------------------------
+        # Campaigns — eight hermetic checks. THE load-bearing principle:
+        # campaigns REFERENCE assets, they do NOT own generation. The
+        # /generate path enqueues content_engine runs; the worker stamps
+        # campaign_id on each artifact + proposal. Archiving the campaign
+        # leaves the generated assets in the library (test 5).
+        # ---------------------------------------------------------------------
+        H_ONIT = {"X-Dev-User-Email": "jordan@onit.com"}
+        H_ACME = {"X-Dev-User-Email": "ops@acme.com"}
+
+        # (1) Create draft + tenant-isolated.
+        c_create = client.post(
+            "/api/campaigns",
+            headers={**H_ONIT, "Content-Type": "application/json"},
+            json={
+                "name": "Onit Spend Manager Launch",
+                "description": "Coordinated launch motion.",
+                "campaign_type": "launch",
+                "objective": "Drive 50 qualified demos in 30 days.",
+                "primary_cta": "book a demo",
+                "product_id": product_id,   # the Onit Spend Manager product
+                "target_personas": ["General Counsel", "VP Legal Ops"],
+                "selected_channels": ["linkedin", "email", "organic"],
+            })
+        assert c_create.status_code == 201, c_create.text
+        camp = c_create.json()
+        assert camp["status"] == "draft"
+        assert camp["product_id"] == product_id
+        assert camp["campaign_type"] == "launch"
+        assert camp["target_personas"] == ["General Counsel", "VP Legal Ops"]
+        # utm_campaign is product-prefixed per Build A convention.
+        assert camp["utm_campaign"].startswith("campaign-spend-manager"), \
+            f"utm_campaign must be product-prefixed: {camp['utm_campaign']!r}"
+        # Tenant isolation on create — Acme cannot read this row.
+        leaked = db.execute(scoped(Campaign, other.id)).scalars().all()
+        assert leaked == [], "TENANT LEAK: Acme can see Onit's campaigns"
+        cross_get = client.get(f"/api/campaigns/{camp['id']}", headers=H_ACME)
+        assert cross_get.status_code in (403, 404), cross_get.text
+        print(f"[OK] Campaign (1): draft created (utm_campaign="
+              f"{camp['utm_campaign']!r}, product-prefixed); tenant-isolated.")
+
+        # (2) Propose: deterministic with no key.
+        # Save real LLM key, then run with key cleared to exercise the
+        # deterministic rule-based path. Restore after.
+        from app.config import get_settings as _gs
+        _prev_key = _gs().anthropic_api_key
+        _gs().anthropic_api_key = ""   # type: ignore[attr-defined]
+        try:
+            prop = client.post(
+                f"/api/campaigns/{camp['id']}/propose",
+                headers={**H_ONIT, "Content-Type": "application/json"}, json={})
+            assert prop.status_code == 200, prop.text
+            propj = prop.json()
+            plan = propj["plan"]
+            items = plan.get("derivative_assets") or []
+            assert len(items) >= 3, \
+                f"deterministic plan must have >=3 items, got {len(items)}"
+            for item in items:
+                for f in ("id", "content_type", "channel", "topic",
+                          "rationale", "cadence_hint"):
+                    assert f in item, f"plan item missing {f}: {item}"
+            assert plan.get("channel_mix"), "plan must include channel_mix"
+            assert plan.get("cadence_guidance"), \
+                "plan must include cadence_guidance"
+            assert plan.get("source") == "deterministic-rule-based"
+            # Sensible for the type — launch templates use email + linkedin.
+            channels_in_plan = {it["channel"] for it in items}
+            assert channels_in_plan & {"linkedin", "email", "organic"}, \
+                f"launch plan should hit launch-typical channels; got {channels_in_plan}"
+        finally:
+            _gs().anthropic_api_key = _prev_key  # type: ignore[attr-defined]
+        # Re-propose with the LLM stubbed to return a known plan so we
+        # can also verify the LLM path persists the plan. Stub _llm_propose
+        # at the planner module — it's the function in the LLM branch.
+        original_llm_propose = planner_mod._llm_propose
+
+        def _stub_propose(campaign_row, profile, parent_summary, settings, fallback):
+            return {
+                "derivative_assets": [
+                    {"id": "stubbed-1", "content_type": "social_post",
+                     "channel": "linkedin", "topic": "Stub launch post",
+                     "angle": "Hook", "audience": "GC",
+                     "rationale": "Stubbed for smoke",
+                     "cadence_hint": "Day 0"},
+                ],
+                "channel_mix": [{"channel": "linkedin",
+                                 "weight": "primary",
+                                 "rationale": "Stub"}],
+                "cadence_guidance": "Stubbed guidance.",
+                "source": "llm",
+            }, 0.0013
+        planner_mod._llm_propose = _stub_propose
+        try:
+            prop2 = client.post(
+                f"/api/campaigns/{camp['id']}/propose",
+                headers={**H_ONIT, "Content-Type": "application/json"}, json={})
+            assert prop2.status_code == 200, prop2.text
+            p2 = prop2.json()
+            assert p2["plan"]["source"] == "llm"
+            assert len(p2["plan"]["derivative_assets"]) == 1
+            assert p2["_propose_cost_usd"] == 0.0013
+        finally:
+            planner_mod._llm_propose = original_llm_propose
+        print(f"[OK] Campaign (2): deterministic plan ({len(items)} items, "
+              f"channels={channels_in_plan}) when no key; stubbed LLM "
+              "plan persists when the call succeeds.")
+
+        # (3) PATCH plan → status flips to 'planned'.
+        # We curate a small 3-item plan we control (so test 4 can assert
+        # 3 runs / 3 artifacts with the right UTM scheme).
+        approved_plan = {
+            "derivative_assets": [
+                {"id": "1-linkedin-launch",
+                 "content_type": "social_post", "channel": "linkedin",
+                 "topic": "Launch announcement", "angle": "Name what's new",
+                 "audience": "GC", "rationale": "Lead the motion",
+                 "cadence_hint": "Day 0"},
+                {"id": "2-email-cta-demo",
+                 "content_type": "email", "channel": "email",
+                 "topic": "See it in 15 minutes", "angle": "Demo CTA",
+                 "audience": "GC + Legal Ops",
+                 "rationale": "Highest-control demo channel",
+                 "cadence_hint": "Day 0 + Day 3"},
+                {"id": "3-ad-retarget",
+                 "content_type": "ad", "channel": "linkedin",
+                 "topic": "Cut turnaround in half",
+                 "angle": "Retargeting ad", "audience": "Engaged visitors",
+                 "rationale": "Capture engaged visitors",
+                 "cadence_hint": "Weeks 1–3"},
+            ],
+            "channel_mix": [
+                {"channel": "linkedin", "weight": "primary",
+                 "rationale": "B2B credibility"},
+                {"channel": "email", "weight": "primary",
+                 "rationale": "Demo CTA"},
+            ],
+            "cadence_guidance": "LinkedIn lead, email cadence, ads retarget.",
+            "source": "human-edited",
+        }
+        patch = client.patch(
+            f"/api/campaigns/{camp['id']}",
+            headers={**H_ONIT, "Content-Type": "application/json"},
+            json={"plan": approved_plan})
+        assert patch.status_code == 200, patch.text
+        assert patch.json()["status"] == "planned", \
+            "PATCH plan must flip draft → planned"
+        # And we can add/remove items via subsequent PATCHes.
+        approved_plan_2 = dict(approved_plan)
+        approved_plan_2["derivative_assets"] = approved_plan["derivative_assets"][:2]
+        patch2 = client.patch(
+            f"/api/campaigns/{camp['id']}",
+            headers={**H_ONIT, "Content-Type": "application/json"},
+            json={"plan": approved_plan_2})
+        assert patch2.status_code == 200
+        assert len(patch2.json()["plan"]["derivative_assets"]) == 2
+        # Restore the 3-item plan for test 4.
+        client.patch(
+            f"/api/campaigns/{camp['id']}",
+            headers={**H_ONIT, "Content-Type": "application/json"},
+            json={"plan": approved_plan})
+        print("[OK] Campaign (3): PATCH plan persists; status flips to "
+              "'planned'; subsequent PATCH can add/remove items.")
+
+        # (4) Generate: calls content_engine 3×, shared utm_campaign +
+        # per-item source/medium/content, campaign_id back-ref on artifacts.
+        # Re-enable the content_engine stub if anything turned it off.
+        _set_review_mode(onit.id, "guardrail")
+        gen = client.post(
+            f"/api/campaigns/{camp['id']}/generate",
+            headers={**H_ONIT, "Content-Type": "application/json"}, json={})
+        assert gen.status_code == 200, gen.text
+        genj = gen.json()
+        assert genj["queued_count"] == 3, genj
+        assert genj["campaign"]["status"] == "generating"
+        # Drain the worker queue completely — earlier smoke tests can
+        # leave stale-leased jobs behind; we need to process everything
+        # before the campaign artifacts will land. Cap the drain at
+        # 100 iterations as a safety net.
+        for _ in range(100):
+            if not run_once():
+                break
+        # The three artifacts now exist, scoped to the org + the campaign.
+        camp_arts = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.campaign_id == camp["id"],
+                   Artifact.type == "content_draft")
+        ).scalars().all()
+        assert len(camp_arts) == 3, \
+            f"expected 3 campaign artifacts, got {len(camp_arts)}"
+        # Shared utm_campaign on every artifact; per-item source / medium
+        # / content vary so attribution reports can slice the campaign.
+        for a in camp_arts:
+            assert a.utm_campaign == camp["utm_campaign"], \
+                f"every artifact must carry the shared utm_campaign; got " \
+                f"{a.utm_campaign!r} vs {camp['utm_campaign']!r}"
+        sources = {a.utm_source for a in camp_arts}
+        mediums = {a.utm_medium for a in camp_arts}
+        contents = {a.utm_content for a in camp_arts}
+        assert sources == {"linkedin", "email"}, \
+            f"per-item utm_source must vary by channel; got {sources}"
+        assert mediums == {"social_post", "email", "ad"}, \
+            f"per-item utm_medium must vary by content_type; got {mediums}"
+        # utm_content carries the plan item slug — three distinct values.
+        assert len(contents) == 3, \
+            f"utm_content must be per-item unique; got {contents}"
+        # The campaign's generated_asset_ids is refreshed on detail read.
+        detail = client.get(f"/api/campaigns/{camp['id']}", headers=H_ONIT)
+        assert detail.status_code == 200
+        gen_ids = detail.json()["generated_asset_ids"]
+        assert set(gen_ids) == {a.id for a in camp_arts}
+        # Library projection picks the artifacts up — they are NORMAL
+        # content artifacts (the load-bearing principle).
+        lib = client.get(
+            f"/api/assets?asset_kind=content&product_id={product_id}",
+            headers=H_ONIT)
+        lib_ids = {a["id"] for a in lib.json()["assets"]}
+        for a in camp_arts:
+            assert a.id in lib_ids, \
+                f"campaign artifact {a.id} must appear in the library projection"
+        print(f"[OK] Campaign (4): /generate enqueued 3 content_engine "
+              f"runs; 3 artifacts landed with shared utm_campaign + per-"
+              f"item source ({sources}) / medium ({mediums}) / unique "
+              f"utm_content; campaign_id back-ref + library projection "
+              "both pick them up.")
+
+        # (5) Archive: campaign.status → archived; assets remain in the
+        # library AND keep their campaign_id back-ref (until the campaign
+        # row is hard-deleted, which we don't do here).
+        arch = client.delete(f"/api/campaigns/{camp['id']}", headers=H_ONIT)
+        assert arch.status_code == 200, arch.text
+        assert arch.json()["status"] == "archived"
+        # Assets still in the library, status untouched.
+        lib_after = client.get(
+            f"/api/assets?asset_kind=content&product_id={product_id}",
+            headers=H_ONIT)
+        lib_ids_after = {a["id"] for a in lib_after.json()["assets"]}
+        for a in camp_arts:
+            assert a.id in lib_ids_after, \
+                f"archive must NOT remove asset {a.id} from the library"
+        # An asset can also exist with campaign_id NULL — verify a non-
+        # campaign asset from earlier tests is still there.
+        existing_org_art = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.campaign_id.is_(None),
+                   Artifact.type == "content_draft").limit(1)
+        ).scalar_one_or_none()
+        assert existing_org_art is not None, \
+            "expected at least one campaign_id=NULL artifact (independence)"
+        print(f"[OK] Campaign (5): archived → assets remain in library "
+              f"({len(lib_ids_after)} content total, all 3 campaign assets "
+              f"preserved); campaign_id=NULL assets coexist (independence "
+              "holds — campaigns reference, don't own).")
+
+        # (6) Channel rec seam — accepts performance_context=None AND
+        # accepts a populated context arg (v1 ignores it). Verifies the
+        # FUTURE substrate-grounded path is wired but unbuilt.
+        r1 = planner_mod.recommend_channels(
+            "demand_gen", ["linkedin", "email"], "book a demo",
+            performance_context=None)
+        r2 = planner_mod.recommend_channels(
+            "demand_gen", ["linkedin", "email"], "book a demo",
+            performance_context={"future": "not implemented"})
+        assert r1["recommended_channels"], \
+            "v1 best-practice channels must be non-empty"
+        assert r1 == r2, \
+            "v1 must IGNORE performance_context — same output regardless"
+        # The function signature carries the keyword so a future build
+        # can wire substrate-grounded scoring without an API break.
+        import inspect
+        sig = inspect.signature(planner_mod.recommend_channels)
+        assert "performance_context" in sig.parameters
+        assert sig.parameters["performance_context"].default is None
+        print(f"[OK] Campaign (6): channel-rec seam reserved — "
+              f"performance_context=None default, callable with a context "
+              "arg, v1 ignores it (same output) — same discipline as the "
+              "dimensions column.")
+
+        # (7) Tenant isolation across propose/generate/patch + parent-asset.
+        cross_propose = client.post(
+            f"/api/campaigns/{camp['id']}/propose",
+            headers={**H_ACME, "Content-Type": "application/json"}, json={})
+        assert cross_propose.status_code in (403, 404), cross_propose.text
+        cross_gen = client.post(
+            f"/api/campaigns/{camp['id']}/generate",
+            headers={**H_ACME, "Content-Type": "application/json"}, json={})
+        assert cross_gen.status_code in (403, 404), cross_gen.text
+        cross_patch = client.patch(
+            f"/api/campaigns/{camp['id']}",
+            headers={**H_ACME, "Content-Type": "application/json"},
+            json={"name": "stolen"})
+        assert cross_patch.status_code in (403, 404), cross_patch.text
+        cross_archive = client.delete(
+            f"/api/campaigns/{camp['id']}", headers=H_ACME)
+        assert cross_archive.status_code in (403, 404), cross_archive.text
+        # Cross-org parent_asset attach denied — an Acme user can't make
+        # an Onit asset the parent of Onit's campaign (or any campaign).
+        any_onit_art = camp_arts[0]
+        cross_attach = client.post(
+            f"/api/campaigns/-/attach-asset/content/{any_onit_art.id}",
+            headers={**H_ACME, "Content-Type": "application/json"},
+            json={"campaign_id": camp["id"]})
+        assert cross_attach.status_code in (403, 404), cross_attach.text
+        print("[OK] Campaign (7): tenant isolation — propose / generate / "
+              "patch / archive / attach-asset all denied cross-org.")
+
+        # (8) Review gate honored — flip the org to gate_all and trigger
+        # a fresh generate run for ONE plan item. Verify the artifact
+        # lands status=pending_review AND a campaign-tagged Proposal
+        # exists in the approval queue.
+        # First create a small follow-up campaign so we don't fight the
+        # archived one's status. Same SimpleLegal product.
+        c2 = client.post(
+            "/api/campaigns",
+            headers={**H_ONIT, "Content-Type": "application/json"},
+            json={"name": "Onit gate-all check",
+                  "campaign_type": "demand_gen",
+                  "primary_cta": "book a demo",
+                  "product_id": sl_id,
+                  "selected_channels": ["linkedin"]}).json()
+        client.patch(
+            f"/api/campaigns/{c2['id']}",
+            headers={**H_ONIT, "Content-Type": "application/json"},
+            json={"plan": {
+                "derivative_assets": [
+                    {"id": "g1", "content_type": "social_post",
+                     "channel": "linkedin",
+                     "topic": "Single gate-all probe",
+                     "angle": "Test", "audience": "GC",
+                     "rationale": "Verify review gate",
+                     "cadence_hint": "Now"}],
+                "channel_mix": [], "cadence_guidance": "",
+                "source": "test"}})
+        _set_review_mode(onit.id, "gate_all")
+        try:
+            gate_gen = client.post(
+                f"/api/campaigns/{c2['id']}/generate",
+                headers={**H_ONIT, "Content-Type": "application/json"}, json={})
+            assert gate_gen.status_code == 200, gate_gen.text
+            assert gate_gen.json()["queued_count"] == 1
+            assert run_once() is True
+            gate_art = db.execute(
+                scoped(Artifact, onit.id)
+                .where(Artifact.campaign_id == c2["id"],
+                       Artifact.type == "content_draft")
+            ).scalar_one()
+            assert gate_art.status == "pending_review", \
+                f"gate_all must route to pending_review; got {gate_art.status}"
+            # Campaign-tagged Proposal lands in the approval queue.
+            gate_props = db.execute(
+                scoped(Proposal, onit.id)
+                .where(Proposal.campaign_id == c2["id"],
+                       Proposal.action_type == "content_review")
+            ).scalars().all()
+            assert len(gate_props) == 1, \
+                f"gate_all must produce one campaign-tagged proposal; got {len(gate_props)}"
+            assert gate_props[0].status == "pending"
+        finally:
+            _set_review_mode(onit.id, "guardrail")
+        print(f"[OK] Campaign (8): review gate honored — under gate_all, "
+              "campaign-generated draft lands status=pending_review and a "
+              "campaign-tagged content_review proposal sits in the approval "
+              "queue.")
 
         print("[OK] Smoke test passed.")
     finally:

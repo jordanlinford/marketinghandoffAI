@@ -524,49 +524,61 @@
 </main>
 
 <!-- ============================ Library (Step 5) ========================
-     Real placeholder. Everything generated or uploaded will land here. -->
+     Real Asset Library. Unified projection over content artifacts,
+     uploaded documents, and market briefs. Read-only with two writes:
+     duplicate (creates a new draft) and the regenerate-from-this entry
+     point (queues a content_engine run). "Add to campaign" routes to
+     the step-4 placeholder; Campaign Builder isn't built yet. -->
 <main id="library-view" class="setup-main" style="display:none;">
-  <div class="placeholder-banner">
-    <strong>Asset Library — coming next.</strong>
-    Everything generated or uploaded will be searchable, filterable, and
-    exportable from here.
-  </div>
-  <section class="panel placeholder-grid">
-    <h3 style="margin-top:0;">Filter</h3>
-    <div class="form-grid">
-      <div class="field"><label>Org</label>
-        <select disabled><option>(this org)</option></select></div>
+  <section class="panel">
+    <div class="row" style="margin-bottom:8px;">
+      <h2 style="margin:0">Asset Library</h2>
+      <span class="setup-status">
+        All generated content, uploaded documents, and market briefs for
+        this org — filter, search, view, copy, download, and reuse.
+      </span>
+    </div>
+
+    <div class="form-grid" style="grid-template-columns: repeat(4, 1fr);">
       <div class="field"><label>Product</label>
-        <select disabled><option>(any)</option></select></div>
-      <div class="field"><label>Campaign</label>
-        <select disabled><option>(any)</option></select></div>
-      <div class="field"><label>Asset type</label>
-        <select disabled>
-          <option>(any)</option>
-          <option>email</option><option>ad</option>
-          <option>social_post</option><option>blog_outline</option>
-          <option>buyer_guide</option><option>white_paper</option>
-          <option>case_study</option><option>report</option>
+        <select id="lib-product">
+          <option value="">(any — org-wide)</option>
         </select></div>
-      <div class="field"><label>Funnel stage</label>
-        <select disabled>
-          <option>(any)</option>
-          <option>Awareness (top)</option>
-          <option>Engagement (middle)</option>
-          <option>Opportunities (bottom)</option>
+      <div class="field"><label>Kind</label>
+        <select id="lib-kind">
+          <option value="">(any)</option>
+          <option value="content">content</option>
+          <option value="document">document</option>
+          <option value="brief">brief</option>
         </select></div>
+      <div class="field"><label>Type</label>
+        <input type="text" id="lib-type" placeholder="email, blog_outline, messaging_framework, market_brief, …" /></div>
       <div class="field"><label>Status</label>
-        <select disabled>
-          <option>(any)</option>
-          <option>ready</option>
-          <option>pending_review</option>
-          <option>rejected</option>
+        <input type="text" id="lib-status" placeholder="ready, extracted, pending_review, …" /></div>
+      <div class="field"><label>Campaign (utm_campaign)</label>
+        <input type="text" id="lib-campaign" placeholder="e.g. clm-comparison-q2" /></div>
+      <div class="field"><label>From</label>
+        <input type="date" id="lib-date-from" /></div>
+      <div class="field"><label>To</label>
+        <input type="date" id="lib-date-to" /></div>
+      <div class="field"><label>Sort</label>
+        <select id="lib-sort">
+          <option value="newest">newest first</option>
+          <option value="oldest">oldest first</option>
+          <option value="grade">grade (high to low)</option>
+          <option value="cost">cost (high to low)</option>
         </select></div>
+      <div class="field full"><label>Search</label>
+        <input type="text" id="lib-q"
+          placeholder="match against title + body / extracted text / brief narrative" /></div>
     </div>
-    <div class="empty-state" style="margin-top:18px;">
-      <div class="big">Your generated and uploaded assets will live here.</div>
-      <div>Library — coming next.</div>
+    <div class="row" style="margin-top:10px; gap:8px;">
+      <button id="lib-apply-btn">Apply filters</button>
+      <button id="lib-reset-btn" class="ghost">Reset</button>
+      <span id="lib-count" class="setup-status"></span>
     </div>
+    <div id="lib-list" style="margin-top:18px;"></div>
+    <div id="lib-detail" style="margin-top:18px;"></div>
   </section>
 </main>
 
@@ -2015,6 +2027,357 @@ async function uploadProductDoc() {
   }
 }
 
+// ---- Asset Library (step 5) ---------------------------------------------
+// Read/projection view over content + documents + briefs. Filter bar +
+// cards + detail drawer. Two writes: duplicate (creates a new draft) and
+// regenerate-from-this (queues a content_engine run pre-filled from the
+// source). "Add to campaign" routes to the step-4 placeholder.
+let _libState = { selectedAssetId: null, selectedAssetKind: null };
+
+function _libProductOptions() {
+  const sel = document.getElementById('lib-product');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">(any — org-wide)</option>';
+  for (const p of (state.products || [])) {
+    const opt = el('option', { value: p.id }, p.name);
+    sel.appendChild(opt);
+  }
+  // Default the product filter to the global selector when it's set.
+  sel.value = state.selectedProductId || '';
+}
+
+async function loadLibrary() {
+  _libProductOptions();
+  await fetchLibraryList();
+}
+
+async function fetchLibraryList() {
+  const root = document.getElementById('lib-list');
+  const counter = document.getElementById('lib-count');
+  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  counter.textContent = '';
+  const params = new URLSearchParams();
+  const productFilter = document.getElementById('lib-product').value;
+  if (productFilter) params.set('product_id', productFilter);
+  const kind = document.getElementById('lib-kind').value;
+  if (kind) params.set('asset_kind', kind);
+  const type = document.getElementById('lib-type').value.trim();
+  if (type) params.set('asset_type', type);
+  const status = document.getElementById('lib-status').value.trim();
+  if (status) params.set('status', status);
+  const campaign = document.getElementById('lib-campaign').value.trim();
+  if (campaign) params.set('campaign', campaign);
+  const dfrom = document.getElementById('lib-date-from').value;
+  if (dfrom) params.set('date_from', dfrom);
+  const dto = document.getElementById('lib-date-to').value;
+  if (dto) params.set('date_to', dto);
+  const sort = document.getElementById('lib-sort').value;
+  if (sort) params.set('sort', sort);
+  const q = document.getElementById('lib-q').value.trim();
+  if (q) params.set('q', q);
+  params.set('limit', '200');
+  let data;
+  try {
+    data = await api('/api/assets?' + params.toString());
+  } catch (e) {
+    root.innerHTML = `<div class="err">Failed to load: ${e.message}</div>`;
+    return;
+  }
+  counter.textContent = `${data.total} asset(s)` +
+    (productFilter ? ` · product-scoped` : ' · org-wide');
+  root.innerHTML = '';
+  if (!data.assets.length) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'No assets match those filters.'),
+      el('div', {}, 'Generate content in Create, or upload a framework ' +
+        'in Products — everything will collect here.'),
+    ));
+    return;
+  }
+  for (const a of data.assets) {
+    root.appendChild(_renderAssetCard(a));
+  }
+}
+
+function _renderAssetCard(a) {
+  const kindBadge = el('span',
+    { class: 'badge ' +
+      ({content: 'succeeded', document: 'passed', brief: 'pending'}[a.asset_kind] || 'pending') },
+    a.asset_kind);
+  const statusBadge = a.status
+    ? el('span', { class: `badge ${a.status}` }, a.status)
+    : null;
+  const grade = (a.grade != null)
+    ? ` · grade ${a.grade}` : '';
+  const cost = (a.cost_usd != null && a.cost_usd > 0)
+    ? ` · ${fmtCost(a.cost_usd)}` : '';
+  const camp = a.campaign ? ` · campaign=${a.campaign}` : '';
+  const card = el('div',
+    { class: 'proposal', style: 'cursor:pointer;',
+      onclick: () => openAssetDetail(a) },
+    el('div', { class: 'row' },
+      el('strong', {}, a.title || '(untitled)'),
+      kindBadge,
+    ),
+    el('div', { class: 'sub',
+      style: 'color:var(--muted); font-size:12px;' },
+      `${a.asset_type || '—'} · ${a.product_name || 'Org-level'} · ` +
+      `${fmtTime(a.created_at)}${grade}${cost}${camp}`),
+    statusBadge ? el('div', { style: 'margin-top:6px;' }, statusBadge) : null,
+  );
+  return card;
+}
+
+async function openAssetDetail(asset) {
+  _libState.selectedAssetId = asset.id;
+  _libState.selectedAssetKind = asset.asset_kind;
+  const root = document.getElementById('lib-detail');
+  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  const url = `/api/assets/${asset.asset_kind}/${asset.id}`;
+  let detail;
+  try {
+    detail = await api(url);
+  } catch (e) {
+    root.innerHTML = `<div class="err">Failed to load: ${e.message}</div>`;
+    return;
+  }
+  root.innerHTML = '';
+  root.appendChild(_renderAssetDetail(asset, detail));
+  root.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function _renderAssetDetail(asset, detail) {
+  const wrap = el('section', { class: 'panel detail',
+    style: 'margin-top:18px;' });
+  wrap.appendChild(el('h3', {},
+    asset.title || '(untitled)',
+    el('span', { class: 'badge ' + (asset.asset_kind),
+      style: 'margin-left:8px;' }, asset.asset_kind)));
+  wrap.appendChild(el('div', { class: 'sub',
+    style: 'color:var(--muted); font-size:12px; margin-bottom:10px;' },
+    `${asset.asset_type || '—'} · ` +
+    `${asset.product_name || 'Org-level'} · ` +
+    `${fmtTime(asset.created_at)}`));
+
+  if (asset.asset_kind === 'content') {
+    _renderContentDetailInto(wrap, asset, detail);
+  } else if (asset.asset_kind === 'document') {
+    _renderDocumentDetailInto(wrap, asset, detail);
+  } else if (asset.asset_kind === 'brief') {
+    _renderBriefDetailInto(wrap, asset, detail);
+  }
+  return wrap;
+}
+
+function _renderContentDetailInto(wrap, asset, detail) {
+  const content = (detail.body || {}).content || {};
+  const blocks = content.blocks || [];
+  for (const b of blocks) {
+    wrap.appendChild(el('div', { class: 'cluster' },
+      el('h4', {}, b.kind),
+      el('div', { style: 'white-space:pre-wrap;' }, b.text || ''),
+    ));
+  }
+  // Grade.
+  const grade = detail.grade;
+  if (grade && grade.overall != null) {
+    wrap.appendChild(el('div', { class: 'sub',
+      style: 'color:var(--muted); margin-top:8px;' },
+      `Grade ${grade.overall}/100 (advisory)`));
+  }
+  // UTMs + tagged URL.
+  const utmRow = [];
+  if (detail.utm_campaign) utmRow.push(`campaign=${detail.utm_campaign}`);
+  if (detail.utm_source) utmRow.push(`source=${detail.utm_source}`);
+  if (detail.utm_medium) utmRow.push(`medium=${detail.utm_medium}`);
+  if (detail.utm_content) utmRow.push(`content=${detail.utm_content}`);
+  if (utmRow.length) {
+    wrap.appendChild(el('div', { class: 'sub',
+      style: 'color:var(--muted); margin-top:4px;' },
+      'UTM: ' + utmRow.join(' · ')));
+  }
+  if (detail.tagged_url) {
+    wrap.appendChild(el('div', { class: 'sub',
+      style: 'color:var(--muted); font-family: ui-monospace, monospace; ' +
+             'word-break: break-all; margin-top:4px;' },
+      detail.tagged_url));
+  }
+  const composedText = blocks.map(b => b.text || '').join('\n\n');
+  wrap.appendChild(_actionsRow(asset, {
+    copyText: composedText,
+    downloads: [
+      { label: 'Download .md',
+        url: `/api/assets/content/${asset.id}/download?format=md` },
+      { label: 'Download .json',
+        url: `/api/assets/content/${asset.id}/download?format=json` },
+    ],
+    showDuplicate: true,
+    showRegenerate: true,
+  }));
+}
+
+function _renderDocumentDetailInto(wrap, asset, detail) {
+  wrap.appendChild(el('div', { class: 'sub',
+    style: 'color:var(--muted); margin-bottom:8px;' },
+    `${(detail.size_bytes / 1024).toFixed(1)} KB · ${detail.mime_type || '—'}` +
+    (detail.version_label ? ` · ${detail.version_label}` : '')));
+  if (detail.extraction_error) {
+    wrap.appendChild(el('div', { class: 'err' }, detail.extraction_error));
+  }
+  wrap.appendChild(el('details', {},
+    el('summary', { style: 'cursor:pointer;' },
+      `Extracted text (${(detail.extracted_text_preview || '').length} ` +
+      'chars shown)'),
+    el('pre', { style: 'white-space:pre-wrap; max-height: 320px; overflow:auto;' },
+      detail.extracted_text_preview || '(empty)'),
+  ));
+  if (detail.insights && detail.insights.length) {
+    wrap.appendChild(el('h4', { style: 'margin-top:10px;' },
+      `Extracted insights (${detail.insights.length})`));
+    const ul = el('ul', { class: 'recs' });
+    for (const i of detail.insights) {
+      ul.appendChild(el('li', {},
+        `${i.field_name} · ${i.status} · conf ${(i.confidence * 100).toFixed(0)}%`));
+    }
+    wrap.appendChild(ul);
+  }
+  wrap.appendChild(_actionsRow(asset, {
+    copyText: detail.extracted_text_preview || '',
+    downloads: [
+      { label: 'Download original',
+        url: `/api/assets/document/${asset.id}/download` },
+      { label: 'Download extracted .txt',
+        url: `/api/assets/document/${asset.id}/extracted-text` },
+    ],
+  }));
+}
+
+function _renderBriefDetailInto(wrap, asset, detail) {
+  const body = detail.body || {};
+  if (body.narrative) {
+    wrap.appendChild(el('div', { class: 'narrative', html: marked.parse(body.narrative) }));
+  }
+  const structured = body.structured || {};
+  if (structured.recommendations && structured.recommendations.length) {
+    wrap.appendChild(el('h4', { style: 'margin-top:10px;' }, 'Recommendations'));
+    const ul = el('ul', { class: 'recs' });
+    for (const r of structured.recommendations) ul.appendChild(el('li', {}, r));
+    wrap.appendChild(ul);
+  }
+  wrap.appendChild(_actionsRow(asset, {
+    copyText: body.narrative || asset.title,
+    downloads: [
+      { label: 'Download .md',
+        url: `/api/assets/brief/${asset.id}/download` },
+    ],
+    showRegenerate: true,
+  }));
+}
+
+function _actionsRow(asset, opts) {
+  const row = el('div', { class: 'actions', style: 'margin-top:14px;' });
+  // Copy.
+  const copyBtn = el('button', { class: 'ghost' }, 'Copy to clipboard');
+  copyBtn.addEventListener('click', () => {
+    navigator.clipboard.writeText(opts.copyText || '')
+      .catch(() => {})
+      .finally(() => {
+        copyBtn.textContent = 'Copied!';
+        setTimeout(() => { copyBtn.textContent = 'Copy to clipboard'; }, 1200);
+      });
+  });
+  row.appendChild(copyBtn);
+  // Downloads.
+  for (const d of (opts.downloads || [])) {
+    const btn = el('button', { class: 'ghost' }, d.label);
+    btn.addEventListener('click', () => {
+      // Re-serve via XHR so we can attach the dev-auth header. Then
+      // synthesize a file download from the blob.
+      libDownload(d.url);
+    });
+    row.appendChild(btn);
+  }
+  // Duplicate (content only).
+  if (opts.showDuplicate) {
+    const dupBtn = el('button', { class: 'approve' }, 'Duplicate as draft');
+    dupBtn.addEventListener('click', () => duplicateAsset(asset.id));
+    row.appendChild(dupBtn);
+  }
+  // Regenerate (content + brief).
+  if (opts.showRegenerate) {
+    const regenBtn = el('button', { class: 'approve' }, 'Regenerate from this');
+    regenBtn.addEventListener('click', () =>
+      regenerateFromAsset(asset.asset_kind, asset.id));
+    row.appendChild(regenBtn);
+  }
+  // Add to campaign (placeholder for step 4).
+  const campBtn = el('button', { class: 'ghost' }, 'Add to campaign');
+  campBtn.addEventListener('click', () =>
+    routeToCampaign(asset.asset_kind, asset.id));
+  row.appendChild(campBtn);
+  return row;
+}
+
+async function libDownload(url) {
+  try {
+    const res = await fetch(url, {
+      headers: { 'X-Dev-User-Email': state.email } });
+    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+    // Pull filename from Content-Disposition (best-effort).
+    const cd = res.headers.get('content-disposition') || '';
+    const m = cd.match(/filename="?([^";]+)"?/i);
+    const filename = m ? m[1] : 'asset';
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    const obj = URL.createObjectURL(blob);
+    a.href = obj;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(obj), 1000);
+  } catch (e) {
+    alert(`Download failed: ${e.message}`);
+  }
+}
+
+async function duplicateAsset(artifactId) {
+  try {
+    const r = await api(`/api/assets/content/${artifactId}/duplicate`,
+      { method: 'POST', body: JSON.stringify({}) });
+    alert(`Duplicate created (id=${r.id.slice(0, 8)}…). Find it in the list.`);
+    await fetchLibraryList();
+  } catch (e) {
+    alert(`Duplicate failed: ${e.message}`);
+  }
+}
+
+async function regenerateFromAsset(kind, assetId) {
+  try {
+    const r = await api(`/api/assets/${kind}/${assetId}/regenerate`,
+      { method: 'POST', body: JSON.stringify({}) });
+    // Hop to Create and select the new run so the user can watch it land.
+    switchView('create');
+    await loadRuns();
+    if (r && r.id) selectRun(r.id);
+  } catch (e) {
+    alert(`Regenerate failed: ${e.message}`);
+  }
+}
+
+async function routeToCampaign(kind, assetId) {
+  try {
+    const r = await api(`/api/assets/${kind}/${assetId}/route-to-campaign`,
+      { method: 'POST', body: JSON.stringify({}) });
+    // Campaign Builder is a placeholder. We land there with the asset id
+    // tucked into module-local state so the (future) builder can pick it up.
+    state.pendingCampaignAsset = { kind: r.asset_kind, id: r.asset_id };
+    switchView('campaigns');
+  } catch (e) {
+    alert(`Route to campaign failed: ${e.message}`);
+  }
+}
+
 async function createProduct() {
   const name = document.getElementById('np-name').value.trim();
   const slug = document.getElementById('np-slug').value.trim();
@@ -2797,7 +3160,7 @@ const _VIEWS = {
   products:     { panel: 'products-view',     tab: 'tab-products',      onEnter: () => { loadProducts(); loadProductDocs(); renderProductsBreadcrumb(); } },
   create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); } },
   campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: () => {} },
-  library:      { panel: 'library-view',      tab: 'tab-library',       onEnter: () => {} },
+  library:      { panel: 'library-view',      tab: 'tab-library',       onEnter: loadLibrary },
   insights:     { panel: 'insights-view',     tab: 'tab-insights',      onEnter: () => { renderInsightsBreadcrumb(); loadDashboard(); } },
 };
 
@@ -3118,7 +3481,26 @@ document.getElementById('product-selector').addEventListener('change', (ev) => {
   if (v === 'insights')  { renderInsightsBreadcrumb(); loadDashboard(); }
   if (v === 'products')  { loadProductDocs(); renderProductsBreadcrumb(); }
   if (v === 'home')      loadCommandCenter();
+  if (v === 'library')   loadLibrary();
 });
+const _libApplyBtn = document.getElementById('lib-apply-btn');
+if (_libApplyBtn) {
+  _libApplyBtn.addEventListener('click', fetchLibraryList);
+  document.getElementById('lib-reset-btn').addEventListener('click', () => {
+    for (const id of ['lib-type', 'lib-status', 'lib-campaign',
+                      'lib-date-from', 'lib-date-to', 'lib-q']) {
+      const el = document.getElementById(id);
+      if (el) el.value = '';
+    }
+    document.getElementById('lib-kind').value = '';
+    document.getElementById('lib-sort').value = 'newest';
+    document.getElementById('lib-product').value = state.selectedProductId || '';
+    fetchLibraryList();
+  });
+  document.getElementById('lib-q').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') fetchLibraryList();
+  });
+}
 document.getElementById('np-create-btn').addEventListener('click', createProduct);
 document.getElementById('doc-upload-btn').addEventListener('click', uploadProductDoc);
 document.getElementById('path-manual').addEventListener('click', () => {

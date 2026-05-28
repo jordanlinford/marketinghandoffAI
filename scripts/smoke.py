@@ -2423,6 +2423,303 @@ def main() -> None:
               "no 'Tone:' label, and the user message ships a placeholder "
               "schema (not rendered fallback text).")
 
+        # ---------------------------------------------------------------------
+        # Asset Library — six checks:
+        #   (1) GET /api/assets returns content + document + brief assets
+        #       normalized into the unified shape; counts match underlying
+        #       rows.
+        #   (2) Filters combine (product/kind/type/status/campaign/date)
+        #       and search matches title/body/extracted_text.
+        #   (3) Tenant isolation: Acme sees 0 of Onit's assets;
+        #       cross-org detail/download/reuse denied (403/404).
+        #   (4) Download composition: content → clean .md; doc download
+        #       is scoped (cross-org denied) and returns the file.
+        #   (5) Reuse routing: duplicate creates new artifact preserving
+        #       blocks; regenerate creates a content_engine run pre-
+        #       filled from the source; route-to-campaign returns the
+        #       step-4 placeholder target with the asset id and creates
+        #       no campaign.
+        #   (6) Product-selector scoping: ?product_id= filters to that
+        #       product; omitting it returns the org-wide view.
+        # ---------------------------------------------------------------------
+        H_ONIT = {"X-Dev-User-Email": "jordan@onit.com"}
+        H_ACME = {"X-Dev-User-Email": "ops@acme.com"}
+
+        # (1) Unified projection + counts match underlying rows.
+        all_assets = client.get("/api/assets?limit=500", headers=H_ONIT)
+        assert all_assets.status_code == 200, all_assets.text
+        aj = all_assets.json()
+        assets_total = aj["total"]
+        by_kind = {}
+        for a in aj["assets"]:
+            by_kind.setdefault(a["asset_kind"], []).append(a)
+        # Cross-check counts against the source tables (Onit's rows).
+        content_artifacts = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.type.in_(("content_draft", "content_ideas")))
+        ).scalars().all()
+        brief_artifacts = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.type == "market_brief")
+        ).scalars().all()
+        all_docs = db.execute(scoped(ProductDocument, onit.id)).scalars().all()
+        assert len(by_kind.get("content", [])) == len(content_artifacts), \
+            f"content count {len(by_kind.get('content', []))} vs " \
+            f"{len(content_artifacts)} artifacts"
+        assert len(by_kind.get("brief", [])) == len(brief_artifacts), \
+            f"brief count {len(by_kind.get('brief', []))} vs " \
+            f"{len(brief_artifacts)} brief artifacts"
+        assert len(by_kind.get("document", [])) == len(all_docs), \
+            f"document count {len(by_kind.get('document', []))} vs " \
+            f"{len(all_docs)} product_documents"
+        assert assets_total == (
+            len(content_artifacts) + len(brief_artifacts) + len(all_docs))
+        # Schema shape check on one of each kind.
+        for kind in ("content", "document", "brief"):
+            sample = next((a for a in aj["assets"] if a["asset_kind"] == kind), None)
+            if sample is None:
+                continue
+            for required in ("id", "title", "asset_type", "status",
+                             "created_at", "source_ref"):
+                assert required in sample, f"{kind} asset missing {required}"
+        print(f"[OK] Library (1): {assets_total} assets normalized "
+              f"({len(by_kind.get('content', []))} content / "
+              f"{len(by_kind.get('document', []))} document / "
+              f"{len(by_kind.get('brief', []))} brief); counts match underlying tables.")
+
+        # (2) Filters combine + search works.
+        # Filter to documents only.
+        docs_only = client.get("/api/assets?asset_kind=document", headers=H_ONIT)
+        assert docs_only.status_code == 200, docs_only.text
+        for a in docs_only.json()["assets"]:
+            assert a["asset_kind"] == "document"
+        # Filter by status=extracted on documents.
+        extracted = client.get(
+            "/api/assets?asset_kind=document&status=extracted", headers=H_ONIT)
+        for a in extracted.json()["assets"]:
+            assert a["asset_kind"] == "document" and a["status"] == "extracted"
+        # Filter content by campaign — Onit has a "clm-comparison-q2"
+        # campaign-tagged regen artifact from the quality-loop tests.
+        camp_resp = client.get(
+            "/api/assets?asset_kind=content&campaign=clm-comparison-q2",
+            headers=H_ONIT)
+        camp_assets = camp_resp.json()["assets"]
+        assert camp_assets, "campaign filter must surface tagged content"
+        for a in camp_assets:
+            assert a["campaign"] == "clm-comparison-q2"
+        # Combine product_id + asset_kind=content (SimpleLegal CLM).
+        prod_content = client.get(
+            f"/api/assets?product_id={sl_id}&asset_kind=content",
+            headers=H_ONIT)
+        for a in prod_content.json()["assets"]:
+            assert a["product_id"] == sl_id
+            assert a["asset_kind"] == "content"
+        # Search across title + body. The smoke generated a draft with
+        # "Cost-saving framework" in the topic — search must find it.
+        search_resp = client.get(
+            "/api/assets?q=cost-saving", headers=H_ONIT)
+        assert search_resp.status_code == 200
+        assert any("cost-saving" in (a["title"] or "").lower()
+                   or "cost" in (a["title"] or "").lower()
+                   for a in search_resp.json()["assets"]), \
+            "search must surface a content asset with 'cost' in the title"
+        # Search across document extracted_text — the seeded framework doc
+        # contains "modern matter management". Documents must surface.
+        doc_search = client.get(
+            "/api/assets?asset_kind=document&q=modern%20matter", headers=H_ONIT)
+        assert any(a["asset_kind"] == "document"
+                   for a in doc_search.json()["assets"]), \
+            f"extracted-text search must surface the framework doc; got " \
+            f"{[a['title'] for a in doc_search.json()['assets']]}"
+        # Date range — narrowing to a far-past window returns nothing.
+        empty = client.get(
+            "/api/assets?date_from=1990-01-01&date_to=1990-12-31",
+            headers=H_ONIT)
+        assert empty.status_code == 200 and empty.json()["total"] == 0
+        print(f"[OK] Library (2): filters AND together (kind/status/"
+              f"campaign/product/date) + search hits title and "
+              f"extracted_text.")
+
+        # (3) Tenant isolation: Acme can't see Onit's assets, can't
+        # fetch details, can't reuse them.
+        acme_assets = client.get("/api/assets?limit=500", headers=H_ACME)
+        assert acme_assets.status_code in (200, 403, 404), acme_assets.text
+        if acme_assets.status_code == 200:
+            assert acme_assets.json()["total"] == 0, \
+                f"TENANT LEAK: Acme sees {acme_assets.json()['total']} assets"
+        # Pick a known Onit asset for cross-org detail/reuse probes.
+        a_content = next(a for a in aj["assets"] if a["asset_kind"] == "content")
+        a_doc = next(a for a in aj["assets"] if a["asset_kind"] == "document")
+        a_brief = next((a for a in aj["assets"] if a["asset_kind"] == "brief"),
+                       None)
+        cross_detail = client.get(
+            f"/api/assets/content/{a_content['id']}", headers=H_ACME)
+        assert cross_detail.status_code in (403, 404), cross_detail.text
+        cross_doc_dl = client.get(
+            f"/api/assets/document/{a_doc['id']}/download", headers=H_ACME)
+        assert cross_doc_dl.status_code in (403, 404), cross_doc_dl.text
+        cross_dup = client.post(
+            f"/api/assets/content/{a_content['id']}/duplicate",
+            headers={**H_ACME, "Content-Type": "application/json"})
+        assert cross_dup.status_code in (403, 404), cross_dup.text
+        cross_regen = client.post(
+            f"/api/assets/content/{a_content['id']}/regenerate",
+            headers={**H_ACME, "Content-Type": "application/json"}, json={})
+        assert cross_regen.status_code in (403, 404), cross_regen.text
+        cross_route = client.post(
+            f"/api/assets/content/{a_content['id']}/route-to-campaign",
+            headers=H_ACME)
+        assert cross_route.status_code in (403, 404), cross_route.text
+        print("[OK] Library (3): tenant isolation holds — Acme list is "
+              "empty; cross-org detail/download/duplicate/regenerate/"
+              "route-to-campaign all denied.")
+
+        # (4) Download composition + scoped doc download.
+        # Pick a content_draft (not content_ideas) for a proper .md.
+        draft_id = None
+        for a in by_kind.get("content", []):
+            if a["asset_type"] in ("email", "ad", "social_post", "blog_outline"):
+                draft_id = a["id"]
+                break
+        assert draft_id, "expected at least one content_draft for download test"
+        md = client.get(
+            f"/api/assets/content/{draft_id}/download?format=md",
+            headers=H_ONIT)
+        assert md.status_code == 200
+        assert "text/markdown" in md.headers["content-type"]
+        assert md.headers.get("content-disposition", "").startswith("attachment"), \
+            md.headers
+        assert md.text.startswith("# "), \
+            f".md must start with an H1 title; got {md.text[:80]!r}"
+        assert "## " in md.text, "blocks should compose into H2 sections"
+        # JSON variant.
+        as_json = client.get(
+            f"/api/assets/content/{draft_id}/download?format=json",
+            headers=H_ONIT)
+        assert as_json.status_code == 200
+        import json as _json
+        parsed = _json.loads(as_json.text)
+        assert parsed["id"] == draft_id and "body" in parsed
+        # Document download — original file, scoped, with the right
+        # filename header.
+        d_dl = client.get(
+            f"/api/assets/document/{a_doc['id']}/download", headers=H_ONIT)
+        assert d_dl.status_code == 200, d_dl.text
+        assert "attachment" in d_dl.headers.get("content-disposition", "")
+        # And the extracted-text companion.
+        ex_txt = client.get(
+            f"/api/assets/document/{a_doc['id']}/extracted-text",
+            headers=H_ONIT)
+        assert ex_txt.status_code == 200
+        assert "text/plain" in ex_txt.headers["content-type"]
+        print(f"[OK] Library (4): content composes into clean .md "
+              f"({len(md.text)} chars) + raw .json; document download "
+              "serves the original file; cross-org doc download denied.")
+
+        # (5) Reuse routing.
+        # 5a. Duplicate creates a new draft with parent_id, status=ready,
+        # blocks preserved verbatim.
+        dup = client.post(
+            f"/api/assets/content/{draft_id}/duplicate",
+            headers={**H_ONIT, "Content-Type": "application/json"})
+        assert dup.status_code == 200, dup.text
+        dup_j = dup.json()
+        dup_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.id == dup_j["id"])
+        ).scalar_one()
+        source_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.id == draft_id)
+        ).scalar_one()
+        assert dup_art.parent_id == source_art.id, \
+            f"duplicate must link back via parent_id; got {dup_art.parent_id!r}"
+        assert dup_art.type == "content_draft"
+        assert dup_art.status == "ready"
+        assert dup_art.title.startswith("Duplicate of ")
+        assert dup_art.run_id != source_art.run_id, \
+            "duplicate must live on a NEW Run (synthetic, cost=0)"
+        dup_run = db.execute(
+            scoped(Run, onit.id).where(Run.id == dup_art.run_id)
+        ).scalar_one()
+        assert dup_run.cost_usd == 0.0
+        assert dup_run.trigger == "duplicate"
+        # Blocks preserved verbatim — the user edits FROM here.
+        assert (dup_art.body or {}).get("content", {}).get("blocks") == \
+            (source_art.body or {}).get("content", {}).get("blocks")
+        # 5b. Regenerate from a content asset queues a content_engine
+        # run pre-filled with the source's content_type + topic + target.
+        # We override action_type to ensure it actually goes through the
+        # generate path.
+        regen = client.post(
+            f"/api/assets/content/{draft_id}/regenerate",
+            headers={**H_ONIT, "Content-Type": "application/json"}, json={})
+        assert regen.status_code == 200, regen.text
+        rj = regen.json()
+        assert rj["agent_key"] == "content_engine"
+        assert rj["status"] == "queued"
+        assert rj["task"]["action"] == "generate"
+        assert rj["task"]["content_type"], "content_type must be pre-filled"
+        assert rj["task"]["topic"], "topic must be pre-filled"
+        # Pre-fill MUST match the source.
+        src_content = (source_art.body or {}).get("content") or {}
+        src_metadata = src_content.get("metadata") or {}
+        assert rj["task"]["content_type"] == src_content.get("content_type")
+        assert rj["task"]["topic"] == src_metadata.get("topic") \
+            or rj["task"]["topic"] == source_art.title
+        # Brief regenerate: source from a market_brief artifact.
+        if a_brief:
+            brief_regen = client.post(
+                f"/api/assets/brief/{a_brief['id']}/regenerate",
+                headers={**H_ONIT, "Content-Type": "application/json"},
+                json={"content_type": "ad"})
+            assert brief_regen.status_code == 200, brief_regen.text
+            brj = brief_regen.json()
+            assert brj["agent_key"] == "content_engine"
+            assert brj["task"]["action"] == "generate"
+            assert brj["task"]["content_type"] == "ad", brj
+            assert brj["task"]["topic"], "brief regen must derive a topic"
+        # 5c. Route-to-campaign is a PLACEHOLDER — validates ownership
+        # and returns the routing payload; no campaign created (no
+        # campaigns table exists).
+        route = client.post(
+            f"/api/assets/content/{draft_id}/route-to-campaign",
+            headers=H_ONIT)
+        assert route.status_code == 200, route.text
+        route_j = route.json()
+        assert route_j == {**route_j, "placeholder": True,
+                           "target_view": "campaigns",
+                           "asset_id": draft_id,
+                           "asset_kind": "content"}, route_j
+        print(f"[OK] Library (5): duplicate creates a new draft "
+              f"preserving blocks (parent_id linkage holds, cost=0); "
+              f"regenerate queues a content_engine run pre-filled from "
+              f"source ({rj['task']['content_type']}/{rj['task']['topic']!r}); "
+              "route-to-campaign returns the step-4 placeholder target "
+              "with the asset id (no campaign created).")
+
+        # (6) Product-selector scoping: ?product_id= filters; omitting
+        # it returns the org-wide view.
+        all_scoped = client.get(
+            f"/api/assets?product_id={sl_id}&limit=500", headers=H_ONIT)
+        for a in all_scoped.json()["assets"]:
+            assert a["product_id"] == sl_id, \
+                f"with ?product_id={sl_id[:6]}, every asset must scope; got " \
+                f"{a['product_id']!r}"
+        # Org-wide is strictly larger (includes org-level + other products).
+        assert all_scoped.json()["total"] < assets_total, \
+            f"product-scoped total ({all_scoped.json()['total']}) must be " \
+            f"strictly less than org-wide ({assets_total})"
+        # An org-level run (no product_id) appears in the org-wide view
+        # but NOT in the product-scoped one — sanity check the boundary.
+        org_level = [a for a in aj["assets"] if a["product_id"] is None]
+        assert org_level, "expected at least one org-level asset"
+        scoped_ids = {a["id"] for a in all_scoped.json()["assets"]}
+        for a in org_level:
+            assert a["id"] not in scoped_ids, \
+                f"org-level asset {a['id']!r} leaked into product-scoped view"
+        print(f"[OK] Library (6): product-scoped view returns "
+              f"{all_scoped.json()['total']} of {assets_total} assets "
+              "(strict subset; org-level rows excluded).")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

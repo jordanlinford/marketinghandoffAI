@@ -99,6 +99,12 @@ class AgentContext:
     # data (e.g. banned_claims). Agents call app.guardrails.evaluate() against
     # this dict — they do not read the Guardrail table directly.
     guardrail_rules: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Persistent marketing memory — list of Pattern dicts pre-loaded by
+    # the worker via app.memory.query_memory(). The agent never queries
+    # the DB; if it needs memory it READS it from ctx, same contract as
+    # prior_artifacts + guardrail_rules. Empty list = no telemetry yet
+    # (backwards compat: agents behave exactly as they always have).
+    memory_patterns: list[dict[str, Any]] = field(default_factory=list)
     get_market_data: Callable[[], Any] | None = None
     log: Callable[[str], None] = lambda msg: None
 

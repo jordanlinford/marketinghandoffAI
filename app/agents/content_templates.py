@@ -302,6 +302,17 @@ def _compose_style_brief(profile: dict, brief: dict | None) -> str:
         if recs:
             parts.append("Recent market intel takeaway(s) you can lean on: "
                          + "; ".join(str(r) for r in recs[:3]))
+    # Persistent marketing memory — past-tense observations about what has
+    # historically performed for this org. Woven as instructional prose
+    # (NEVER as a labeled field) so the no-echo discipline holds: the
+    # model embodies the guidance, it does not narrate it. Memory is
+    # context for shaping; it never overrides voice or framework grounding.
+    memory_summary = (profile.get("memory_summary") or "").strip()
+    if memory_summary:
+        parts.append(
+            "What has historically worked for this org (use as background "
+            "for shaping the copy — do not describe, label, or quote this "
+            "guidance in the output):\n" + memory_summary)
     return "\n".join(f"- {p}" for p in parts) if parts else \
         "- No additional profile context available; rely on the topic alone."
 

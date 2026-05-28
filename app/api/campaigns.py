@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.agents.utm import build_tagged_url
 from app.auth import current_user
 from app.campaigns.planner import propose_plan, recommend_channels
+from app.memory import query_memory
 from app.db import get_db
 from app.models import (AgentRegistration, Artifact, Campaign, ProductProfile,
                         Run, User, _now)
@@ -315,10 +316,20 @@ def propose(campaign_id: str,
                 b.get("text", "") for b in blocks)[:1500]
     plan, cost = propose_plan(c, profile, parent_summary)
     c.plan = plan
-    # Recommendations are saved separately so the UI can show them next
-    # to the plan. Same data; different read path.
+    # Memory-loop wiring: populate the reserved performance_context seam
+    # with patterns derived from the org's metric_points. With NO data,
+    # query_memory returns [] and recommend_channels falls back to its
+    # best-practice v1 behavior — full backwards compat. When patterns
+    # exist with at-least-`low` confidence, the planner may reorder the
+    # mix and the rationale will cite the metric_basis. Same shared
+    # entry point the content engine uses (the ONE infrastructure
+    # service — there is no second retrieval module).
+    patterns = query_memory(db, user.org_id,
+                            product_id=c.product_id,
+                            campaign_type=c.campaign_type)
     c.channel_recommendations = recommend_channels(
-        c.campaign_type, c.selected_channels, c.primary_cta)
+        c.campaign_type, c.selected_channels, c.primary_cta,
+        performance_context=patterns)
     c.updated_at = _now()
     db.commit()
     db.refresh(c)

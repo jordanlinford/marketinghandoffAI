@@ -164,6 +164,19 @@ def process_run(db: Session, run: Run) -> None:
     # Per-run task: prefer the explicit one persisted on the Run row (set by
     # the API caller), fall back to the agent's default_task from its config.
     task = run.task if run.task else reg.config.get("default_task", {})
+    # Pre-load persistent marketing memory. The agent never queries the DB;
+    # the worker hands it a list of evidence-backed Pattern dicts. With no
+    # telemetry yet, this returns [] and agents fall back to today's
+    # behavior — full backwards compat. Memory is the ONE shared service
+    # both content_engine and the campaign planner call (planner calls it
+    # directly from /api/campaigns/{id}/propose where a db is on hand).
+    from app.memory import query_memory  # local import: keeps cold paths cheap
+    memory_patterns = query_memory(
+        db, run.org_id,
+        product_id=run.product_id,
+        campaign_type=(task.get("campaign_type") if isinstance(task, dict) else None),
+        content_type=(task.get("content_type") if isinstance(task, dict) else None),
+    )
     ctx = AgentContext(
         org_id=run.org_id,
         org_name=org_name,
@@ -188,6 +201,7 @@ def process_run(db: Session, run: Run) -> None:
             _latest_market_brief(db, run.org_id),
         ) if a],
         guardrail_rules=rules_by_scope,
+        memory_patterns=memory_patterns,
         get_market_data=lambda: _resolve_market_data(db, run.org_id, run.upload_id),
         log=logs.append,
     )

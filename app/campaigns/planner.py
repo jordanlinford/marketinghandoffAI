@@ -157,42 +157,163 @@ def recommend_channels(campaign_type: str,
                        selected_channels: list[str] | None,
                        primary_cta: str,
                        *,
-                       performance_context: dict | None = None) -> dict:
-    """Generic best-practice channel mix. v1 is deterministic.
+                       performance_context: list | dict | None = None) -> dict:
+    """Best-practice channel mix, reordered by the org's own historical
+    performance when the data supports it.
 
-    `performance_context` is RESERVED for a future substrate-grounded
-    build (Build B's dimensions-column discipline applied to the planner):
-    when wired, it will carry metric_points-derived channel conversion
-    data, attribution outcomes, and engagement patterns the planner can
-    weigh. v1 IGNORES it; the smoke test verifies the seam exists and
-    that v1 passes None.
+    `performance_context` is the list of patterns returned by
+    `app.memory.query_memory()`. With NO patterns (empty list, None, or
+    nothing above `insufficient`), we fall through to the deterministic
+    v1 best-practice mix and say so. When at-least-`low`-confidence
+    channel patterns exist, the mix is reordered by observed conversion
+    rate and the rationale for each reordered channel CITES the
+    metric_basis (clicks, conversions, rate, sample size). `insufficient`
+    patterns are NEVER allowed to reorder — they're informational.
+
+    Backwards compat: the legacy `dict | None` shape is still accepted
+    so older callers don't break; only the `list` shape is treated as
+    memory patterns.
 
     Returns:
       {"recommended_channels": [...],
        "channel_mix": [{channel, weight, rationale}, ...],
-       "rationale": "<one-line summary>"}
+       "rationale": "<one-line summary>",
+       "memory_evidence": [...],   # the patterns that drove reorder, when
+                                   # applicable; empty list otherwise
+       "memory_status": "best_practice" | "memory_informed"}
     """
     ctype = (campaign_type or "other").lower()
     weights = dict(_TYPE_CHANNEL_WEIGHTS.get(ctype, _TYPE_CHANNEL_WEIGHTS["other"]))
-    # If the user explicitly picked channels, prefer those — bump anything
-    # they picked to at least "secondary" so the recommendation respects
-    # the user's intent without overriding the type's primaries.
     selected = [c.lower() for c in (selected_channels or []) if c]
     for c in selected:
         weights.setdefault(c, "secondary")
+
+    # Pull the channel-only patterns out of performance_context. We
+    # ignore everything that isn't `low`/`moderate`/`high`. `insufficient`
+    # patterns are kept in `memory_evidence` so the UI can show "watching
+    # this dimension" honestly without letting it move the mix.
+    channel_patterns: list[dict] = []
+    informational: list[dict] = []
+    if isinstance(performance_context, list):
+        for p in performance_context:
+            if p.get("dimension") != "channel":
+                continue
+            if p.get("confidence") in ("low", "moderate", "high"):
+                channel_patterns.append(p)
+            elif p.get("confidence") == "insufficient":
+                informational.append(p)
+
+    memory_status = "best_practice"
+    memory_evidence: list[dict] = []
+
+    if channel_patterns:
+        # Reorder: any channel with an OBSERVED conversion rate beats
+        # the best-practice ordering. Strongest signal first. We DO NOT
+        # invent new channels — the mix is still drawn from
+        # _TYPE_CHANNEL_WEIGHTS + user-selected; memory only re-weights
+        # the existing slate.
+        memory_status = "memory_informed"
+        rate_by_channel: dict[str, float] = {}
+        basis_by_channel: dict[str, dict] = {}
+        for p in channel_patterns:
+            mb = p.get("metric_basis") or {}
+            rate = mb.get("conversion_rate")
+            if rate is None:
+                # No denominator — fall back to conversion volume as a
+                # weak signal so a channel with real conversions but
+                # missing click data still gets a nudge.
+                rate = (mb.get("conversions") or 0) / 1000.0
+            rate_by_channel[p["key"]] = rate
+            basis_by_channel[p["key"]] = mb
+            memory_evidence.append({
+                "key": p["key"], "key_display": p.get("key_display") or p["key"],
+                "observation": p.get("observation", ""),
+                "metric_basis": mb,
+                "confidence": p.get("confidence"),
+            })
+
+        # Promote channels that had a measurably-better rate than the
+        # best of their best-practice weight tier. We only PROMOTE — we
+        # never demote a best-practice primary based on a single low-
+        # confidence row, because the user picked primaries for a
+        # reason and our signal has to clear a bar before it overrides.
+        for chan, rate in rate_by_channel.items():
+            if chan in weights and weights[chan] == "primary":
+                continue  # already top of the heap
+            if rate > 0:
+                # If memory says this channel converts, bump it to
+                # primary. Best-practice primaries stay primary; this
+                # adds a *second* primary alongside the type defaults.
+                weights[chan] = "primary"
+
     mix = [{"channel": c, "weight": w,
-            "rationale": _channel_rationale(c, ctype, primary_cta)}
+            "rationale": _channel_rationale_with_memory(
+                c, ctype, primary_cta, basis=(
+                    basis_by_channel.get(c) if memory_status == "memory_informed"
+                    else None))}
            for c, w in weights.items()]
+    # Sort: primaries first, then memory-promoted channels by observed
+    # rate within the primary tier; secondary; support. Deterministic.
+    _W = {"primary": 0, "secondary": 1, "support": 2}
+    if memory_status == "memory_informed":
+        rate_by_channel_local = {p["key"]: (p.get("metric_basis") or {}).get(
+            "conversion_rate") or 0.0 for p in channel_patterns}
+        mix.sort(key=lambda m: (
+            _W.get(m["weight"], 99),
+            -(rate_by_channel_local.get(m["channel"]) or 0.0),
+            m["channel"],
+        ))
+    else:
+        mix.sort(key=lambda m: (_W.get(m["weight"], 99), m["channel"]))
+
+    if memory_status == "memory_informed":
+        rationale = (
+            f"{ctype.replace('_', ' ').title()} mix reordered by your own "
+            f"performance history — channels with observed conversion "
+            f"data were promoted (see memory_evidence for the 'because')."
+        )
+    else:
+        suffix = ""
+        if informational:
+            keys = ", ".join(p.get("key_display") or p["key"]
+                             for p in informational[:3])
+            suffix = (f" Watching: {keys} — not enough data yet to "
+                      f"reorder.")
+        rationale = (
+            f"Best-practice mix for a {ctype.replace('_', ' ')} campaign "
+            f"driving toward {(primary_cta or 'the CTA').strip()}. "
+            f"No performance history above the 'insufficient' threshold "
+            f"for this combination yet.{suffix}")
+
     return {
         "recommended_channels": [m["channel"] for m in mix],
         "channel_mix": mix,
-        "rationale": (
-            f"Best-practice mix for a {ctype.replace('_', ' ')} campaign "
-            f"driving toward {(primary_cta or 'the CTA').strip()}. "
-            "Tailored to your channel selection; no performance data "
-            "consulted in v1 (the substrate-grounded path is reserved "
-            "via the performance_context seam)."),
+        "rationale": rationale,
+        "memory_evidence": memory_evidence,
+        "memory_status": memory_status,
     }
+
+
+def _channel_rationale_with_memory(channel: str, campaign_type: str,
+                                   primary_cta: str,
+                                   basis: dict | None = None) -> str:
+    base = _channel_rationale(channel, campaign_type, primary_cta)
+    if not basis:
+        return base
+    # Always cite the numbers when memory informed the slot. Past tense.
+    rate = basis.get("conversion_rate")
+    clicks = basis.get("clicks") or 0
+    convs = basis.get("conversions") or 0
+    n = basis.get("data_points") or 0
+    if rate is not None and clicks:
+        return (f"{base} Memory: {rate * 100:.1f} conv/100 clicks "
+                f"({clicks:g} clicks, {convs:g} conversions across "
+                f"{n} data points).")
+    if convs:
+        return (f"{base} Memory: {convs:g} conversion"
+                f"{'s' if convs != 1 else ''} attributed across "
+                f"{n} data points (no click denominator).")
+    return base
 
 
 def _channel_rationale(channel: str, campaign_type: str, primary_cta: str) -> str:

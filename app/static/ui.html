@@ -612,6 +612,17 @@
       <h3>Suggestions</h3>
       <div id="dash-suggestions"></div>
     </div>
+    <div class="section">
+      <h3>What the system has learned</h3>
+      <div class="setup-status" style="margin-bottom:6px;">
+        Patterns drawn from your own uploaded reports, joined to the
+        campaigns + UTMs you produced. Each card shows the evidence — the
+        actual clicks, conversions, and sample size — so you can audit
+        the "because." Thin combinations are listed as "watching" so the
+        system is honest about what it does and doesn't know yet.
+      </div>
+      <div id="dash-memory"></div>
+    </div>
   </section>
 </main>
 
@@ -1373,7 +1384,69 @@ async function regenerateDraft(parentArtifactId, critique) {
 // actually connected. Same chassis as csv vs csv+intent.
 
 async function loadDashboard() {
-  await Promise.all([loadFunnel(), loadSuggestions()]);
+  await Promise.all([loadFunnel(), loadSuggestions(), loadMemory()]);
+}
+
+// "What the system has learned" — calls GET /api/memory with the current
+// product scope. Renders each pattern as evidence-first prose (observation
+// + numeric basis + confidence badge). Empty state and 'watching' (thin
+// data) are surfaced honestly per the brief.
+async function loadMemory() {
+  const root = document.getElementById('dash-memory');
+  if (!root) return;
+  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  const qs = state.selectedProductId
+    ? `?product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+  let data;
+  try {
+    data = await api('/api/memory' + qs);
+  } catch (e) {
+    root.innerHTML = `<div class="err">Couldn't load memory: ${e.message}</div>`;
+    return;
+  }
+  root.innerHTML = '';
+  const patterns = (data && data.patterns) || [];
+  if (!patterns.length) {
+    root.appendChild(el('div', { class: 'empty-state' },
+      el('div', { class: 'big' }, 'Not enough performance data yet'),
+      el('div', {}, 'Upload reports above and tag any campaigns / content with '
+        + 'UTMs. The system will start surfacing what works — with evidence — '
+        + 'as the data accumulates.')));
+    return;
+  }
+  const summary = data.summary || {};
+  root.appendChild(el('div', { class: 'setup-status', style: 'margin-bottom:8px;' },
+    `${summary.actionable || 0} actionable pattern(s), `
+    + `${summary.watching || 0} watching (thin data), `
+    + `lookback ${data.lookback_days} day(s).`));
+  const list = el('div', { style: 'display:flex; flex-direction:column; gap:8px;' });
+  for (const p of patterns) {
+    const conf = p.confidence || 'insufficient';
+    const badgeClass = conf === 'high' ? 'succeeded'
+                     : conf === 'moderate' ? 'succeeded'
+                     : conf === 'low' ? 'pending'
+                     : 'pending';
+    const mb = p.metric_basis || {};
+    const card = el('div', { class: 'panel',
+      style: 'padding:12px; min-width:0; overflow-wrap:anywhere;' },
+      el('div', { class: 'row', style: 'margin-bottom:4px;' },
+        el('strong', {}, `${p.dimension}: ${p.key_display || p.key}`),
+        el('span', { class: 'badge ' + badgeClass }, conf)),
+      el('div', {}, p.observation || ''),
+      el('div', { class: 'sub',
+        style: 'color:var(--muted); font-size:12px; margin-top:6px;' },
+        `n=${p.sample_size} · ${p.recency} · ${p.confidence_reason}`),
+    );
+    if (mb.clicks || mb.conversions) {
+      card.appendChild(el('div', { class: 'sub',
+        style: 'color:var(--muted); font-size:12px;' },
+        `clicks=${mb.clicks || 0} · conversions=${mb.conversions || 0}`
+        + (mb.conversion_rate != null
+          ? ` · rate=${(mb.conversion_rate * 100).toFixed(1)}%` : '')));
+    }
+    list.appendChild(card);
+  }
+  root.appendChild(list);
 }
 
 async function loadFunnel() {

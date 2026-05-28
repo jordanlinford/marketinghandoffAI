@@ -130,11 +130,18 @@ class ContentEngineAgent(Agent):
     def _suggest(self, ctx: AgentContext, profile: dict,
                  brief: dict | None) -> AgentResult:
         ideas = self._build_ideas(profile, brief)
+        # Memory re-rank: when the org has performance history above the
+        # 'insufficient' threshold, surface ideas matching higher-performing
+        # channels/content_types first. Evidence is attached per idea so
+        # the UI shows the 'because' next to the rerank. No data → input
+        # order is preserved (backwards compat).
+        ideas = self._memory_rerank_ideas(ideas, ctx.memory_patterns or [])
         body = {
             "ideas": ideas,
             "grounded_in": {
                 "org_profile": True,
                 "market_brief_id": (brief or {}).get("id"),
+                "memory_patterns": len(ctx.memory_patterns or []),
             },
         }
         cites = [
@@ -196,6 +203,55 @@ class ContentEngineAgent(Agent):
 
         return ideas[:6]
 
+    @staticmethod
+    def _memory_rerank_ideas(ideas: list[dict],
+                             patterns: list[dict]) -> list[dict]:
+        # Re-rank ideas by the org's own performance memory. Ideas whose
+        # content_type matches a high/moderate/low confidence pattern
+        # bubble up, with the pattern's observation attached so the UI
+        # can show the 'because'. insufficient and empty patterns leave
+        # input order untouched (backwards compat).
+        if not ideas or not patterns:
+            return ideas
+        boost: dict[str, dict] = {}
+        for p in patterns:
+            if p.get("confidence") in ("insufficient",):
+                continue
+            if p.get("dimension") not in ("content_type", "channel"):
+                continue
+            key = p.get("key") or ""
+            if not key:
+                continue
+            # First pattern per key wins (query_memory already sorts by
+            # confidence + sample_size desc, so this favors the strongest).
+            boost.setdefault(key, p)
+        if not boost:
+            return ideas
+        _CONF_RANK = {"high": 0, "moderate": 1, "low": 2}
+        def score(idea: dict) -> tuple:
+            ct = (idea.get("content_type") or "").lower()
+            p = boost.get(ct)
+            if not p:
+                return (99, 0.0)
+            mb = p.get("metric_basis") or {}
+            rate = mb.get("conversion_rate") or 0.0
+            return (_CONF_RANK.get(p.get("confidence"), 99), -rate)
+        annotated = []
+        for idea in ideas:
+            ct = (idea.get("content_type") or "").lower()
+            p = boost.get(ct)
+            out = dict(idea)
+            if p is not None:
+                out["memory_evidence"] = {
+                    "observation": p.get("observation", ""),
+                    "metric_basis": p.get("metric_basis") or {},
+                    "confidence": p.get("confidence"),
+                    "dimension": p.get("dimension"),
+                }
+            annotated.append(out)
+        annotated.sort(key=score)
+        return annotated
+
     # ---- Mode: generate (covers both fresh + regenerate) ------------------
     def _generate(self, ctx: AgentContext, profile: dict, brief: dict | None,
                   task: dict, parent: dict | None) -> AgentResult:
@@ -236,6 +292,17 @@ class ContentEngineAgent(Agent):
         # org's competitors list. The original resolved profile keeps the
         # full inheritance + provenance for downstream consumers.
         template_profile = self._product_aware_view(profile)
+        # Persistent memory: weave actionable patterns into the style brief
+        # as natural-language guidance (no-echo discipline — content_templates
+        # _compose_style_brief reads profile["memory_summary"] and folds it
+        # into the system message as instruction, never as a labeled field).
+        # Only patterns above 'insufficient' show up here; thin-data noise is
+        # filtered out at summarize_for_prompt.
+        from app.memory import summarize_for_prompt  # local import: keeps cold paths cheap
+        mem_summary = summarize_for_prompt(ctx.memory_patterns or [])
+        if mem_summary:
+            template_profile = dict(template_profile)
+            template_profile["memory_summary"] = mem_summary
         content, gen_cost = build_content(content_type, template_profile, brief,
                                           topic, target, critique=critique)
 

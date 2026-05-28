@@ -387,6 +387,79 @@ def build_report_intelligence(db: Session, org_id: str, *,
     confabulate findings the data doesn't support.
     """
     scope_resolved = _resolve_scope(db, org_id, scope or {}, lookback_days)
+    today = _utcnow_date()
+
+    # ---- Future-date honesty guard ------------------------------------
+    # When the requested time_window is entirely or partially in the
+    # future, the engine CANNOT honestly produce a period_summary,
+    # notable_changes, production accounting, or top_content. Returning
+    # a short-circuit intelligence object lets the renderers produce a
+    # truthful "no data exists yet" stub with current memory as a
+    # reference baseline (clearly labeled as-of-today, NOT a finding
+    # about the requested period). This is the same anti-overclaim
+    # discipline memory uses for thin data — when the system can't say
+    # something true, it says what it can't say.
+    if scope_resolved["kind"] == "time_window":
+        if scope_resolved["start"] > today or scope_resolved["end"] > today:
+            patterns = query_memory(db, org_id, product_id=product_id,
+                                    lookback_days=180)
+            reference_highlights = [
+                {"observation": p.get("observation", ""),
+                 "metric_basis": p.get("metric_basis") or {},
+                 "confidence": p.get("confidence"),
+                 "dimension": p.get("dimension"),
+                 "key": p.get("key"),
+                 "key_display": p.get("key_display") or p.get("key", ""),
+                 "sample_size": p.get("sample_size")}
+                for p in patterns
+                if p.get("confidence") in ("moderate", "high")
+            ][:5]
+            return {
+                "scope": {
+                    "kind": "time_window",
+                    "start": scope_resolved["start"].isoformat(),
+                    "end": scope_resolved["end"].isoformat(),
+                    "product_id": product_id,
+                    "campaign_id": None,
+                    "campaign_name": None,
+                    "lookback_days": lookback_days,
+                    "is_future": True,
+                    "today": today.isoformat(),
+                },
+                # Period sections OMITTED — reports describe what HAS
+                # happened; they don't forecast. The renderer must NOT
+                # synthesize a period_summary, deltas, or "what changed"
+                # narrative from data that doesn't exist.
+                "period_summary": None,
+                "notable_changes": [],
+                "production": None,
+                "top_content": [],
+                "campaigns": [],
+                "watching": [],
+                # Memory survives as the REFERENCE baseline — explicitly
+                # labeled. Renderers MUST frame these as "as of today,
+                # not for the requested future period."
+                "memory_highlights": reference_highlights,
+                "memory_reference_label": (
+                    f"Memory snapshot as of {today.isoformat()} — NOT a "
+                    f"finding about the requested future period."),
+                "open_questions": [
+                    "What will marketing produce during the requested "
+                    "future period? That cannot be answered from data "
+                    "that does not yet exist.",
+                ],
+                "honesty_notes": [
+                    f"No data exists for the requested period; it is in "
+                    f"the future ({scope_resolved['start'].isoformat()} to "
+                    f"{scope_resolved['end'].isoformat()}). Today is "
+                    f"{today.isoformat()}.",
+                    "Memory highlights are a reference baseline as of "
+                    "today, NOT a finding about the requested period.",
+                    "Re-generate this report once data exists for the "
+                    "requested period.",
+                ],
+            }
+
     start = scope_resolved["start"]
     end = scope_resolved["end"]
     camp_utm_filter = scope_resolved.get("campaign_utm")

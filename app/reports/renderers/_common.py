@@ -185,3 +185,64 @@ def period_header(intelligence: dict) -> str:
         return (f"Campaign report for {scope.get('campaign_name') or 'campaign'} "
                 f"({scope.get('start')} – {scope.get('end')})")
     return f"Period: {scope.get('start')} – {scope.get('end')}"
+
+
+# --------------------------------------------------------------------------
+# Future-date stub — shared across the three audiences. When the engine
+# marks scope.is_future=True, every renderer produces a short, truthful
+# "no data exists yet" body. Three sections only:
+#   1. The fact: no data exists for the requested period.
+#   2. Reference baseline: current memory snapshot AS OF TODAY, clearly
+#      labeled — never as a claim about the requested period.
+#   3. The path forward: regenerate once data exists.
+#
+# Same anti-overclaim discipline as the memory layer's thin-data
+# deferral. When the system can't say something true, it says what it
+# can't say and offers the nearest truthful thing.
+# --------------------------------------------------------------------------
+def is_future_scope(intelligence: dict) -> bool:
+    return bool((intelligence.get("scope") or {}).get("is_future"))
+
+
+def future_stub_blocks(intelligence: dict, *,
+                        content_type: str,
+                        audience_label: str) -> tuple[list[dict], dict]:
+    scope = intelligence.get("scope") or {}
+    today = scope.get("today") or ""
+    start, end = scope.get("start") or "?", scope.get("end") or "?"
+    highlights = intelligence.get("memory_highlights") or []
+    reference_label = (intelligence.get("memory_reference_label")
+                        or f"Memory snapshot as of {today} — NOT a finding "
+                           "about the requested future period.")
+    blocks: list[dict] = []
+    blocks.append({
+        "kind": "headline",
+        "text": (f"No data exists yet for {start} to {end}. This period is "
+                 f"in the future (today is {today})."),
+    })
+    if highlights:
+        ref_lines = ["For reference — what memory currently knows "
+                     "(AS OF TODAY, not for the requested period):"]
+        for h in highlights[:4]:
+            ref_lines.append(f"- {h.get('observation', '')}")
+        blocks.append({"kind": "body", "text": "\n".join(ref_lines)})
+        blocks.append({"kind": "body", "text": reference_label})
+    else:
+        blocks.append({
+            "kind": "body",
+            "text": "Memory has no high-or-moderate-confidence patterns to "
+                    "report as a reference baseline yet. The system is "
+                    "still learning.",
+        })
+    blocks.append({
+        "kind": "next",
+        "text": "Re-generate this report once data exists for the "
+                "requested period.",
+    })
+    metadata = {
+        "audience": audience_label,
+        "scope": scope,
+        "render_strategy": "future_stub",
+        "block_count": len(blocks),
+    }
+    return blocks, metadata

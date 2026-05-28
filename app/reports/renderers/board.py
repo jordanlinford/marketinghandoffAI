@@ -9,8 +9,9 @@ individual run cost detail.
 from __future__ import annotations
 
 from app.reports.renderers._common import (
-    compose_style_lines, fmt_num, fmt_pct, llm_render, memory_lines,
-    period_header, schema_example,
+    compose_style_lines, fmt_num, fmt_pct, future_stub_blocks,
+    is_future_scope, llm_render, memory_lines, period_header,
+    schema_example,
 )
 
 
@@ -166,6 +167,16 @@ def _llm_system_msg(profile: dict | None) -> str:
 def render_board(intelligence: dict, *,
                  profile: dict | None = None,
                  settings=None) -> tuple[dict, float]:
+    # Future-date guard: when the engine flags the scope as future,
+    # no renderer may synthesize a "what happened" narrative. Emit the
+    # shared honest stub instead — current memory survives as a clearly-
+    # labeled reference baseline.
+    if is_future_scope(intelligence):
+        blocks, metadata = future_stub_blocks(
+            intelligence, content_type=_CONTENT_TYPE,
+            audience_label=_AUDIENCE_LABEL)
+        return ({"content_type": _CONTENT_TYPE, "blocks": blocks,
+                 "metadata": metadata}, 0.0)
     sel = _select(intelligence)
     fallback_blocks = _deterministic_blocks(sel)
     metadata = {

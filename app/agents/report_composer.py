@@ -142,9 +142,14 @@ class ReportComposerAgent(Agent):
         }
 
         cites: list[Citation] = []
+        # period_summary is None for future-date intelligence — guard
+        # against None.get() since the citation is just a hint, not
+        # load-bearing for the body.
+        ps = intelligence.get("period_summary") or {}
+        attr = (ps.get("attributed") if isinstance(ps, dict) else {}) or {}
         cites.append(Citation(
             source="Substrate (metric_points)",
-            snippet=(f"{intelligence.get('period_summary', {}).get('attributed', {}).get('data_points', 0)} "
+            snippet=(f"{attr.get('data_points', 0)} "
                      "attributed data point(s) aggregated for this scope.")))
         if intelligence.get("memory_highlights"):
             cites.append(Citation(

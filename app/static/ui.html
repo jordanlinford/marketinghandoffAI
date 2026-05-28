@@ -118,6 +118,11 @@
   .badge.kind-content    { background: #1f3b6b; color: #c8dcff; }
   .badge.kind-document   { background: #3a2c14; color: #f0c97a; }
   .badge.kind-brief      { background: #2d1f3b; color: #d4c8ff; }
+  /* Report is a sub-kind of content but it's a different kind of asset
+     in the user's organizational memory — give it its own rose badge so
+     it's recognizable at a glance. */
+  .badge.kind-report     { background: #4a1230; color: #ffb3d1; }
+  .badge.report          { background: #4a1230; color: #ffb3d1; }
   /* Library detail panel: clamp long content (tagged URLs especially)
      so it can never scroll the rest of the page sideways. */
   #lib-detail .panel { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
@@ -521,6 +526,7 @@
         <select id="lib-kind">
           <option value="">(any)</option>
           <option value="content">content</option>
+          <option value="report">report</option>
           <option value="document">document</option>
           <option value="brief">brief</option>
         </select></div>
@@ -636,25 +642,46 @@
       <div class="setup-paths" style="margin-bottom:10px;">
         <div class="setup-path">
           <h4>Compose</h4>
-          <div class="row" style="gap:6px; flex-wrap:wrap;">
+          <div class="field" style="margin-bottom:8px;">
+            <label>Audience</label>
             <select id="rpt-audience">
               <option value="board">Board update</option>
               <option value="ceo_weekly">CEO weekly digest</option>
               <option value="sales_leadership">Sales leadership update</option>
             </select>
-            <select id="rpt-scope-kind">
-              <option value="time_window">Time window</option>
-              <option value="campaign">Campaign</option>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Scope</label>
+            <div class="row" style="gap:12px;">
+              <label style="display:flex; gap:4px; align-items:center;">
+                <input type="radio" name="rpt-scope-kind" value="time_window" checked />
+                Time window
+              </label>
+              <label style="display:flex; gap:4px; align-items:center;">
+                <input type="radio" name="rpt-scope-kind" value="campaign" />
+                Campaign
+              </label>
+            </div>
+          </div>
+          <div id="rpt-time-row">
+            <div class="row" style="gap:6px; margin-bottom:6px;">
+              <input type="date" id="rpt-start" />
+              <span style="align-self:center; color:var(--muted);">→</span>
+              <input type="date" id="rpt-end" />
+            </div>
+            <div class="row" style="gap:6px;">
+              <button class="ghost" id="rpt-quick-30" type="button">Last 30 days</button>
+              <button class="ghost" id="rpt-quick-90" type="button">Last 90 days</button>
+              <button class="ghost" id="rpt-quick-quarter" type="button">This quarter</button>
+            </div>
+          </div>
+          <div class="field" id="rpt-camp-row" style="display:none;">
+            <label>Campaign</label>
+            <select id="rpt-campaign-id">
+              <option value="">— pick a campaign —</option>
             </select>
           </div>
-          <div class="row" style="gap:6px; margin-top:6px;" id="rpt-time-row">
-            <input type="date" id="rpt-start" />
-            <input type="date" id="rpt-end" />
-          </div>
-          <div class="row" style="gap:6px; margin-top:6px; display:none;" id="rpt-camp-row">
-            <select id="rpt-campaign-id"><option value="">— pick a campaign —</option></select>
-          </div>
-          <div class="row" style="gap:6px; margin-top:6px;">
+          <div class="row" style="gap:6px; margin-top:10px;">
             <button id="rpt-preview-btn" class="ghost">Preview intelligence</button>
             <button id="rpt-generate-btn">Generate report</button>
           </div>
@@ -667,7 +694,10 @@
              three different ways — defensive for the board, signal-dense for
              the CEO, collaborative for sales — because what they need is
              different. Thin patterns surface as "watching"; untagged
-             volume is funnel backdrop only, never quoted as marketing action.</p>
+             volume is funnel backdrop only, never quoted as marketing action.
+             Future periods produce a short stub naming the period and
+             surfacing current memory as a reference baseline — reports
+             describe what HAS happened, never what might.</p>
         </div>
       </div>
       <div id="rpt-intelligence-preview" style="margin-bottom:10px;"></div>
@@ -1439,6 +1469,14 @@ async function loadDashboard() {
 }
 
 // "Reports" — list of generated reports for the org, scoped by product.
+// Reports are first-class content assets — opening one reuses the
+// Library detail view (same markdown + grade + regenerate path).
+const _AUDIENCE_LABEL = {
+  board: 'Board',
+  ceo_weekly: 'CEO weekly',
+  sales_leadership: 'Sales leadership',
+};
+
 async function loadReports() {
   const root = document.getElementById('rpt-list');
   if (!root) return;
@@ -1452,6 +1490,8 @@ async function loadReports() {
     return;
   }
   await _populateReportCampaignPicker();
+  // Default the date inputs to last 30 days on first paint.
+  _setQuickPick('last30');
   root.innerHTML = '';
   if (!rows.length) {
     root.appendChild(el('div', { class: 'empty-state' },
@@ -1460,21 +1500,29 @@ async function loadReports() {
     return;
   }
   const list = el('div', { style: 'display:flex; flex-direction:column; gap:6px;' });
-  for (const r of rows) {
-    const grade = r.grade != null ? ` · grade ${r.grade}` : '';
-    const strat = r.render_strategy ? ` · ${r.render_strategy}` : '';
+  for (const r of rows.slice(0, 25)) {
+    const audienceLabel = _AUDIENCE_LABEL[r.audience] || r.audience;
     const scopeSummary = r.scope && r.scope.kind === 'campaign'
       ? `campaign=${r.scope.campaign_name || r.scope.campaign_id || '?'}`
-      : `${(r.scope && r.scope.start) || '?'} → ${(r.scope && r.scope.end) || '?'}`;
+      : (r.scope && r.scope.is_future
+        ? `future ${r.scope.start} → ${r.scope.end}`
+        : `${(r.scope && r.scope.start) || '?'} → ${(r.scope && r.scope.end) || '?'}`);
     const card = el('div', { class: 'panel',
       style: 'padding:10px; min-width:0; overflow-wrap:anywhere;' },
-      el('div', { class: 'row', style: 'margin-bottom:4px;' },
+      el('div', { class: 'row', style: 'margin-bottom:4px; gap:8px;' },
+        el('span', { class: 'badge report',
+                     title: `Audience: ${audienceLabel}` }, audienceLabel),
         el('strong', {}, r.title || '(untitled report)'),
         el('span', { class: 'badge ' + (r.status === 'ready' ? 'succeeded' : 'pending') },
-          r.status)),
+          r.status),
+        (r.grade != null
+          ? el('span', { class: 'badge', title: 'Advisory grade' },
+              `grade ${r.grade}`)
+          : null)),
       el('div', { class: 'sub',
         style: 'color:var(--muted); font-size:12px;' },
-        `${r.audience} · ${scopeSummary}${grade}${strat}`),
+        `${scopeSummary} · ${r.created_at ? r.created_at.slice(0, 10) : '?'}`
+        + (r.render_strategy ? ` · ${r.render_strategy}` : '')),
       el('div', { class: 'row', style: 'margin-top:6px; gap:6px;' },
         el('a', { href: `/api/assets/content/${r.id}/download?format=md`,
                   target: '_blank' }, 'Download .md'),
@@ -1488,9 +1536,11 @@ async function loadReports() {
 async function _populateReportCampaignPicker() {
   const sel = document.getElementById('rpt-campaign-id');
   if (!sel) return;
-  // Populate once per load; clear stale options.
+  // Filter to current product if one is selected.
+  const qs = state.selectedProductId
+    ? `?product_id=${encodeURIComponent(state.selectedProductId)}` : '';
   let camps;
-  try { camps = await api('/api/campaigns'); } catch (e) { return; }
+  try { camps = await api('/api/campaigns' + qs); } catch (e) { return; }
   sel.innerHTML = '<option value="">— pick a campaign —</option>';
   for (const c of camps || []) {
     const o = document.createElement('option');
@@ -1500,8 +1550,42 @@ async function _populateReportCampaignPicker() {
   }
 }
 
+function _isoToday() { return new Date().toISOString().slice(0, 10); }
+function _isoDaysAgo(n) {
+  const d = new Date(); d.setDate(d.getDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+function _quarterStartIso() {
+  const d = new Date();
+  const q = Math.floor(d.getMonth() / 3);
+  const s = new Date(d.getFullYear(), q * 3, 1);
+  return s.toISOString().slice(0, 10);
+}
+
+function _setQuickPick(kind) {
+  const startEl = document.getElementById('rpt-start');
+  const endEl = document.getElementById('rpt-end');
+  if (!startEl || !endEl) return;
+  // Only overwrite if empty so users who manually picked don't lose it
+  // unless they click a quick-pick button.
+  const force = kind && (kind !== 'auto' || (!startEl.value && !endEl.value));
+  if (!force) return;
+  if (kind === 'last30' || kind === 'auto') {
+    startEl.value = _isoDaysAgo(30); endEl.value = _isoToday();
+  } else if (kind === 'last90') {
+    startEl.value = _isoDaysAgo(90); endEl.value = _isoToday();
+  } else if (kind === 'quarter') {
+    startEl.value = _quarterStartIso(); endEl.value = _isoToday();
+  }
+}
+
+function _readScopeKind() {
+  const checked = document.querySelector('input[name="rpt-scope-kind"]:checked');
+  return checked ? checked.value : 'time_window';
+}
+
 function _readReportScope() {
-  const kind = document.getElementById('rpt-scope-kind').value;
+  const kind = _readScopeKind();
   if (kind === 'campaign') {
     const cid = document.getElementById('rpt-campaign-id').value;
     if (!cid) throw new Error('Pick a campaign for the campaign scope.');
@@ -1527,60 +1611,172 @@ async function previewReportIntelligence() {
     const intel = await api('/api/reports/intelligence', {
       method: 'POST', body: JSON.stringify(body) });
     status.textContent = 'Intelligence preview loaded.';
-    const wrap = el('div', { class: 'panel',
-      style: 'padding:10px; min-width:0; overflow-wrap:anywhere;' });
-    const ps = intel.period_summary || {};
-    const attr = ps.attributed || {};
-    const back = ps.backdrop || {};
-    wrap.appendChild(el('h4', { style: 'margin:0 0 6px 0;' },
-      'Intelligence preview'));
-    wrap.appendChild(el('div', {},
-      `Attributed: ${attr.clicks || 0} clicks, ${attr.conversions || 0} conversions, `
-      + `rate ${(attr.conversion_rate != null
-        ? (attr.conversion_rate * 100).toFixed(1) + '%' : '—')}.`));
-    if ((back.data_points || 0) > 0) {
-      wrap.appendChild(el('div', { class: 'sub',
-        style: 'color:var(--muted); font-size:12px;' },
-        `Backdrop (untagged + baseline, excluded from attributed): `
-        + `${back.clicks || 0} clicks, ${back.conversions || 0} conversions, `
-        + `${back.data_points} row(s).`));
-    }
-    if ((intel.memory_highlights || []).length) {
-      wrap.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
-        `Memory highlights (${intel.memory_highlights.length})`));
-      for (const h of intel.memory_highlights.slice(0, 4)) {
-        wrap.appendChild(el('div', {}, '• ' + (h.observation || '')));
-      }
-    }
-    if ((intel.watching || []).length) {
-      wrap.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
-        `Watching — thin data (${intel.watching.length})`));
-      for (const w of intel.watching.slice(0, 3)) {
-        wrap.appendChild(el('div', { class: 'sub' },
-          '• ' + (w.observation || '')));
-      }
-    }
-    if ((intel.campaigns || []).length) {
-      wrap.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
-        `Campaigns in scope (${intel.campaigns.length})`));
-      for (const c of intel.campaigns.slice(0, 4)) {
-        wrap.appendChild(el('div', {},
-          `• ${c.name} (${c.status}) — `
-          + `${c.attributed.conversions || 0} attributed conv, `
-          + `${c.attributed.clicks || 0} clicks`));
-      }
-    }
-    if ((intel.honesty_notes || []).length) {
-      wrap.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
-        'Honesty notes'));
-      for (const n of intel.honesty_notes) {
-        wrap.appendChild(el('div', { class: 'sub' }, '• ' + n));
-      }
-    }
-    out.appendChild(wrap);
+    out.appendChild(_renderIntelligencePreview(intel));
   } catch (e) {
     status.innerHTML = `<span class="err">Preview failed: ${e.message}</span>`;
   }
+}
+
+// Build the structured-by-section preview with each section in a
+// <details> so the user can expand only what's interesting. This is
+// the transparency moment — the user sees EXACTLY what data the report
+// will draw from before generating.
+function _renderIntelligencePreview(intel) {
+  const wrap = el('div', { class: 'panel',
+    style: 'padding:12px; min-width:0; overflow-wrap:anywhere;' });
+  wrap.appendChild(el('h4', { style: 'margin:0 0 4px 0;' },
+    'Intelligence preview'));
+  const scope = intel.scope || {};
+  const scopeLine = scope.kind === 'campaign'
+    ? `Scope: campaign — ${scope.campaign_name || scope.campaign_id || '?'}`
+    : `Scope: ${scope.start} → ${scope.end}` + (scope.is_future
+        ? ` · (future — today is ${scope.today})` : '');
+  wrap.appendChild(el('div', { class: 'sub',
+    style: 'color:var(--muted); font-size:12px; margin-bottom:8px;' },
+    scopeLine));
+
+  // Future scopes return a stub-shaped object — show that explicitly.
+  if (scope.is_future) {
+    const w = el('div', { class: 'setup-status',
+      style: 'background:#3a1a26; color:#ffc6dd; padding:8px; border-radius:6px;' },
+      'This period is in the future. The report will be a short stub '
+      + 'naming the period and surfacing current memory as a reference '
+      + 'baseline — never a "what happened" narrative.');
+    wrap.appendChild(w);
+  }
+
+  // Period summary
+  if (intel.period_summary) {
+    const ps = intel.period_summary;
+    const attr = ps.attributed || {};
+    const back = ps.backdrop || {};
+    const det = el('details', { open: true });
+    det.appendChild(el('summary', {}, `Period summary — attributed `
+      + `${attr.clicks || 0} clicks · ${attr.conversions || 0} conversions`));
+    const body = el('div', { style: 'margin:6px 0;' });
+    body.appendChild(el('div', {},
+      `Attributed conversion rate: ${(attr.conversion_rate != null
+        ? (attr.conversion_rate * 100).toFixed(1) + '%' : '—')}.`));
+    if ((back.data_points || 0) > 0) {
+      body.appendChild(el('div', { class: 'sub',
+        style: 'color:var(--muted); font-size:12px;' },
+        `Backdrop (excluded from attributed): ${back.clicks || 0} clicks, `
+        + `${back.conversions || 0} conversions, ${back.data_points} row(s).`));
+    }
+    if (ps.deltas) {
+      const lines = [];
+      for (const k of ['clicks', 'conversions', 'conversion_rate']) {
+        const d = ps.deltas[k];
+        if (d && d.pct != null) {
+          lines.push(`${k} ${(d.pct * 100).toFixed(0)}% vs prior period`);
+        }
+      }
+      if (lines.length) {
+        body.appendChild(el('div', { class: 'sub' },
+          'Trajectory: ' + lines.join('; ') + '.'));
+      }
+    }
+    det.appendChild(body);
+    wrap.appendChild(det);
+  }
+
+  // Notable changes
+  if ((intel.notable_changes || []).length) {
+    wrap.appendChild(_renderListSection('Notable changes',
+      intel.notable_changes.map(c => c.observation || JSON.stringify(c))));
+  }
+
+  // Memory highlights
+  if ((intel.memory_highlights || []).length) {
+    const lbl = intel.memory_reference_label
+      ? `Memory (REFERENCE BASELINE — ${intel.memory_reference_label.split('—')[1] || 'as of today'}) (${intel.memory_highlights.length})`
+      : `Memory highlights (${intel.memory_highlights.length})`;
+    wrap.appendChild(_renderListSection(lbl,
+      intel.memory_highlights.map(h => h.observation || '')));
+  }
+
+  // Watching
+  if ((intel.watching || []).length) {
+    wrap.appendChild(_renderListSection(
+      `Watching — thin data (${intel.watching.length})`,
+      intel.watching.map(w => w.observation || ''), { muted: true }));
+  }
+
+  // Production
+  if (intel.production) {
+    const p = intel.production;
+    const det = el('details');
+    det.appendChild(el('summary', {},
+      `Production — ${p.artifacts_total || 0} asset(s), `
+      + `$${(p.cost_usd_total || 0).toFixed(2)}`));
+    const body = el('div', { style: 'margin:6px 0;' });
+    body.appendChild(el('div', {},
+      `Runs: ${p.runs_succeeded || 0} succeeded, ${p.runs_failed || 0} failed, `
+      + `${p.runs_pending || 0} pending.`));
+    body.appendChild(el('div', {},
+      `Artifacts: ${p.artifacts_ready || 0} ready, `
+      + `${p.artifacts_pending_review || 0} pending review.`));
+    if (p.by_content_type && Object.keys(p.by_content_type).length) {
+      const parts = Object.entries(p.by_content_type)
+        .map(([k, v]) => `${k}: ${v}`).join('; ');
+      body.appendChild(el('div', { class: 'sub' }, `By type: ${parts}`));
+    }
+    det.appendChild(body);
+    wrap.appendChild(det);
+  }
+
+  // Campaigns
+  if ((intel.campaigns || []).length) {
+    wrap.appendChild(_renderListSection(
+      `Campaigns in scope (${intel.campaigns.length})`,
+      intel.campaigns.map(c =>
+        `${c.name} (${c.status}) — ${(c.attributed.conversions || 0)} conv, `
+        + `${(c.attributed.clicks || 0)} clicks`)));
+  }
+
+  // Top content
+  if ((intel.top_content || []).length) {
+    wrap.appendChild(_renderListSection(
+      `Top content (${intel.top_content.length})`,
+      intel.top_content.map(t =>
+        `${t.title} (${t.content_type}) — ${(t.attributed.conversions || 0)} conv`)));
+  }
+
+  // Open questions
+  if ((intel.open_questions || []).length) {
+    wrap.appendChild(_renderListSection(
+      `Open questions (${intel.open_questions.length})`,
+      intel.open_questions, { muted: true }));
+  }
+
+  // Honesty notes — always visible if any (they're load-bearing).
+  if ((intel.honesty_notes || []).length) {
+    const det = el('details', { open: true });
+    det.appendChild(el('summary', {},
+      `Honesty notes (${intel.honesty_notes.length})`));
+    const body = el('div', { style: 'margin:6px 0;' });
+    for (const n of intel.honesty_notes) {
+      body.appendChild(el('div', { class: 'sub' }, '• ' + n));
+    }
+    det.appendChild(body);
+    wrap.appendChild(det);
+  }
+
+  return wrap;
+}
+
+function _renderListSection(label, items, opts) {
+  opts = opts || {};
+  const det = el('details');
+  det.appendChild(el('summary', {}, label));
+  const body = el('div', { style: 'margin:6px 0;' });
+  for (const t of items.slice(0, 6)) {
+    body.appendChild(el('div', opts.muted
+      ? { class: 'sub', style: 'color:var(--muted);' } : {},
+      '• ' + (t || '')));
+  }
+  det.appendChild(body);
+  return det;
 }
 
 async function generateReport() {
@@ -1597,15 +1793,21 @@ async function generateReport() {
     const r = await api('/api/reports/generate', {
       method: 'POST', body: JSON.stringify(body) });
     status.textContent = `Queued as run ${r.run_id.slice(0,8)}… — polling.`;
-    // Poll the report list until the run lands (rough; 30s budget).
+    // Poll the report list until the run lands. We watch for a report
+    // whose ID is NEW (didn't exist before our request).
+    const beforeRows = await api('/api/reports').catch(() => []);
+    const beforeIds = new Set((beforeRows || []).map(x => x.id));
     for (let i = 0; i < 30; i++) {
       await new Promise((res) => setTimeout(res, 1000));
       try {
         const rows = await api('/api/reports');
-        const found = (rows || []).find(x => (x.audience === audience));
-        if (found) {
-          status.textContent = `Report ready: ${found.title}`;
+        const fresh = (rows || []).find(x => !beforeIds.has(x.id)
+                                          && x.audience === audience);
+        if (fresh) {
+          status.textContent = `Report ready: ${fresh.title}`;
           await loadReports();
+          // Open the new report inline.
+          openReportDetail(fresh.id);
           return;
         }
       } catch (e) { /* keep polling */ }
@@ -1618,17 +1820,22 @@ async function generateReport() {
 }
 
 async function openReportDetail(artifactId) {
-  // Reuse the library detail rendering — reports are content_draft assets.
-  // The library asset detail handles markdown + grade + regenerate.
+  // Reports are content_draft assets — reuse the Library's detail view
+  // (markdown + grade + regenerate-with-critique + download all live
+  // there). Hop to the Library, then open the asset detail.
   switchView('library');
-  // Defer slightly so the library view loads before we ask it to open.
+  // Defer slightly so the Library view's onEnter has time to populate
+  // its filters and asset list.
   setTimeout(() => {
-    if (window.openLibraryDetail) window.openLibraryDetail(artifactId, 'content');
-  }, 200);
+    if (typeof openAssetDetail === 'function') {
+      openAssetDetail({ id: artifactId, asset_kind: 'content' });
+    }
+  }, 250);
 }
 
 document.addEventListener('change', (ev) => {
-  if (ev.target && ev.target.id === 'rpt-scope-kind') {
+  if (!ev.target) return;
+  if (ev.target.name === 'rpt-scope-kind') {
     const k = ev.target.value;
     document.getElementById('rpt-time-row').style.display =
       k === 'time_window' ? '' : 'none';
@@ -1640,6 +1847,9 @@ document.addEventListener('click', (ev) => {
   if (!ev.target) return;
   if (ev.target.id === 'rpt-preview-btn') previewReportIntelligence();
   if (ev.target.id === 'rpt-generate-btn') generateReport();
+  if (ev.target.id === 'rpt-quick-30') _setQuickPick('last30');
+  if (ev.target.id === 'rpt-quick-90') _setQuickPick('last90');
+  if (ev.target.id === 'rpt-quick-quarter') _setQuickPick('quarter');
 });
 
 // "What the system has learned" — calls GET /api/memory with the current
@@ -2361,7 +2571,15 @@ async function fetchLibraryList() {
   const productFilter = document.getElementById('lib-product').value;
   if (productFilter) params.set('product_id', productFilter);
   const kind = document.getElementById('lib-kind').value;
-  if (kind) params.set('asset_kind', kind);
+  // "report" is a UI sub-kind of content — translate it into
+  // asset_kind=content + asset_type_prefix=report_ so the API filters
+  // to the report content_types specifically.
+  if (kind === 'report') {
+    params.set('asset_kind', 'content');
+    params.set('asset_type_prefix', 'report_');
+  } else if (kind) {
+    params.set('asset_kind', kind);
+  }
   const type = document.getElementById('lib-type').value.trim();
   if (type) params.set('asset_type', type);
   const status = document.getElementById('lib-status').value.trim();
@@ -2400,12 +2618,29 @@ async function fetchLibraryList() {
   }
 }
 
+function _isReportAssetType(asset_type) {
+  return typeof asset_type === 'string' && asset_type.startsWith('report_');
+}
+
+function _reportAudienceLabel(asset_type) {
+  // report_board → "Board", report_ceo_weekly → "CEO weekly", etc.
+  const k = (asset_type || '').replace(/^report_/, '');
+  const map = { board: 'Board', ceo_weekly: 'CEO weekly',
+                sales_leadership: 'Sales leadership' };
+  return map[k] || k;
+}
+
 function _renderAssetCard(a) {
-  // Three distinct colors (CSS .badge.kind-content / -document / -brief)
-  // so the three kinds don't blur together at a glance — same generic
-  // 'succeeded' palette had been reused for both content + document.
-  const kindBadge = el('span',
-    { class: `badge kind-${a.asset_kind}` }, a.asset_kind);
+  // Reports are a sub-kind of content but visually distinct — they're
+  // not the same kind of asset as a draft email or ad. Show a REPORT
+  // badge (kind-report color) when asset_type starts with "report_",
+  // with a tooltip naming which audience.
+  const isReport = _isReportAssetType(a.asset_type);
+  const kindBadge = isReport
+    ? el('span', { class: 'badge kind-report',
+                    title: `Audience: ${_reportAudienceLabel(a.asset_type)}` },
+        'report')
+    : el('span', { class: `badge kind-${a.asset_kind}` }, a.asset_kind);
   const statusBadge = a.status
     ? el('span', { class: `badge ${a.status}` }, a.status)
     : null;
@@ -2414,6 +2649,8 @@ function _renderAssetCard(a) {
   const cost = (a.cost_usd != null && a.cost_usd > 0)
     ? ` · ${fmtCost(a.cost_usd)}` : '';
   const camp = a.campaign ? ` · campaign=${a.campaign}` : '';
+  const typeStr = isReport
+    ? _reportAudienceLabel(a.asset_type) : (a.asset_type || '—');
   const card = el('div',
     { class: 'proposal', style: 'cursor:pointer;',
       onclick: () => openAssetDetail(a) },
@@ -2423,7 +2660,7 @@ function _renderAssetCard(a) {
     ),
     el('div', { class: 'sub',
       style: 'color:var(--muted); font-size:12px;' },
-      `${a.asset_type || '—'} · ${a.product_name || 'Org-level'} · ` +
+      `${typeStr} · ${a.product_name || 'Org-level'} · ` +
       `${fmtTime(a.created_at)}${grade}${cost}${camp}`),
     statusBadge ? el('div', { style: 'margin-top:6px;' }, statusBadge) : null,
   );
@@ -2451,10 +2688,16 @@ async function openAssetDetail(asset) {
 function _renderAssetDetail(asset, detail) {
   const wrap = el('section', { class: 'panel detail',
     style: 'margin-top:18px;' });
+  const isReport = _isReportAssetType(asset.asset_type);
   const headerKids = [
     asset.title || '(untitled)',
-    el('span', { class: `badge kind-${asset.asset_kind}`,
-      style: 'margin-left:8px;' }, asset.asset_kind),
+    isReport
+      ? el('span', { class: 'badge kind-report',
+                      style: 'margin-left:8px;',
+                      title: `Audience: ${_reportAudienceLabel(asset.asset_type)}` },
+          'report')
+      : el('span', { class: `badge kind-${asset.asset_kind}`,
+          style: 'margin-left:8px;' }, asset.asset_kind),
   ];
   // Grade pill in the header for content assets — surfaces "78/100" or
   // an honest "ungraded" so the user always sees the rubric verdict.

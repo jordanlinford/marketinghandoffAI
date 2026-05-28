@@ -3780,14 +3780,17 @@ def main() -> None:
               f"{len(intel['campaigns'])} campaigns, "
               f"{len(intel['honesty_notes'])} honesty_notes).")
 
-        # (2) Empty scope: a far-future window has zero data. Engine
-        # must return a truthful minimal object with honesty_notes
-        # explicitly saying "no data in scope" rather than confabulating.
+        # (2) Empty scope: a far-PAST window has zero data. Engine must
+        # return a truthful minimal object with honesty_notes explicitly
+        # saying "no data in scope" rather than confabulating. Far past
+        # (rather than far future) keeps this distinct from Report (11)
+        # which covers the future-date confabulation guard separately.
         empty_scope = {"kind": "time_window",
-                       "start": (today_d + _td2(days=365)).isoformat(),
-                       "end": (today_d + _td2(days=395)).isoformat()}
+                       "start": "1900-01-01", "end": "1900-01-31"}
         intel_empty = build_report_intelligence(db, onit.id, product_id=sl_id,
                                                 scope=empty_scope)
+        assert not intel_empty["scope"].get("is_future"), (
+            "far-past scope must NOT be flagged as future")
         assert intel_empty["period_summary"]["attributed"]["data_points"] == 0
         assert intel_empty["period_summary"]["backdrop"]["data_points"] == 0
         assert intel_empty["campaigns"] == []
@@ -3797,9 +3800,9 @@ def main() -> None:
         assert "no metric_points in scope" in notes_joined, \
             f"empty scope must produce explicit 'no data in scope' note; got " \
             f"{intel_empty['honesty_notes']}"
-        print(f"[OK] Report (2): empty scope honest — zero attributed + zero "
-              f"backdrop, no campaigns, no top content; honesty_notes call "
-              f"out 'no data in scope' explicitly.")
+        print(f"[OK] Report (2): empty (far-past) scope honest — zero "
+              f"attributed + zero backdrop, no campaigns, no top content; "
+              f"honesty_notes call out 'no data in scope' explicitly.")
 
         # (3) Memory propagation: an insufficient pattern lands in
         # `watching`, NEVER in `memory_highlights`. Moderate/high land in
@@ -4129,6 +4132,122 @@ def main() -> None:
               f"excluded from attributed numbers, called out in "
               f"honesty_notes, and never claimed as marketing-driven in "
               "the rendered report.")
+
+        # (11) Future-date confabulation guard — a time_window scope in
+        # the future must produce a stub report across all three
+        # audiences. The stub explicitly says "no data exists yet,"
+        # includes memory as a reference baseline AS-OF-TODAY only, and
+        # does NOT contain period_summary-style claims (no "rose X%",
+        # no "drove the most conversions," no "during [period]" framing).
+        # Reports describe what HAS happened; they don't forecast.
+        future_start = (today_d + _td2(days=60)).isoformat()
+        future_end = (today_d + _td2(days=90)).isoformat()
+        future_scope = {"kind": "time_window",
+                        "start": future_start, "end": future_end}
+        fut_intel = build_report_intelligence(db, onit.id, product_id=sl_id,
+                                              scope=future_scope)
+        # Engine flagged it as future and omitted load-bearing sections.
+        assert fut_intel["scope"]["is_future"] is True, fut_intel["scope"]
+        assert fut_intel["period_summary"] is None, fut_intel["period_summary"]
+        assert fut_intel["production"] is None, fut_intel["production"]
+        assert fut_intel["notable_changes"] == [], fut_intel["notable_changes"]
+        assert fut_intel["top_content"] == [], fut_intel["top_content"]
+        assert fut_intel["campaigns"] == [], fut_intel["campaigns"]
+        # honesty_notes explicitly call out the future.
+        honesty_joined_fut = " ".join(fut_intel["honesty_notes"]).lower()
+        assert "future" in honesty_joined_fut, fut_intel["honesty_notes"]
+        assert "no data" in honesty_joined_fut, fut_intel["honesty_notes"]
+        # Memory survives as reference baseline, labeled.
+        assert "memory_reference_label" in fut_intel, fut_intel.keys()
+        ref_label = fut_intel["memory_reference_label"].lower()
+        assert "as of" in ref_label and "not a finding" in ref_label, ref_label
+
+        # Each renderer produces an honest stub. Three forbidden shapes
+        # the deterministic body MUST NOT contain (these are the exact
+        # confabulation patterns the bug produced live):
+        forbidden_in_future_body = [
+            "rose ",            # "rose X%" delta framing
+            "fell ",            # delta framing the other way
+            "up ", "down ",     # generic delta shorthand — too risky, see below
+            "drove most",       # ranked attribution claims
+            "was the clear",    # winner framing
+            "led to ",          # cause-effect attribution
+        ]
+        # "up " and "down " are common English words — only forbid them
+        # when they appear as standalone period-delta language ("up 20%",
+        # "down 5%"). We check via a regex below to avoid false positives.
+        import re as _re_fut
+        delta_pat = _re_fut.compile(
+            r"\b(?:up|down|rose|fell|grew|dropped)\s+\d+\s*%", _re_fut.IGNORECASE)
+        rpt_settings.anthropic_api_key = ""  # type: ignore[attr-defined]
+        try:
+            fut_board, _ = render_board(fut_intel, profile={},
+                                         settings=rpt_settings)
+            fut_ceo, _ = render_ceo_weekly(fut_intel, profile={},
+                                            settings=rpt_settings)
+            fut_sales, _ = render_sales_leadership(fut_intel, profile={},
+                                                    settings=rpt_settings)
+        finally:
+            rpt_settings.anthropic_api_key = prev_key  # type: ignore[attr-defined]
+        for label, draft in [("board", fut_board), ("ceo_weekly", fut_ceo),
+                              ("sales_leadership", fut_sales)]:
+            body_text = _flat(draft)
+            # 1) The fact is stated — "no data exists yet" for the period.
+            assert "no data" in body_text.lower(), (
+                f"{label} future stub MUST say 'no data exists yet'. "
+                f"Got: {body_text[:300]}")
+            # 2) The period is named (so user knows what was asked).
+            assert future_start in body_text and future_end in body_text, (
+                f"{label} future stub MUST name the requested period "
+                f"({future_start} to {future_end}). Got: {body_text[:300]}")
+            # 3) The reference baseline is explicitly labeled — memory
+            # is "as of today," NOT for the requested period.
+            if fut_intel["memory_highlights"]:
+                assert ("as of today" in body_text.lower()
+                        or "as of " in body_text.lower()), (
+                    f"{label} future stub MUST label memory bullets as "
+                    f"'as of today' when they appear. Got: {body_text[:300]}")
+            # 4) NO delta / period-attribution language anywhere.
+            for forbidden in ["drove most", "was the clear", "led to "]:
+                assert forbidden not in body_text.lower(), (
+                    f"{label} future stub MUST NOT contain {forbidden!r}. "
+                    f"Got: {body_text[:300]}")
+            # No "up X%" / "down X%" / "rose X%" patterns either.
+            assert not delta_pat.search(body_text), (
+                f"{label} future stub MUST NOT contain period-delta "
+                f"language (up/down/rose N%). Got: {body_text[:300]}")
+            # 5) Metadata flags this as the future stub render strategy.
+            assert (draft.get("metadata") or {}).get(
+                "render_strategy") == "future_stub", draft.get("metadata")
+            # 6) The body is SHORT — the brief calls for a stub, not a
+            # narrative. 100-1000 chars is the honest target band.
+            assert len(body_text) < 1000, (
+                f"{label} future stub MUST be short (< 1000 chars). "
+                f"Got {len(body_text)} chars.")
+        # End-to-end via the agent — generation through the full
+        # spine produces an Artifact whose body reflects the stub.
+        _set_review_mode(onit.id, "all_through")
+        fut_run = _trigger_report_run("ceo_weekly", future_scope,
+                                       product_id=sl_id)
+        assert fut_run.status == "succeeded", (fut_run.status, fut_run.error)
+        fut_art = db.execute(
+            scoped(Artifact, onit.id)
+            .where(Artifact.run_id == fut_run.id,
+                   Artifact.type == "content_draft")
+        ).scalar_one()
+        fut_body_text = "\n".join(
+            (b.get("text") or "")
+            for b in (((fut_art.body or {}).get("content")
+                        or {}).get("blocks") or []))
+        assert "no data" in fut_body_text.lower()
+        assert (fut_art.body or {}).get("content", {}).get(
+            "metadata", {}).get("render_strategy") == "future_stub"
+        print(f"[OK] Report (11): future-date confabulation guard — "
+              f"engine returns is_future intelligence (period_summary/"
+              f"production/campaigns/top_content omitted); all three "
+              f"renderers emit a stub naming the period, framing memory "
+              f"as 'as of today', no delta/attribution language; "
+              f"end-to-end agent run lands a future_stub artifact.")
 
         print("[OK] Smoke test passed.")
     finally:

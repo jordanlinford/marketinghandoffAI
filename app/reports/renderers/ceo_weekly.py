@@ -8,8 +8,8 @@ funnel tables, full campaign list, comprehensive production accounting.
 from __future__ import annotations
 
 from app.reports.renderers._common import (
-    compose_style_lines, fmt_num, fmt_pct, llm_render, period_header,
-    schema_example,
+    compose_style_lines, fmt_num, fmt_pct, future_stub_blocks,
+    is_future_scope, llm_render, period_header, schema_example,
 )
 
 
@@ -118,6 +118,12 @@ def _llm_system_msg(profile: dict | None) -> str:
 def render_ceo_weekly(intelligence: dict, *,
                       profile: dict | None = None,
                       settings=None) -> tuple[dict, float]:
+    if is_future_scope(intelligence):
+        blocks, metadata = future_stub_blocks(
+            intelligence, content_type=_CONTENT_TYPE,
+            audience_label=_AUDIENCE_LABEL)
+        return ({"content_type": _CONTENT_TYPE, "blocks": blocks,
+                 "metadata": metadata}, 0.0)
     sel = _select(intelligence)
     fallback_blocks = _deterministic_blocks(sel)
     metadata = {

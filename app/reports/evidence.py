@@ -63,10 +63,22 @@ _PATTERNS = [
 # Strings we should NEVER count as quantitative claims — dates, times,
 # version-style suffixes, and the marker bodies themselves. We mask
 # these out of the text before the number scanner runs.
+_MONTHS = (
+    r"(?:January|February|March|April|May|June|July|August|September|"
+    r"October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|"
+    r"Oct|Nov|Dec)"
+)
 _SKIP_PATTERNS = [
     re.compile(r"\d{4}-\d{2}-\d{2}"),               # ISO dates 2026-05-29
     re.compile(r"\d{2}:\d{2}(:\d{2})?"),            # times 14:30
     re.compile(r"\bv\d+\b"),                         # v2, v10 (versions)
+    # Human-format dates the LLM writes in titles + headers:
+    # "April 29, 2026", "May 29", "29 April 2026", etc. The model
+    # naturally writes these without markers (they're not claims —
+    # they're the period's name), so the validator must skip them.
+    re.compile(rf"{_MONTHS}\s+\d{{1,2}}(?:\s*,\s*\d{{4}})?", re.IGNORECASE),
+    re.compile(rf"\d{{1,2}}\s+{_MONTHS}(?:\s+\d{{4}})?", re.IGNORECASE),
+    re.compile(r"\b(?:19|20)\d{2}\b"),               # standalone 4-digit year
     _MARKER_RE,                                       # the markers themselves
 ]
 
@@ -115,7 +127,12 @@ class Ledger:
         key = (source, _canonicalize_value(value))
         if key in self._by_source:
             return self._by_source[key]
-        ev_id = f"ev{len(self._entries) + 1}"
+        # Ledger ids are just the index string — "1", "2", "3", ... The
+        # marker format ⟦ev:<id>⟧ already carries the "ev:" namespace.
+        # Putting a redundant "ev" inside the id caused the LLM to
+        # collapse the prefix and write ⟦ev:1⟧ for entry id "ev1" — an
+        # unresolvable marker. Numeric id strings sidestep that.
+        ev_id = str(len(self._entries) + 1)
         self._entries.append({
             "id": ev_id, "source": source, "value": value,
             "label": label, "confidence": confidence,

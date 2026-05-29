@@ -219,6 +219,28 @@ generation for long-form types (whitepaper, case study, report), any LLM-touchin
 quotes numbers. **This is new and the most ambitious of the rules; it becomes load-bearing
 when Report Composer v2 and Enhanced Content Types ship.**
 
+**Future extension: Qualitative claim validation.** The current §6 enforcement (Report
+Composer v2 core + severity-gate layer) binds *quantitative* claims only: numbers,
+percentages, currency, counts. The validator scans for number-shaped tokens, checks each
+carries a resolving evidence-ledger marker, and classifies unsourced numbers as CRITICAL.
+
+This does NOT cover **qualitative** factual claims that emit no number — sentences like *"Acme
+renewed after our campaign"* or *"GC buyers consistently prefer the LinkedIn-first sequence"*
+or *"sales feedback was positive on the carousel."* These are factual assertions the validator
+is silent on today; an LLM can fabricate them freely and pass.
+
+Closing this gap requires the renderer to emit a marker (and the ledger to carry an entry) for
+every *factual* claim, not just every number. That is a larger renderer + ledger change than
+the v2 core — every factual sentence needs a typed source the same way every number does. It
+is the next §6 extension, explicitly OUT of the severity-gate build, and tracked here so the
+spec author for the qualitative-claim build can reference it.
+
+When this build lands, it should add a `qualitative_claims` field to the evidence ledger
+mirroring the quantitative entries, a renderer instruction to attach markers to factual
+sentences, and a CRITICAL §6 finding shape for unsourced qualitative assertions. The severity-
+gate layer doesn't need to change — `derive_findings` already accepts new detections at the
+same tier.
+
 ---
 
 ## How tests should be written

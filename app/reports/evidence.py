@@ -399,13 +399,26 @@ def _find_markers(text: str) -> list[dict]:
     } for m in _MARKER_RE.finditer(text)]
 
 
-def _block_text(content: dict) -> str:
-    """Concatenate all block text into a single string with newline
-    separators between blocks. Single-string scanning is OK because
-    markers point to ids that resolve globally — block boundaries
-    don't matter for resolution, only proximity does."""
-    blocks = (content or {}).get("blocks") or []
-    return "\n".join((b.get("text") or "") for b in blocks)
+def _block_label(blocks: list[dict], idx: int) -> str:
+    """Human-readable location label for the block at `idx`. If it IS a
+    section_heading, its own text is the label. Otherwise, the label is
+    the text of the nearest preceding section_heading; if there is none,
+    the block's kind is used.
+
+    This is the "where" the severity classifier surfaces in findings so
+    the reviewer sees a recognizable section name like "Period summary"
+    or "Strategic asks" rather than a block index."""
+    if idx < 0 or idx >= len(blocks):
+        return "Unknown"
+    block = blocks[idx] or {}
+    kind = (block.get("kind") or "").lower()
+    if kind == "section_heading":
+        return (block.get("text") or "Section heading").strip()
+    for prev in range(idx - 1, -1, -1):
+        if (blocks[prev] or {}).get("kind") == "section_heading":
+            return ((blocks[prev] or {}).get("text") or "").strip() or \
+                kind.replace("_", " ").title()
+    return kind.replace("_", " ").title() or "Unlabeled"
 
 
 _PROXIMITY_SCOPE = 200  # chars after a number to look for its marker
@@ -413,65 +426,291 @@ _PROXIMITY_SCOPE = 200  # chars after a number to look for its marker
 
 def validate_evidence_binding(content: dict, ledger: Ledger) -> dict:
     """Deterministic check that every quantitative claim in `content`
-    is bound to a ledger entry.
+    is bound to a ledger entry. Block-aware: every detection carries
+    `block_idx` + `block_label` so the severity classifier can attribute
+    "where" without re-running validation.
 
     Returns a trust_checks dict:
       {
         ledger_size, markers_found, markers_resolved,
-        markers_unresolved: [list of unresolved ids],
+        markers_unresolved: [{id, block_idx, block_label, text}, ...],
         numbers_found, numbers_bound,
-        numbers_unbound: [list of {text, start} for violations],
-        passed: bool,
+        numbers_unbound: [{text, start, kind, block_idx, block_label}, ...],
+        blocks: [{idx, kind, label, markers, numbers}, ...],
+        passed: bool, summary: str,
       }
 
     `passed` is True iff every marker resolves AND every number-shaped
     token has a resolving marker within _PROXIMITY_SCOPE chars after
-    it. This build RECORDS the result on the artifact; the next build
-    enforces it at the gate.
+    it. Recording-only at this layer; gate enforcement happens in
+    `derive_findings` + the agent's routing decision.
+
+    What is DETECTED is unchanged from the previous build — only the
+    attribution-to-block is new (per the v2 severity-layer spec).
     """
-    text = _block_text(content)
-    markers = _find_markers(text)
-    numbers = _find_numbers(text)
+    blocks = (content or {}).get("blocks") or []
 
-    resolved_marker_positions: list[tuple[int, str]] = []
-    markers_unresolved: list[str] = []
-    for m in markers:
-        if ledger.has(m["id"]):
-            resolved_marker_positions.append((m["start"], m["id"]))
-        else:
-            markers_unresolved.append(m["id"])
-
+    all_markers_total = 0
+    all_numbers_total = 0
+    markers_unresolved: list[dict] = []
     numbers_unbound: list[dict] = []
-    for n in numbers:
-        # A number is BOUND if a resolving marker appears within
-        # _PROXIMITY_SCOPE chars after the number's end. Forward-only
-        # because that's how the renderer emits them ("1,200 ⟦ev:1⟧")
-        # and how the LLM is instructed to.
-        bound = False
-        for marker_start, _id in resolved_marker_positions:
-            if marker_start < n["end"]:
-                continue
-            if marker_start - n["end"] <= _PROXIMITY_SCOPE:
-                bound = True
-                break
-        if not bound:
-            numbers_unbound.append({"text": n["text"], "start": n["start"],
-                                     "kind": n["kind"]})
+    blocks_inventory: list[dict] = []
+
+    for block_idx, block in enumerate(blocks):
+        text = (block or {}).get("text") or ""
+        label = _block_label(blocks, block_idx)
+        block_markers = _find_markers(text)
+        block_numbers = _find_numbers(text)
+        all_markers_total += len(block_markers)
+        all_numbers_total += len(block_numbers)
+
+        resolved_in_block: list[tuple[int, str]] = []
+        for m in block_markers:
+            if ledger.has(m["id"]):
+                resolved_in_block.append((m["start"], m["id"]))
+            else:
+                markers_unresolved.append({
+                    "id": m["id"],
+                    "block_idx": block_idx,
+                    "block_label": label,
+                    "text": m["text"],
+                })
+
+        # Per-block proximity check — a number is BOUND iff a resolving
+        # marker appears within _PROXIMITY_SCOPE chars after it IN THE
+        # SAME BLOCK. Cross-block binding is rejected by construction
+        # because the renderer always emits the marker inline.
+        for n in block_numbers:
+            bound = False
+            for marker_start, _id in resolved_in_block:
+                if marker_start < n["end"]:
+                    continue
+                if marker_start - n["end"] <= _PROXIMITY_SCOPE:
+                    bound = True
+                    break
+            if not bound:
+                numbers_unbound.append({
+                    "text": n["text"], "start": n["start"], "kind": n["kind"],
+                    "block_idx": block_idx, "block_label": label,
+                })
+        blocks_inventory.append({
+            "idx": block_idx,
+            "kind": (block or {}).get("kind") or "",
+            "label": label,
+            "markers": len(block_markers),
+            "numbers": len(block_numbers),
+        })
 
     passed = (not markers_unresolved) and (not numbers_unbound)
     return {
         "ledger_size": len(ledger),
-        "markers_found": len(markers),
-        "markers_resolved": len(markers) - len(markers_unresolved),
+        "markers_found": all_markers_total,
+        "markers_resolved": all_markers_total - len(markers_unresolved),
         "markers_unresolved": markers_unresolved,
-        "numbers_found": len(numbers),
-        "numbers_bound": len(numbers) - len(numbers_unbound),
+        "numbers_found": all_numbers_total,
+        "numbers_bound": all_numbers_total - len(numbers_unbound),
         "numbers_unbound": numbers_unbound,
+        "blocks": blocks_inventory,
         "passed": passed,
-        # Surfaced so the UI build can later show "5/5 claims bound"
-        # next to the trust pill without doing arithmetic.
         "summary": (
-            f"{len(numbers) - len(numbers_unbound)} of {len(numbers)} "
-            f"claim(s) bound; {len(markers) - len(markers_unresolved)} of "
-            f"{len(markers)} marker(s) resolved."),
+            f"{all_numbers_total - len(numbers_unbound)} of "
+            f"{all_numbers_total} claim(s) bound; "
+            f"{all_markers_total - len(markers_unresolved)} of "
+            f"{all_markers_total} marker(s) resolved."),
     }
+
+
+# --------------------------------------------------------------------------
+# Severity classifier — the v2 layer the gate enforces against.
+#
+# Severity tracks the CONSEQUENCE of a claim reaching an executive,
+# not confidence in the analysis. Fabrication blocks; weak analysis
+# warns. Severity is DERIVED from which discipline check fired — never
+# a per-finding subjective judgment. If a finding's tier requires
+# interpretation to assign, it is mis-specified.
+#
+# Tier mapping is FIXED (not configurable per-report):
+#   CRITICAL §6  — unsourced quantitative claim (numbers_unbound)
+#                — broken / unresolvable marker (markers_unresolved)
+#   CRITICAL §4  — delta / attribution language on a future scope
+#   WARNING  §1  — block whose every resolving marker points to a
+#                  ledger entry at low or insufficient confidence
+#                  (thin-evidence block; never blocks the gate)
+#
+# This build does NOT detect qualitative-claim fabrication (a sentence
+# that asserts "Acme renewed" with no number emits no marker and is
+# silent to the validator). That gap is documented as the next §6
+# extension in docs/cross-layer-disciplines.md.
+# --------------------------------------------------------------------------
+_BELOW_THRESHOLD_CONFIDENCE = ("low", "insufficient")
+
+# §4 detection — same regex family the future-date smoke (Report 11)
+# uses to assert the stub does NOT emit delta language. Re-used here
+# as the positive detection: when scope.is_future is True and these
+# patterns appear, that IS the confabulation we forbid.
+_DELTA_RE = re.compile(
+    r"\b(?:up|down|rose|fell|grew|dropped|increased|decreased)\s+\d+\s*%",
+    re.IGNORECASE)
+_ATTRIBUTION_RE = re.compile(
+    r"\b(?:drove|driven by|led to|was the clear|highest[- ]converting)\b",
+    re.IGNORECASE)
+
+
+def derive_findings(trust_checks: dict, ledger_entries: list[dict],
+                    content: dict, *, scope: dict | None = None) -> list[dict]:
+    """Classify already-computed trust_checks into severity-bearing
+    findings. Pure deterministic — no LLM, no per-finding judgment.
+
+    Inputs come straight from `validate_evidence_binding` + the ledger's
+    `to_list()` + the report's content. `scope` is the intelligence
+    object's scope dict; when scope.is_future is True we also scan for
+    §4 future-date delta / attribution language at the block level.
+
+    Each finding carries:
+      severity (critical|warning|informational)
+      discipline (§6|§4|§1|None)
+      claim (offending text/number/block, verbatim where possible)
+      location (block label — Period summary, Strategic asks, etc.)
+      issue (one-line plain-English what's-wrong)
+      recommended_action (concrete fix the reviewer can act on)
+    """
+    findings: list[dict] = []
+    blocks = (content or {}).get("blocks") or []
+    by_id = {e["id"]: e for e in (ledger_entries or [])
+             if isinstance(e, dict) and "id" in e}
+
+    # ---- CRITICAL §6 — unsourced quantitative claims -------------------
+    for u in (trust_checks or {}).get("numbers_unbound") or []:
+        if not isinstance(u, dict):
+            continue
+        findings.append({
+            "severity": "critical",
+            "discipline": "§6",
+            "claim": str(u.get("text", "")),
+            "location": u.get("block_label")
+                        or _block_label(blocks, u.get("block_idx", -1)),
+            "issue": "No supporting source found in evidence ledger.",
+            "recommended_action": ("Add supporting evidence to the ledger "
+                                    "(re-render with the value derived from a "
+                                    "real intelligence field) or remove the "
+                                    "quantitative claim."),
+        })
+
+    # ---- CRITICAL §6 — broken / unresolvable markers -------------------
+    for m in (trust_checks or {}).get("markers_unresolved") or []:
+        if isinstance(m, dict):
+            ev_id = m.get("id", "")
+            location = (m.get("block_label")
+                        or _block_label(blocks, m.get("block_idx", -1)))
+        else:
+            # Tolerate the older string-list shape in case any consumer
+            # still hands us that — never fail to classify a detection.
+            ev_id = str(m)
+            location = "Unknown"
+        findings.append({
+            "severity": "critical",
+            "discipline": "§6",
+            "claim": f"⟦ev:{ev_id}⟧",
+            "location": location,
+            "issue": ("Marker cites an evidence-ledger id that does not "
+                      "resolve to any entry."),
+            "recommended_action": ("Cite an existing ledger id (rebuild the "
+                                    "ledger from the intelligence object that "
+                                    "actually contains this value) or remove "
+                                    "the marker and its number."),
+        })
+
+    # ---- CRITICAL §4 — delta / attribution language on future scope ---
+    if scope and bool(scope.get("is_future")):
+        for block_idx, block in enumerate(blocks):
+            text = (block or {}).get("text") or ""
+            label = _block_label(blocks, block_idx)
+            for m in _DELTA_RE.finditer(text):
+                findings.append({
+                    "severity": "critical",
+                    "discipline": "§4",
+                    "claim": m.group(0),
+                    "location": label,
+                    "issue": ("Delta language used for a future-scope "
+                              "period (no data exists for the requested "
+                              "window — this is confabulation)."),
+                    "recommended_action": ("Remove this claim. Reports "
+                                            "describe what HAS happened; "
+                                            "they do not project the future. "
+                                            "Use the honest stub instead."),
+                })
+            for m in _ATTRIBUTION_RE.finditer(text):
+                findings.append({
+                    "severity": "critical",
+                    "discipline": "§4",
+                    "claim": m.group(0),
+                    "location": label,
+                    "issue": ("Attribution language used for a future-scope "
+                              "period."),
+                    "recommended_action": ("Frame as reference baseline only "
+                                            "('as of today, not for the "
+                                            "requested period'); do not "
+                                            "attribute outcomes to a window "
+                                            "that hasn't happened."),
+                })
+
+    # ---- WARNING §1 — thin-evidence blocks -----------------------------
+    # For each block with at least one resolving marker, if EVERY
+    # resolving marker points to a ledger entry at low / insufficient
+    # confidence, the block is carrying its weight on thin evidence.
+    # This is informational about analysis weakness; it never blocks
+    # the gate. The threshold uses the EXISTING tier vocabulary; we do
+    # not invent a new tier.
+    for block_idx, block in enumerate(blocks):
+        text = (block or {}).get("text") or ""
+        if not text:
+            continue
+        marker_ids = _MARKER_RE.findall(text)
+        if not marker_ids:
+            continue
+        resolved = [by_id[m] for m in marker_ids if m in by_id]
+        if not resolved:
+            continue  # all unresolved — that's §6, not §1
+        confs = {(e.get("confidence") or "n_a") for e in resolved}
+        if confs.issubset(set(_BELOW_THRESHOLD_CONFIDENCE)):
+            kind = (block or {}).get("kind") or "block"
+            findings.append({
+                "severity": "warning",
+                "discipline": "§1",
+                "claim": (kind.replace("_", " ").title()
+                          + (": " + text[:80] if len(text) > 0 else "")),
+                "location": _block_label(blocks, block_idx),
+                "issue": ("Every cited evidence entry in this block is at "
+                          "low or insufficient confidence — the analysis "
+                          "is leaning on thin data."),
+                "recommended_action": ("Strengthen with higher-confidence "
+                                        "evidence (more recent or higher-"
+                                        "sample patterns) or downgrade the "
+                                        "framing to a 'watching' observation."),
+            })
+
+    return findings
+
+
+def trust_checks_with_findings(trust_checks: dict,
+                               ledger_entries: list[dict],
+                               content: dict, *,
+                               scope: dict | None = None) -> dict:
+    """Helper: derive findings + approval_blocked + an enriched
+    `summary` line, mutating trust_checks in place (and returning it).
+    Used by the agent's body assembly so the result lands on a single
+    field the gate + future UI both read off."""
+    findings = derive_findings(trust_checks, ledger_entries, content,
+                                scope=scope)
+    critical = [f for f in findings if f["severity"] == "critical"]
+    warning = [f for f in findings if f["severity"] == "warning"]
+    informational = [f for f in findings if f["severity"] == "informational"]
+    approval_blocked = bool(critical)
+    trust_checks["findings"] = findings
+    trust_checks["findings_by_severity"] = {
+        "critical": len(critical),
+        "warning": len(warning),
+        "informational": len(informational),
+    }
+    trust_checks["approval_blocked"] = approval_blocked
+    return trust_checks

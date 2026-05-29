@@ -32,6 +32,7 @@ from app.agents.base import Agent
 from app.agents.content_grader import grade_content
 from app.agents.registry import register
 from app.reports.evidence import (build_ledger_from_intelligence,
+                                   trust_checks_with_findings,
                                    validate_evidence_binding)
 from app.reports.renderers import RENDERERS
 from app.schemas import (AgentContext, AgentResult, ArtifactDraft, Citation,
@@ -89,11 +90,22 @@ class ReportComposerAgent(Agent):
                                      profile=profile, settings=settings,
                                      ledger=ledger)
 
-        # Deterministic post-render validation. Records pass/fail per
-        # claim on the artifact body — this build does NOT block at the
-        # gate (recording only), per the spec. The next build wires
-        # block-at-gate enforcement once the trust pill UI is live.
+        # Deterministic post-render validation + severity classification.
+        # The validator scans prose per-block (so findings carry
+        # locations); the classifier maps detections to severity tiers
+        # and emits the gate signal (`approval_blocked` is True iff any
+        # critical finding fired). The tier mapping is FIXED:
+        #   CRITICAL §6 = unsourced quantitative claim, broken marker.
+        #   CRITICAL §4 = delta/attribution language on a future scope.
+        #   WARNING  §1 = block whose every cited entry is at low or
+        #                 insufficient confidence (thin evidence; never
+        #                 blocks the gate).
+        # See docs/cross-layer-disciplines.md for the underlying rules.
         trust_checks = validate_evidence_binding(content, ledger)
+        trust_checks = trust_checks_with_findings(
+            trust_checks, ledger.to_list(), content,
+            scope=intelligence.get("scope") or {})
+        approval_blocked = bool(trust_checks.get("approval_blocked"))
 
         # ---- Guardrail + routing — same shape as content_engine ----------
         flat_text = "\n".join((b.get("text") or "")
@@ -116,6 +128,19 @@ class ReportComposerAgent(Agent):
         else:
             needs_review = (gstatus == "blocked")
             why = gdetail
+        # Evidence severity gate: any CRITICAL finding (unsourced
+        # quantitative claim, broken marker, or future-date confabulation)
+        # blocks auto-ready regardless of content_review_mode. The
+        # existing approval queue handles it from there — no new gate,
+        # no new route, just an extra reason the existing one fires.
+        # all_through still applies as a normal posture, but a fabricated
+        # claim is not a posture decision.
+        if approval_blocked and not needs_review:
+            needs_review = True
+            n_critical = trust_checks["findings_by_severity"]["critical"]
+            why = (f"{n_critical} critical evidence finding(s): approval "
+                   f"blocked until reviewed. See body.trust_checks.findings "
+                   f"for the per-claim breakdown.")
         artifact_status = "pending_review" if needs_review else "ready"
 
         # ---- Advisory grade ---------------------------------------------

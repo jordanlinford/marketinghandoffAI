@@ -219,27 +219,57 @@ generation for long-form types (whitepaper, case study, report), any LLM-touchin
 quotes numbers. **This is new and the most ambitious of the rules; it becomes load-bearing
 when Report Composer v2 and Enhanced Content Types ship.**
 
-**Future extension: Qualitative claim validation.** The current §6 enforcement (Report
-Composer v2 core + severity-gate layer) binds *quantitative* claims only: numbers,
-percentages, currency, counts. The validator scans for number-shaped tokens, checks each
-carries a resolving evidence-ledger marker, and classifies unsourced numbers as CRITICAL.
+**§6 Principle — Evidence describes knowledge, not inventory.**
+Never create an evidence-ledger record solely to satisfy the validator. If a ledger entry
+exists only because a check demanded a source for a number, the entry is wrong and the check
+is mis-scoped. The ledger records claims about reality; it must never be padded with
+implementation/inventory facts (counts of ads, emails, sections, recommendations) to turn a
+finding green. A validator that can be satisfied by manufacturing its own inputs is not
+enforcing honesty — it is training the renderer to fabricate sources. When a number won't
+bind, the question is "is this a claim about the world?" — not "what entry would make this
+pass?"
 
-This does NOT cover **qualitative** factual claims that emit no number — sentences like *"Acme
-renewed after our campaign"* or *"GC buyers consistently prefer the LinkedIn-first sequence"*
-or *"sales feedback was positive on the carousel."* These are factual assertions the validator
-is silent on today; an LLM can fabricate them freely and pass.
+**§6 Extension — Claim Taxonomy & Qualitative Binding.** (Supersedes the earlier
+qualitative-binding note — they are the same problem; this is the sharper framing.)
 
-Closing this gap requires the renderer to emit a marker (and the ledger to carry an entry) for
-every *factual* claim, not just every number. That is a larger renderer + ledger change than
-the v2 core — every factual sentence needs a typed source the same way every number does. It
-is the next §6 extension, explicitly OUT of the severity-gate build, and tracked here so the
-spec author for the qualitative-claim build can reference it.
+The current validator's definition of a bindable claim is "any number." That is too broad on
+one axis and too narrow on another:
+- *too broad*: it flags **Artifact Claims** (numbers describing the report's own contents)
+  which cannot and must not bind — caught live: *"2 ads, 1 social post"* in a sales report
+  fired CRITICAL §6 with nothing to honestly bind to.
+- *too narrow*: it ignores non-numeric **World Claims** (a fabricated *"Acme renewed after our
+  campaign"* emits no number and passes today).
 
-When this build lands, it should add a `qualitative_claims` field to the evidence ledger
-mirroring the quantitative entries, a renderer instruction to attach markers to factual
-sentences, and a CRITICAL §6 finding shape for unsourced qualitative assertions. The severity-
-gate layer doesn't need to change — `derive_findings` already accepts new detections at the
-same tier.
+Both are the same underlying question: **what constitutes a claim about reality?**
+Current answer: any number. Correct answer: any statement about the world.
+
+The taxonomy the future validator should encode:
+
+```
+World Claim        → MUST bind to evidence
+  ├─ Quantitative   (a metric / outcome / rate)
+  ├─ Qualitative    (a stated fact about an entity or event)
+  └─ Comparative    (a relative claim: more/less/best/fastest)
+Artifact Claim     → self-describing, NEVER binds
+  ├─ Asset Count
+  ├─ Section Count
+  ├─ Generated-Deliverable Count
+  └─ Structural Metadata
+```
+
+Only World Claims require binding. Artifact Claims describe the document itself and are
+self-evidencing. The distinction is by REFERENCE (world vs. artifact), not by the number's
+size or type — *"ignore small integers"* and *"bind everything"* are both wrong for that
+reason.
+
+Scope when built: classify each candidate claim World vs. Artifact before requiring a binding;
+extend binding to qualitative + comparative World Claims (a larger renderer change — every
+factual claim, not just numeric, carries a marker). Governed by the §6 Principle above:
+the fix is sharper claim classification, NEVER a looser scanner and NEVER manufactured
+ledger entries.
+
+Status: BACKLOG. Not scheduled. Named so the next spec author finds it before reaching for
+the easy wrong fix (binding the artifact counts).
 
 ---
 

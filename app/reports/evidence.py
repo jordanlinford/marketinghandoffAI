@@ -172,6 +172,32 @@ class Ledger:
         # Copy so callers can serialize without mutating the ledger.
         return [dict(e) for e in self._entries]
 
+    @classmethod
+    def from_entries(cls, entries: list[dict]) -> "Ledger":
+        """Reconstruct a Ledger from an already-serialized entry list,
+        preserving each entry's id verbatim. Used by the demo seed when
+        it needs to re-validate after mutating the ledger (e.g.
+        removing or downgrading an entry) — markers in body text point
+        at original ids, so the ids must round-trip exactly.
+        """
+        out = cls()
+        for e in entries or []:
+            if not isinstance(e, dict) or "id" not in e:
+                continue
+            entry = {
+                "id": e["id"],
+                "source": e.get("source", ""),
+                "value": e.get("value"),
+                "label": e.get("label", ""),
+                "confidence": e.get("confidence", "n_a"),
+                "baseline_vs_attributed": e.get("baseline_vs_attributed", "n_a"),
+            }
+            out._entries.append(entry)
+            out._by_source[
+                (entry["source"], _canonicalize_value(entry["value"]))
+            ] = entry["id"]
+        return out
+
     def prompt_payload(self) -> list[dict]:
         """Compact JSON-shaped representation for inclusion in an LLM
         user message — only the fields the model needs to cite

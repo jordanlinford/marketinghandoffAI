@@ -137,14 +137,36 @@ class RunOut(BaseModel):
     upload_id: str | None = None
     product_id: str | None = None
     created_at: str
+    # display_label — surface enough identity to distinguish reports
+    # from one another in HQ Recent Runs + Create run list. For
+    # report_composer runs, we surface audience + scope hint; other
+    # agents render their agent_key as before. Pulled from task (no
+    # new data — just shaped for the UI).
+    display_label: str | None = None
 
     @classmethod
     def of(cls, r) -> "RunOut":
+        task = r.task or {}
+        display_label = None
+        if r.agent_key == "report_composer":
+            audience = (task.get("audience") or "").replace("_", " ")
+            scope = task.get("scope") or {}
+            kind = scope.get("kind")
+            if kind == "time_window":
+                hint = f"{scope.get('start') or '?'} → {scope.get('end') or '?'}"
+            elif kind == "campaign":
+                hint = "campaign"
+            else:
+                hint = ""
+            audience_label = audience.title() if audience else "report"
+            display_label = (f"{audience_label} report"
+                              + (f" — {hint}" if hint else ""))
         return cls(
             id=r.id, agent_key=r.agent_key, status=r.status, trigger=r.trigger,
             cost_usd=r.cost_usd, error=r.error, upload_id=r.upload_id,
             product_id=r.product_id,
             created_at=r.created_at.isoformat(),
+            display_label=display_label,
         )
 
 

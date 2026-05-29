@@ -164,6 +164,17 @@
     margin-bottom: 4px; font-size: 12px;
     min-width: 0; overflow-wrap: anywhere;
   }
+  /* Inline citation rendering — replaces the raw ⟦ev:N⟧ delimiters
+     with clean superscripts so the body reads as a finished doc.
+     Clicking jumps to the matching ledger entry in the panel below. */
+  .cite {
+    display: inline-block; vertical-align: super;
+    font-size: 0.75em; font-weight: 600; padding: 0 2px;
+    color: #7ce0a3; text-decoration: none; cursor: pointer;
+  }
+  .cite:hover { text-decoration: underline; }
+  .cite.unresolved { color: #ffc6dd; }
+  .ledger-entry.target { outline: 2px solid #7ce0a3; outline-offset: 2px; }
   /* Library detail panel: clamp long content (tagged URLs especially)
      so it can never scroll the rest of the page sideways. */
   #lib-detail .panel { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
@@ -1049,7 +1060,7 @@ function renderRuns() {
       { class: 'run-item' + (r.id === state.selectedRunId ? ' selected' : ''),
         onclick: () => selectRun(r.id) },
       el('div', { class: 'top' },
-        el('span', {}, r.agent_key),
+        el('span', {}, r.display_label || r.agent_key),
         el('span', { class: `badge ${r.status}` }, r.status),
       ),
       el('div', { class: 'meta' }, `${fmtTime(r.created_at)} · ${fmtCost(r.cost_usd)} · ${r.trigger}`),
@@ -2792,6 +2803,25 @@ function _renderReportDetailInto(wrap, asset, detail) {
 
   // ---- Trust Summary Banner ------------------------------------------
   if (view) {
+    const counts = view.findings_counts || {};
+    const totalFindings = (counts.critical || 0) + (counts.warning || 0)
+                          + (counts.informational || 0);
+    // Anchor link to the findings panel (id="trust-findings-panel").
+    // Click-to-scroll so the banner's "N critical" isn't 8 screens
+    // away from where the user can read what fired.
+    const jumpToFindings = (ev) => {
+      ev.preventDefault();
+      const panel = document.getElementById('trust-findings-panel');
+      if (!panel) return;
+      panel.open = true;
+      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+    const reasonEl = totalFindings > 0
+      ? el('a', { class: 'trust-state-reason', href: '#trust-findings-panel',
+                  style: 'cursor:pointer; color:var(--text); text-decoration:underline dotted;',
+                  onclick: jumpToFindings },
+          view.state_reason || '')
+      : el('div', { class: 'trust-state-reason' }, view.state_reason || '');
     const banner = el('div', { class: 'trust-banner trust-' + view.state },
       el('div', { class: 'row', style: 'justify-content:space-between; gap:8px;' },
         el('div', {},
@@ -2803,7 +2833,7 @@ function _renderReportDetailInto(wrap, asset, detail) {
         ),
         el('span', { class: 'sub', style: 'font-size:12px;' },
           'Trust layer — not a human approval')),
-      el('div', { class: 'trust-state-reason' }, view.state_reason || ''),
+      reasonEl,
       el('div', { class: 'trust-coverage' },
         `Markers: ${view.coverage.markers_resolved}/${view.coverage.markers_found} resolved · ` +
         `Numbers: ${view.coverage.numbers_bound}/${view.coverage.numbers_found} bound · ` +
@@ -2845,16 +2875,23 @@ function _renderReportDetailInto(wrap, asset, detail) {
         title: `Trust indicator: ${ind.indicator}` },
         ind.indicator));
     }
+    // Render marker tokens (⟦ev:N⟧) as inline superscript citations so
+    // the body reads as a finished doc, not a debug dump. Each marker
+    // becomes a <sup> linking to its ledger entry's row in the
+    // Evidence Ledger panel (id=ev-row-N).
+    const textDiv = el('div', { style: 'white-space:pre-wrap;' });
+    _appendBlockTextWithCitations(textDiv, b.text || '');
     wrap.appendChild(el('div', { class: 'cluster' },
       el('h4', {}, ...headerKids),
-      el('div', { style: 'white-space:pre-wrap;' }, b.text || ''),
+      textDiv,
     ));
   }
 
   // ---- Trust Checks Panel (findings grouped by severity) ------------
   if (view) {
     const fbs = view.findings_by_severity || {};
-    const det = el('details', { open: view.state !== 'passed',
+    const det = el('details', { id: 'trust-findings-panel',
+                                  open: view.state !== 'passed',
                                   style: 'margin-top:14px;' });
     const counts = view.findings_counts || {};
     det.appendChild(el('summary', {},
@@ -2903,7 +2940,7 @@ function _renderReportDetailInto(wrap, asset, detail) {
     for (const e of view.ledger) {
       const tier = e.confidence || 'n_a';
       const flag = e.baseline_vs_attributed || 'n_a';
-      body.appendChild(el('div', { class: 'ledger-entry' },
+      body.appendChild(el('div', { class: 'ledger-entry', id: `ev-row-${e.id}` },
         el('div', {},
           el('strong', {}, `ev:${e.id}`),
           el('span', { style: 'margin-left:6px; color:var(--muted);' },
@@ -2915,6 +2952,40 @@ function _renderReportDetailInto(wrap, asset, detail) {
     }
     det.appendChild(body);
     wrap.appendChild(det);
+  }
+}
+
+// Render a block's text with ⟦ev:N⟧ markers replaced by inline
+// superscript citations. The text segments are preserved verbatim;
+// only the marker delimiters are swapped for clean DOM. The citation
+// links to the ledger entry's row anchor in the evidence panel below.
+function _appendBlockTextWithCitations(targetEl, text) {
+  const re = /⟦ev:([A-Za-z0-9_\-]+)⟧/g;
+  let cursor = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > cursor) {
+      targetEl.appendChild(document.createTextNode(text.slice(cursor, m.index)));
+    }
+    const id = m[1];
+    const cite = document.createElement('a');
+    cite.className = 'cite';
+    cite.textContent = id;
+    cite.title = `Cited evidence: ev:${id}`;
+    cite.dataset.evId = id;
+    cite.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const row = document.getElementById(`ev-row-${id}`);
+      if (!row) return;
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      row.classList.add('target');
+      setTimeout(() => row.classList.remove('target'), 1500);
+    });
+    targetEl.appendChild(cite);
+    cursor = m.index + m[0].length;
+  }
+  if (cursor < text.length) {
+    targetEl.appendChild(document.createTextNode(text.slice(cursor)));
   }
 }
 
@@ -4528,12 +4599,19 @@ async function loadCommandCenter() {
   root.innerHTML = '<div class="setup-status">Loading…</div>';
   // Pull the pieces in parallel; tolerate any single failure.
   const safe = async (p) => { try { return await p; } catch (e) { return null; } };
-  const [products, runs, proposals, suggestions] = await Promise.all([
+  const [products, runs, proposals, suggestions, pendingReportsResp] =
+    await Promise.all([
     safe(api('/api/products')),
     safe(api('/api/runs')),
     safe(api('/api/review/proposals?status=pending')),
     safe(api('/api/dashboard/suggestions?status=open')),
+    // Pending reports — these may sit in the queue even when no
+    // matching content_review proposal exists (status drifts can
+    // happen). Counting artifacts with status=pending_review is the
+    // single source of truth for "what's awaiting approval."
+    safe(api('/api/assets?asset_kind=report&status=pending_review&limit=200')),
   ]);
+  const pendingReports = ((pendingReportsResp || {}).assets) || [];
   // Per-product pending-insight counts: one call per confirmed product.
   // Cheap and the only place we walk products here.
   let pendingInsightsTotal = 0;
@@ -4618,15 +4696,51 @@ async function loadCommandCenter() {
   grid.appendChild(reviewCard);
 
   // Card: Content awaiting approval.
+  // Counts content_review proposals AND pending_review reports. Both
+  // sit in the approval queue; the report side can hold an artifact
+  // whose corresponding proposal has been resolved (or never existed
+  // — e.g. an approval_blocked report whose proposal was dismissed
+  // but whose status hasn't been hand-cleared). The single source of
+  // truth for "awaiting approval" is artifact.status=pending_review.
   const contentReview = filteredProposals.filter(p => p.action_type === 'content_review');
+  // De-dupe by report id when a proposal + a pending report point at
+  // the same artifact (rare but possible after re-routing).
+  const proposalArtifactIds = new Set(
+    contentReview.map(p => (p.payload && p.payload.parent_artifact_id) || '')
+    .filter(Boolean));
+  const productScopedReports = productScope
+    ? pendingReports.filter(r => r.product_id === productScope)
+    : pendingReports;
+  const pendingReportCount = productScopedReports
+    .filter(r => !proposalArtifactIds.has(r.id))
+    .length;
+  const totalAwaiting = contentReview.length + pendingReportCount;
   const proposalsCard = el('div', { class: 'home-card',
-    style: contentReview.length ? 'cursor:pointer;' : '',
-    onclick: contentReview.length ? () => switchView('create') : null },
+    style: totalAwaiting ? 'cursor:pointer;' : '',
+    onclick: totalAwaiting ? () => {
+      // If reports are part of what's awaiting, prefer the Library
+      // (filtered) so the user sees them; otherwise the existing
+      // Create view's queue.
+      if (pendingReportCount > 0) {
+        switchView('library');
+        setTimeout(() => {
+          const ks = document.getElementById('lib-kind');
+          const ss = document.getElementById('lib-status');
+          if (ks) ks.value = 'report';
+          if (ss) ss.value = 'pending_review';
+          if (typeof fetchLibraryList === 'function') fetchLibraryList();
+        }, 200);
+      } else {
+        switchView('create');
+      }
+    } : null },
     el('h3', {}, 'Content awaiting approval'),
-    el('div', { class: 'big' }, String(contentReview.length)),
+    el('div', { class: 'big' }, String(totalAwaiting)),
     el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
-      contentReview.length
-        ? 'Drafts in the Approval queue. Click → Create.'
+      totalAwaiting
+        ? (pendingReportCount > 0
+          ? `${contentReview.length} draft(s) + ${pendingReportCount} report(s) in the queue. Click → Library (reports).`
+          : 'Drafts in the Approval queue. Click → Create.')
         : 'Nothing waiting. Drafts auto-pass review unless the org mode gates them.'),
   );
   grid.appendChild(proposalsCard);
@@ -4644,7 +4758,7 @@ async function loadCommandCenter() {
       runsCard.appendChild(el('div', { style: 'margin:6px 0; cursor:pointer;',
         onclick: () => { switchView('create'); selectRun(r.id); } },
         el('div', {},
-          r.agent_key,
+          r.display_label || r.agent_key,
           el('span', { class: `badge ${r.status}`,
             style: 'margin-left:8px;' }, r.status)),
         el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },

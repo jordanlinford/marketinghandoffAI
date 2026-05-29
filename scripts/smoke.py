@@ -1505,16 +1505,20 @@ def main() -> None:
         assert refresh2.status_code == 200, refresh2.text
         rj2 = refresh2.json()
         industry2 = [s for s in rj2 if s["kind"] == "industry"]
-        assert len(industry2) == 1, \
-            f"fallback must yield exactly one industry placeholder, got {industry2}"
-        assert "unavailable" in industry2[0]["recommendation"].lower(), \
-            f"fallback should say industry perspective is unavailable: {industry2[0]}"
-        assert industry2[0]["source_label"].startswith("General industry perspective"), \
-            "fallback MUST still carry the 'verify before acting' label"
+        # Graceful degradation (P8.3 demo-spine fix): when the industry
+        # LLM is unavailable, the fallback returns ZERO items so the
+        # dashboard renders a quiet empty state — NOT an alert card
+        # the user can't act on. The §6 Principle: if the feature
+        # can't run, it shows nothing; it never fabricates and never
+        # surfaces a "configure your key" card cluttering the surface.
+        assert industry2 == [], (
+            "industry LLM outage MUST yield ZERO items (quiet empty "
+            "state, no alert card, no fabricated framing). Got: "
+            + str(industry2))
         print(f"[OK] Dashboard (4): {len(trend_items)} trend "
               f"suggestion(s) with evidence; industry stub labeled "
-              "'verify before acting'; LLM-outage fallback yields a single "
-              "labeled placeholder.")
+              "'verify before acting'; LLM-outage fallback yields ZERO "
+              "items (quiet empty state).")
 
         # (5) Tenant isolation — Acme (other) cannot see Onit's points
         # or suggestions via scoped(). Also: a baseline upload by Acme
@@ -5147,6 +5151,215 @@ def main() -> None:
               f"trust_state on report rows ({len(list_resp.json()['assets'])} "
               "rows checked); values are 'passed'/'passed_with_warnings'/"
               "'blocked' or null for legacy.")
+
+        # (16) DEMO SPINE — six sub-checks per the spec.
+        # Read-only correctness against the trust visibility layer +
+        # graceful degradation surfaces. NO new validation; no new
+        # decisions; the seed itself is a separate script.
+
+        # ---- 16a Block-indicator regression (load-bearing) -----------
+        # A block with ≥1 resolved marker MUST be 'evidence-backed',
+        # not 'no-evidence'. A block with zero markers stays
+        # 'no-evidence' (absence still honest). This pins the on-read
+        # derivation that fixes the bug where older reports lacked
+        # resolved_marker_ids in their inventory.
+        from app.reports.trust_view import build_trust_view
+        # Re-use the clean board report (rpt_art from Report 5) which
+        # has body blocks containing real ⟦ev⟧ markers.
+        db.refresh(rpt_art)
+        rb = rpt_art.body or {}
+        view_16a = build_trust_view(
+            rb.get("trust_checks") or {},
+            rb.get("evidence_ledger") or [],
+            ((rb.get("content") or {}).get("blocks") or []))
+        # At least one body block has markers → at least one indicator
+        # must be 'evidence-backed' (not all 'no-evidence').
+        ev_backed = [b for b in view_16a["block_indicators"]
+                     if b["indicator"] == "evidence-backed"]
+        assert ev_backed, (
+            "block-indicator regression: a passed report with marker "
+            "citations MUST surface at least one 'evidence-backed' "
+            "indicator. Got: "
+            + str(view_16a["block_indicators"]))
+        # Conversely, a block with NO markers MUST stay 'no-evidence'
+        # (absence honest). Build a synthetic markerless block and
+        # confirm.
+        markerless_view = build_trust_view(
+            {"approval_blocked": False, "findings": [], "blocks": [],
+             "markers_found": 0, "markers_resolved": 0,
+             "numbers_found": 0, "numbers_bound": 0, "ledger_size": 0},
+            [],
+            [{"kind": "body", "text": "Plain text with no markers at all."}])
+        assert markerless_view["block_indicators"]
+        assert markerless_view["block_indicators"][0]["indicator"] == "no-evidence"
+        print(f"[OK] Report (16a): block-indicator regression — passed "
+              f"report shows {len(ev_backed)} 'evidence-backed' block(s) "
+              "instead of all-no-evidence; markerless block correctly "
+              "stays 'no-evidence' (absence honest).")
+
+        # ---- 16b Marker render — no raw ⟦ev: literal --------------
+        # Verify the validator's marker regex matches what the UI's
+        # citation rendering scans for. The actual <sup>-rendering
+        # happens client-side; here we just assert the count
+        # invariant: total markers in body text == citation count
+        # the UI would produce (one <sup> per ⟦ev:N⟧ token).
+        body_text = "\n".join((b.get("text") or "")
+                              for b in (((rb.get("content") or {}).get("blocks") or [])))
+        import re as _re_16
+        raw_markers = _re_16.findall(r"⟦ev:([A-Za-z0-9_\-]+)⟧", body_text)
+        tc_clean = rb.get("trust_checks") or {}
+        # Resolved markers count from trust_checks must equal the
+        # successfully-citable count (every marker that resolves becomes
+        # a citation; unresolved markers also become citations but
+        # styled differently).
+        assert tc_clean.get("markers_found", 0) == len(raw_markers), (
+            "citation count invariant: trust_checks.markers_found ("
+            f"{tc_clean.get('markers_found')}) MUST equal the number "
+            f"of raw ⟦ev: tokens ({len(raw_markers)}) in body — they "
+            "drive the same <sup> citations.")
+        print(f"[OK] Report (16b): marker render — citation count "
+              f"invariant holds ({len(raw_markers)} ⟦ev: tokens == "
+              f"{tc_clean.get('markers_found')} markers_found); "
+              "UI rendering will produce one <sup> per token.")
+
+        # ---- 16c Run identity — report_composer runs surface label
+        # The RunOut projection adds display_label for report_composer
+        # runs. Look up a report_composer run from smoke's earlier
+        # generation (Report 5 created rpt_run).
+        from app.schemas import RunOut as _RunOut
+        ro = _RunOut.of(rpt_run)
+        assert ro.display_label is not None, (
+            "report_composer run MUST carry display_label. Got: "
+            + str(ro))
+        assert "report" in ro.display_label.lower(), (
+            "display_label MUST include 'report'. Got: "
+            + str(ro.display_label))
+        assert "board" in ro.display_label.lower(), (
+            "display_label MUST include the audience. Got: "
+            + str(ro.display_label))
+        # Non-report runs (e.g. content_engine) MUST NOT have a label
+        # (UI falls back to agent_key).
+        non_report_run = db.execute(
+            scoped(Run, onit.id)
+            .where(Run.agent_key == "content_engine").limit(1)
+        ).scalars().first()
+        if non_report_run is not None:
+            ro_ne = _RunOut.of(non_report_run)
+            assert ro_ne.display_label is None, (
+                "non-report runs MUST NOT carry display_label. Got: "
+                + str(ro_ne))
+        print(f"[OK] Report (16c): run identity — RunOut.display_label="
+              f"{ro.display_label!r} surfaces audience + scope hint; "
+              "non-report runs leave display_label None.")
+
+        # ---- 16d HQ counter behavior — pending reports counted -------
+        # /api/assets?asset_kind=report&status=pending_review returns
+        # the set the HQ counter SHOULD show. Construct a quick
+        # synthetic pending report and verify it appears.
+        # Set the gate-all probe artifact's status (from Report 8)
+        # which IS pending_review.
+        pending_resp = client.get(
+            "/api/assets?asset_kind=report&status=pending_review&limit=50",
+            headers=H_ONIT)
+        assert pending_resp.status_code == 200
+        pending_list = pending_resp.json()["assets"]
+        # The gate_all report from Report (6) lands as pending_review;
+        # the filter MUST surface it.
+        assert any(a["status"] == "pending_review" for a in pending_list), (
+            "HQ counter source (?asset_kind=report&status=pending_review) "
+            "MUST return at least one report — the Report (6) gate_all "
+            "ceo_weekly should still be there. Got: "
+            + str([a["id"][:8] for a in pending_list]))
+        print(f"[OK] Report (16d): HQ counter behavior — pending-review "
+              f"report listing returns {len(pending_list)} report(s); "
+              "the gate_all-blocked report is reachable.")
+
+        # ---- 16e Demo seed contract — helper inducers --------------
+        # Without running the full demo_seed (which triggers worker
+        # generation that's expensive in smoke), verify the inducer
+        # helpers exist and produce the expected state changes on a
+        # SYNTHETIC artifact body.
+        from scripts.demo_seed import (
+            _induce_warning as _ind_warn, _induce_blocked as _ind_block,
+        )
+        # Build a tiny artifact-shaped object with a body that has
+        # markers + a ledger.
+        class _StubArt:
+            pass
+        synthetic = _StubArt()
+        synthetic.body = {
+            "content": {
+                "content_type": "report_board",
+                "blocks": [
+                    {"kind": "body", "text": "Email had 5⟦ev:1⟧ "
+                                              "conversions."},
+                ],
+                "metadata": {"scope": {"is_future": False}},
+            },
+            "evidence_ledger": [
+                {"id": "1", "source": "period_summary.attributed.conversions",
+                 "value": 5, "label": "x",
+                 "confidence": "moderate",
+                 "baseline_vs_attributed": "attributed"},
+            ],
+        }
+        synthetic.status = "ready"
+        _ind_warn(None, synthetic)
+        wtc = synthetic.body.get("trust_checks") or {}
+        # After inducing warning: the entry's confidence is "low" and
+        # the §1 warning fires on that block.
+        assert (synthetic.body["evidence_ledger"][0]["confidence"]
+                == "low")
+        assert wtc.get("findings_by_severity", {}).get("warning", 0) >= 1
+        # Now test blocked inducer — remove the entry → unresolved.
+        synthetic2 = _StubArt()
+        synthetic2.body = {
+            "content": {
+                "content_type": "report_board",
+                "blocks": [
+                    {"kind": "body", "text": "Sales drove 100⟦ev:1⟧ "
+                                              "conversions and 20⟦ev:2⟧ clicks."},
+                ],
+                "metadata": {"scope": {"is_future": False}},
+            },
+            "evidence_ledger": [
+                {"id": "1", "source": "a", "value": 100, "label": "x",
+                 "confidence": "moderate",
+                 "baseline_vs_attributed": "attributed"},
+                {"id": "2", "source": "b", "value": 20, "label": "y",
+                 "confidence": "moderate",
+                 "baseline_vs_attributed": "attributed"},
+            ],
+        }
+        synthetic2.status = "ready"
+        _ind_block(None, synthetic2)
+        btc = synthetic2.body.get("trust_checks") or {}
+        assert btc.get("approval_blocked") is True, btc
+        assert btc.get("findings_by_severity", {}).get("critical", 0) >= 1
+        assert synthetic2.status == "pending_review", (
+            "inducing blocked MUST also set artifact status to "
+            "pending_review. Got: " + str(synthetic2.status))
+        print(f"[OK] Report (16e): demo-seed inducers — warning "
+              f"downgrade fires §1 ("
+              f"{wtc['findings_by_severity']['warning']} warning(s)); "
+              f"blocked removal fires §6 ("
+              f"{btc['findings_by_severity']['critical']} critical) and "
+              "flips artifact.status=pending_review. Bodies remain "
+              "real-renderer output; only the ledger is mutated.")
+
+        # ---- 16f Graceful degradation — empty list, not alert -------
+        # The industry-perspective fallback returns ZERO items when
+        # unavailable. Earlier (Dashboard 4) test now also asserts
+        # this; re-verify here as part of the demo-spine check.
+        from app.dashboard.suggestions import _industry_fallback
+        out = _industry_fallback({}, {})
+        assert out == [], (
+            "graceful degradation: industry fallback MUST return [] "
+            "(quiet empty state) — NOT an alert/configure-your-key "
+            "card. Got: " + str(out))
+        print("[OK] Report (16f): graceful degradation — industry "
+              "fallback returns [] (quiet empty); no fabricated "
+              "industry framing, no alert card.")
 
         print("[OK] Smoke test passed.")
     finally:

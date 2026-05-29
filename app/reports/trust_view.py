@@ -36,6 +36,7 @@ Output: a render model dict the UI consumes verbatim. The fields are:
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -46,11 +47,27 @@ from typing import Any
 # ones; that's the invariant the smoke test pins.
 _BELOW_THRESHOLD = ("low", "insufficient")
 
+# Same marker shape the evidence module uses — kept here for the
+# on-read fallback derivation. The fallback is presentation data
+# shaping (NOT new validation): when trust_checks.blocks[i].
+# resolved_marker_ids is absent (older reports written before this
+# field landed in the inventory), we scan the corresponding block's
+# text using the same regex and look up matches in the ledger. This
+# is the SAME lookup the validator does — it does not make a new
+# trust decision; it just routes existing data to the indicator.
+_VIEW_MARKER_RE = re.compile(r"⟦ev:([A-Za-z0-9_\-]+)⟧")
+
 
 def _block_indicator(inv: dict, findings_by_block_idx: dict[int, list[dict]],
-                     ledger_by_id: dict[str, dict]) -> str:
+                     ledger_by_id: dict[str, dict],
+                     block_text: str = "") -> str:
     """Return the indicator for one block, following the fixed
     precedence above. Pure: only reads stored data.
+
+    When the inventory entry lacks `resolved_marker_ids` (older
+    reports persisted before the field landed), we fall back to
+    scanning `block_text` for markers and resolving against the
+    ledger. Same lookup the validator does — no new trust decision.
     """
     idx = inv.get("idx")
     block_findings = findings_by_block_idx.get(idx, [])
@@ -58,7 +75,17 @@ def _block_indicator(inv: dict, findings_by_block_idx: dict[int, list[dict]],
         return "blocked"
     if any(f.get("severity") == "warning" for f in block_findings):
         return "warning"
-    resolved_ids = inv.get("resolved_marker_ids") or []
+
+    resolved_ids: list[str] = list(inv.get("resolved_marker_ids") or [])
+    if not resolved_ids and block_text:
+        # On-read fallback: scan the block's text for ⟦ev:N⟧ tokens.
+        # We treat a marker as "resolving" iff the id exists in the
+        # ledger — same condition the validator used.
+        for match in _VIEW_MARKER_RE.finditer(block_text):
+            mid = match.group(1)
+            if mid in ledger_by_id:
+                resolved_ids.append(mid)
+
     resolved_entries = [ledger_by_id[m] for m in resolved_ids
                         if m in ledger_by_id]
     if resolved_entries:
@@ -81,6 +108,24 @@ def build_trust_view(trust_checks: dict | None,
     tc = trust_checks or {}
     ledger = list(evidence_ledger or [])
     block_inventory: list[dict] = list(tc.get("blocks") or [])
+
+    # On-read fallback for older reports that pre-date the block-aware
+    # inventory (added in v2.1). Build a minimal inventory from the
+    # rendered blocks parameter so block indicators still render. This
+    # is presentation data shaping: we surface kind + label per block
+    # so the UI can render indicators, NOT a new trust decision. The
+    # _block_indicator helper does the actual marker-scan fallback.
+    if not block_inventory and blocks:
+        for i, b in enumerate(blocks):
+            block_inventory.append({
+                "idx": i,
+                "kind": (b or {}).get("kind") or "",
+                "label": (b or {}).get("kind") or "Block",
+                "markers": 0,
+                "numbers": 0,
+                # resolved_marker_ids deliberately omitted — the
+                # indicator helper will scan block text for them.
+            })
 
     findings: list[dict] = list(tc.get("findings") or [])
     has_warning = any(f.get("severity") == "warning" for f in findings)
@@ -135,14 +180,20 @@ def build_trust_view(trust_checks: dict | None,
         if idx is None:
             continue
         findings_by_block_idx.setdefault(idx, []).append(f)
+    # Map content blocks by idx for the on-read fallback (used when
+    # the inventory entry lacks resolved_marker_ids).
+    block_text_by_idx = {i: ((b or {}).get("text") or "")
+                          for i, b in enumerate(blocks or [])}
     block_indicators: list[dict] = []
     for inv in block_inventory:
+        idx = inv.get("idx")
         block_indicators.append({
-            "block_idx": inv.get("idx"),
+            "block_idx": idx,
             "kind": inv.get("kind") or "",
             "label": inv.get("label") or "",
             "indicator": _block_indicator(
-                inv, findings_by_block_idx, ledger_by_id),
+                inv, findings_by_block_idx, ledger_by_id,
+                block_text=block_text_by_idx.get(idx, "")),
         })
 
     # ---- Coverage — pass-through counts only --------------------------

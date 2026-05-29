@@ -209,19 +209,12 @@ def trend_suggestions(funnel: dict, profile: dict | None) -> list[dict]:
 
 def _industry_fallback(profile: dict | None, funnel: dict) -> list[dict]:
     """No-LLM fallback for the industry kind. We do NOT fabricate industry
-    facts — a single honest "unavailable" placeholder so the section still
-    renders without misleading anyone."""
-    return [{
-        "kind": "industry",
-        "recommendation": (
-            "Industry perspective unavailable in this environment. "
-            "Configure ANTHROPIC_API_KEY to surface general industry "
-            "framing (still labeled as perspective, not verified data)."),
-        "evidence": {"reason": "no_api_key_or_llm_unavailable"},
-        "confidence": "low",
-        "source_label": _LABEL_INDUSTRY,
-        "idea_content_type": None, "idea_topic": None, "idea_target": None,
-    }]
+    facts AND we do not surface an alert card the user can't act on. The
+    §6 Principle: if the feature can't run, it shows nothing — not an
+    error and not invented data. The Insights / HQ surfaces filter
+    empty lists as a quiet empty state rather than a "configure key"
+    card cluttering the dashboard."""
+    return []
 
 
 def industry_suggestions(profile: dict | None, funnel: dict) -> list[dict]:

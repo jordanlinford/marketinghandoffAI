@@ -4860,6 +4860,294 @@ def main() -> None:
               f"findings_by_severity={fbs} (no §4 false positive on "
               "the stub path).")
 
+        # (15) TRUST VIEW SURFACES — read-only presentation rollup.
+        # build_trust_view is pure deterministic; it makes NO trust
+        # decisions, runs NO validation, invents NO finding, never
+        # synthesizes a score. The smoke pins this single-source
+        # invariant: same input → same output, view.state is a
+        # function of trust_checks.approval_blocked + finding
+        # severities ONLY, every finding passes through verbatim.
+        from app.reports.trust_view import (
+            build_trust_view, compact_trust_state,
+        )
+
+        # ---- 15a PRESENCE — clean / warning / blocked fixtures --------
+        # CLEAN report: use the Report (5) artifact rpt_art which
+        # passed validation with no findings.
+        db.refresh(rpt_art)
+        rpt_body = rpt_art.body or {}
+        clean_view = build_trust_view(
+            rpt_body.get("trust_checks") or {},
+            rpt_body.get("evidence_ledger") or [],
+            ((rpt_body.get("content") or {}).get("blocks") or []))
+        assert clean_view["state"] == "passed", (
+            "clean report MUST roll up to state='passed'. Got: "
+            + str(clean_view["state"]))
+        assert clean_view["coverage"]["markers_resolved"] > 0
+        assert clean_view["coverage"]["numbers_bound"] > 0
+        # Every block indicator on a passed report is either
+        # evidence-backed or no-evidence — NEVER blocked.
+        for ind in clean_view["block_indicators"]:
+            assert ind["indicator"] in ("evidence-backed", "no-evidence",
+                                          "low-confidence"), (
+                "passed report MUST NOT have any 'blocked' block "
+                "indicator. Got: " + str(ind))
+
+        # WARNING fixture — block whose every cited marker resolves to
+        # a low/insufficient ledger entry. Reuse the Report (14c)
+        # ledger + content.
+        ledger_warn_15 = _Ledger()
+        ledger_warn_15.add(
+            source="memory_highlights[0].metric_basis.conversions",
+            value=4, label="Memory conversions", confidence="low",
+            baseline_vs_attributed="attributed")
+        ledger_warn_15.add(
+            source="watching[0].metric_basis.clicks",
+            value=2, label="Watching clicks", confidence="insufficient",
+            baseline_vs_attributed="attributed")
+        warn_content_15 = {
+            "content_type": "report_board",
+            "blocks": [
+                {"kind": "section_heading", "text": "What the data is saying"},
+                {"kind": "body",
+                 "text": ("Reddit: 4⟦ev:1⟧ attributed conversion(s) "
+                          "across 2⟦ev:2⟧ click(s).")},
+            ],
+            "metadata": {},
+        }
+        tc_warn_15 = validate_evidence_binding(warn_content_15, ledger_warn_15)
+        tc_warn_15 = trust_checks_with_findings(
+            tc_warn_15, ledger_warn_15.to_list(), warn_content_15,
+            scope={"is_future": False})
+        warning_view = build_trust_view(
+            tc_warn_15, ledger_warn_15.to_list(), warn_content_15["blocks"])
+        assert warning_view["state"] == "passed_with_warnings", (
+            "warning-only report MUST roll up to 'passed_with_warnings'. "
+            "Got: " + str(warning_view["state"]))
+        # State label must NOT visually imply failure (the spec
+        # requirement that warnings never read as failure).
+        assert "fail" not in warning_view["state_label"].lower()
+        assert "block" not in warning_view["state_label"].lower()
+        # The §1 finding is present in the warning group (verbatim
+        # shape — never reworded).
+        warn_group = warning_view["findings_by_severity"]["warning"]
+        assert len(warn_group) >= 1
+        assert warn_group[0]["discipline"] == "§1"
+        assert warn_group[0]["location"] == "What the data is saying"
+        assert warn_group[0]["recommended_action"], warn_group[0]
+
+        # BLOCKED fixture — bare 42, classifies CRITICAL §6.
+        bare_content_15 = {
+            "content_type": "report_board",
+            "blocks": [
+                {"kind": "title", "text": "Board update — synthetic"},
+                {"kind": "section_heading", "text": "Executive Summary"},
+                {"kind": "body",
+                 "text": "Email had 42 conversions last quarter."},
+            ],
+            "metadata": {},
+        }
+        tc_block_15 = validate_evidence_binding(bare_content_15, ledger_p)
+        tc_block_15 = trust_checks_with_findings(
+            tc_block_15, ledger_p.to_list(), bare_content_15,
+            scope={"is_future": False})
+        blocked_view = build_trust_view(
+            tc_block_15, ledger_p.to_list(), bare_content_15["blocks"])
+        assert blocked_view["state"] == "blocked", (
+            "blocked report MUST roll up to 'blocked'. Got: "
+            + str(blocked_view["state"]))
+        crit_group = blocked_view["findings_by_severity"]["critical"]
+        assert len(crit_group) >= 1
+        for f in crit_group:
+            for k in ("severity", "discipline", "claim", "location",
+                      "issue", "recommended_action"):
+                assert k in f, f"finding missing required field {k!r}: {f}"
+        # The block_indicators show 'blocked' for the body block where
+        # the critical finding lives.
+        body_block_ind = next(
+            (i for i in blocked_view["block_indicators"]
+             if i["kind"] == "body"), None)
+        assert body_block_ind is not None
+        assert body_block_ind["indicator"] == "blocked", (
+            "the body block carrying the critical finding MUST show "
+            "indicator='blocked'. Got: " + str(body_block_ind))
+        print(f"[OK] Report (15a): PRESENCE — clean view.state="
+              f"{clean_view['state']}; warning view.state="
+              f"{warning_view['state']} with §1 finding (NOT styled as "
+              f"failure); blocked view.state={blocked_view['state']} "
+              f"with critical finding shape complete + body block "
+              f"indicator='blocked'.")
+
+        # ---- 15b ABSENCE (load-bearing) — view invents nothing --------
+        # The view's findings list is a verbatim pass-through of
+        # trust_checks.findings — never wider, never narrower, never
+        # reworded. Build a custom trust_checks and assert the view
+        # contains nothing that wasn't in the input.
+        custom_tc = {
+            "approval_blocked": False,
+            "findings": [
+                {"severity": "warning", "discipline": "§1",
+                 "claim": "X", "location": "Y",
+                 "issue": "Z", "recommended_action": "fix it",
+                 "block_idx": 0},
+            ],
+            "findings_by_severity": {"critical": 0, "warning": 1,
+                                       "informational": 0},
+            "markers_found": 2, "markers_resolved": 2,
+            "markers_unresolved": [],
+            "numbers_found": 2, "numbers_bound": 2,
+            "numbers_unbound": [],
+            "ledger_size": 1,
+            "blocks": [{"idx": 0, "kind": "body", "label": "Y",
+                         "markers": 2, "numbers": 2,
+                         "resolved_marker_ids": ["1"]}],
+        }
+        custom_ledger = [{"id": "1", "value": 1, "label": "x",
+                           "confidence": "low",
+                           "baseline_vs_attributed": "attributed"}]
+        custom_blocks = [{"kind": "body", "text": "x⟦ev:1⟧"}]
+        custom_view = build_trust_view(custom_tc, custom_ledger,
+                                         custom_blocks)
+        # Findings list ID-equality: every finding in the view is the
+        # same finding from trust_checks (no synthesis).
+        view_findings = (custom_view["findings_by_severity"]["critical"]
+                          + custom_view["findings_by_severity"]["warning"]
+                          + custom_view["findings_by_severity"]["informational"])
+        assert len(view_findings) == 1
+        assert view_findings[0]["claim"] == "X"  # verbatim
+        assert view_findings[0]["recommended_action"] == "fix it"
+        # trust_score is NOT in the view because the input has no
+        # trust_score field. The §6 Principle: never synthesize.
+        assert "trust_score" not in custom_view, (
+            "trust_score MUST be omitted when the stored data does "
+            "not carry it. Got: " + str(custom_view.get("trust_score")))
+        # AND zero "blocked" block indicators on this passed view.
+        for ind in custom_view["block_indicators"]:
+            assert ind["indicator"] != "blocked"
+        # trust_score is passed through ONLY when present in input —
+        # set it on a fresh fixture and verify it surfaces.
+        custom_tc_with_score = dict(custom_tc)
+        custom_tc_with_score["trust_score"] = 0.92
+        passthrough_view = build_trust_view(
+            custom_tc_with_score, custom_ledger, custom_blocks)
+        assert passthrough_view.get("trust_score") == 0.92, (
+            "trust_score MUST pass through verbatim when present. "
+            "Got: " + str(passthrough_view.get("trust_score")))
+        print(f"[OK] Report (15b): ABSENCE — view's findings list is "
+              f"a verbatim pass-through (1 in, 1 out, claim+action "
+              f"unchanged); trust_score absent when input lacks it AND "
+              f"passes through ({0.92}) when input has it; passed "
+              "view has zero 'blocked' block indicators.")
+
+        # ---- 15c BEHAVIOR / single-source -----------------------------
+        # view.state for the blocked case EQUALS trust_checks.
+        # approval_blocked. Flipping approval_blocked flips the
+        # banner with NO other change.
+        assert (blocked_view["state"] == "blocked") == \
+               bool(tc_block_15["approval_blocked"]), (
+            "view.state='blocked' MUST equal "
+            "trust_checks.approval_blocked=True. Got view.state="
+            + str(blocked_view["state"]) + ", approval_blocked="
+            + str(tc_block_15["approval_blocked"]))
+        # Mutate approval_blocked → re-derive view → banner flips.
+        tc_block_flipped = dict(tc_block_15)
+        tc_block_flipped["approval_blocked"] = False
+        flipped_view = build_trust_view(
+            tc_block_flipped, ledger_p.to_list(), bare_content_15["blocks"])
+        assert flipped_view["state"] != "blocked", (
+            "flipping approval_blocked from True to False MUST flip "
+            "view.state away from 'blocked'. Got: " + str(flipped_view))
+        # Same block with the critical finding removed → block indicator
+        # downgrades from "blocked" by the FIXED precedence.
+        tc_block_no_critical = dict(tc_block_15)
+        tc_block_no_critical["findings"] = [
+            f for f in tc_block_15["findings"]
+            if f["severity"] != "critical"]
+        tc_block_no_critical["approval_blocked"] = False
+        downgraded_view = build_trust_view(
+            tc_block_no_critical, ledger_p.to_list(),
+            bare_content_15["blocks"])
+        downgraded_body_ind = next(
+            (i for i in downgraded_view["block_indicators"]
+             if i["kind"] == "body"), None)
+        assert downgraded_body_ind["indicator"] != "blocked", (
+            "removing the critical finding MUST downgrade the block "
+            "indicator off 'blocked'. Got: "
+            + str(downgraded_body_ind))
+        print(f"[OK] Report (15c): BEHAVIOR — view.state=='blocked' "
+              f"iff trust_checks.approval_blocked=True; flipping "
+              f"approval_blocked flips the banner; removing the "
+              f"critical finding downgrades the block indicator from "
+              f"'blocked' to '{downgraded_body_ind['indicator']}' by "
+              "the fixed precedence.")
+
+        # ---- 15d DETERMINISM — same input → same view -----------------
+        view_a = build_trust_view(
+            tc_block_15, ledger_p.to_list(), bare_content_15["blocks"])
+        view_b = build_trust_view(
+            tc_block_15, ledger_p.to_list(), bare_content_15["blocks"])
+        assert view_a == view_b, (
+            "build_trust_view MUST be deterministic — same input must "
+            "yield identical output.")
+        # compact_trust_state mirrors view.state exactly.
+        assert compact_trust_state(tc_block_15) == view_a["state"]
+        assert compact_trust_state(rpt_body.get("trust_checks")) \
+               == clean_view["state"]
+        assert compact_trust_state(tc_warn_15) == warning_view["state"]
+        print(f"[OK] Report (15d): determinism — identical view objects "
+              f"across calls; compact_trust_state mirrors view.state "
+              "exactly for clean / warning / blocked cases.")
+
+        # ---- 15e FUTURE-STUB — passed with zero critical --------------
+        db.refresh(fut_art)
+        fut_body = fut_art.body or {}
+        fut_view = build_trust_view(
+            fut_body.get("trust_checks") or {},
+            fut_body.get("evidence_ledger") or [],
+            ((fut_body.get("content") or {}).get("blocks") or []))
+        assert fut_view["state"] == "passed", (
+            "honest future-scope stub MUST be view.state='passed'. "
+            "Got: " + str(fut_view["state"]))
+        assert fut_view["findings_counts"]["critical"] == 0
+        # Coverage reflects the as-of-today reference numbers — the
+        # stub contains memory bullets that DO have markers, so
+        # markers_found > 0 here.
+        # (Exact counts vary with intelligence; we just assert the
+        # coverage was passed through and not synthesized.)
+        assert fut_view["coverage"]["markers_resolved"] >= 0
+        assert fut_view["coverage"]["ledger_size"] >= 0
+        # No §4 finding rendered.
+        for f in fut_view["findings_by_severity"]["critical"]:
+            assert f["discipline"] != "§4"
+        print(f"[OK] Report (15e): future-stub — view.state="
+              f"{fut_view['state']}; 0 critical findings; coverage "
+              f"reflects as-of-today reference numbers "
+              f"({fut_view['coverage']['markers_resolved']}/"
+              f"{fut_view['coverage']['markers_found']} markers, "
+              f"ledger={fut_view['coverage']['ledger_size']}); no §4 "
+              "finding rendered.")
+
+        # ---- 15f LIST PROJECTION — trust_state pill present + correct
+        list_resp = client.get(
+            f"/api/assets?asset_kind=report&product_id={sl_id}",
+            headers=H_ONIT)
+        assert list_resp.status_code == 200
+        # Every report row carries a trust_state (or null for legacy
+        # rows). Confirm the FIELD exists; values are passed through
+        # from the underlying artifacts.
+        for x in list_resp.json()["assets"]:
+            assert "trust_state" in x, (
+                "report list projection MUST carry trust_state field "
+                "(value may be None for legacy rows). Got: " + str(x))
+            if x["trust_state"] is not None:
+                assert x["trust_state"] in ("passed",
+                                              "passed_with_warnings",
+                                              "blocked"), x
+        print(f"[OK] Report (15f): library list projection carries "
+              f"trust_state on report rows ({len(list_resp.json()['assets'])} "
+              "rows checked); values are 'passed'/'passed_with_warnings'/"
+              "'blocked' or null for legacy.")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

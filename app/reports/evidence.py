@@ -465,9 +465,11 @@ def validate_evidence_binding(content: dict, ledger: Ledger) -> dict:
         all_numbers_total += len(block_numbers)
 
         resolved_in_block: list[tuple[int, str]] = []
+        resolved_ids_in_block: list[str] = []
         for m in block_markers:
             if ledger.has(m["id"]):
                 resolved_in_block.append((m["start"], m["id"]))
+                resolved_ids_in_block.append(m["id"])
             else:
                 markers_unresolved.append({
                     "id": m["id"],
@@ -499,6 +501,10 @@ def validate_evidence_binding(content: dict, ledger: Ledger) -> dict:
             "label": label,
             "markers": len(block_markers),
             "numbers": len(block_numbers),
+            # Resolved marker ids for this block — surfaces data already
+            # touched during the scan so the trust-view can derive
+            # block-level "low-confidence" indicators without re-scanning.
+            "resolved_marker_ids": resolved_ids_in_block,
         })
 
     passed = (not markers_unresolved) and (not numbers_unbound)
@@ -589,6 +595,7 @@ def derive_findings(trust_checks: dict, ledger_entries: list[dict],
             "claim": str(u.get("text", "")),
             "location": u.get("block_label")
                         or _block_label(blocks, u.get("block_idx", -1)),
+            "block_idx": u.get("block_idx"),
             "issue": "No supporting source found in evidence ledger.",
             "recommended_action": ("Add supporting evidence to the ledger "
                                     "(re-render with the value derived from a "
@@ -602,16 +609,19 @@ def derive_findings(trust_checks: dict, ledger_entries: list[dict],
             ev_id = m.get("id", "")
             location = (m.get("block_label")
                         or _block_label(blocks, m.get("block_idx", -1)))
+            block_idx_finding = m.get("block_idx")
         else:
             # Tolerate the older string-list shape in case any consumer
             # still hands us that — never fail to classify a detection.
             ev_id = str(m)
             location = "Unknown"
+            block_idx_finding = None
         findings.append({
             "severity": "critical",
             "discipline": "§6",
             "claim": f"⟦ev:{ev_id}⟧",
             "location": location,
+            "block_idx": block_idx_finding,
             "issue": ("Marker cites an evidence-ledger id that does not "
                       "resolve to any entry."),
             "recommended_action": ("Cite an existing ledger id (rebuild the "
@@ -631,6 +641,7 @@ def derive_findings(trust_checks: dict, ledger_entries: list[dict],
                     "discipline": "§4",
                     "claim": m.group(0),
                     "location": label,
+                    "block_idx": block_idx,
                     "issue": ("Delta language used for a future-scope "
                               "period (no data exists for the requested "
                               "window — this is confabulation)."),
@@ -645,6 +656,7 @@ def derive_findings(trust_checks: dict, ledger_entries: list[dict],
                     "discipline": "§4",
                     "claim": m.group(0),
                     "location": label,
+                    "block_idx": block_idx,
                     "issue": ("Attribution language used for a future-scope "
                               "period."),
                     "recommended_action": ("Frame as reference baseline only "
@@ -680,6 +692,7 @@ def derive_findings(trust_checks: dict, ledger_entries: list[dict],
                 "claim": (kind.replace("_", " ").title()
                           + (": " + text[:80] if len(text) > 0 else "")),
                 "location": _block_label(blocks, block_idx),
+                "block_idx": block_idx,
                 "issue": ("Every cited evidence entry in this block is at "
                           "low or insufficient confidence — the analysis "
                           "is leaning on thin data."),

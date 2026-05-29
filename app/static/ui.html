@@ -123,6 +123,47 @@
      it's recognizable at a glance. */
   .badge.kind-report     { background: #4a1230; color: #ffb3d1; }
   .badge.report          { background: #4a1230; color: #ffb3d1; }
+  /* Trust visibility surfaces — distinct, non-debug treatment per spec.
+     Passed, passed-with-warnings, and blocked each get their own color
+     so a quick glance at the banner says "approval permitted by the
+     trust layer? yes/with-caveats/no." Warnings are amber (NOT red) so
+     a warning is never mis-read as a failure. */
+  .badge.trust-passed              { background: #143a26; color: #7ce0a3; }
+  .badge.trust-passed_with_warnings { background: #3a2c0e; color: #f0c97a; }
+  .badge.trust-blocked             { background: #3a1a26; color: #ffc6dd; }
+  .trust-banner {
+    margin: 10px 0; padding: 12px 14px; border-radius: 8px;
+    border-left: 4px solid;
+    min-width: 0; overflow-wrap: anywhere;
+  }
+  .trust-banner.trust-passed              { background: #102a1c; border-color: #2d8c5a; }
+  .trust-banner.trust-passed_with_warnings { background: #2a210b; border-color: #c89a3a; }
+  .trust-banner.trust-blocked             { background: #2a141d; border-color: #c84a78; }
+  .trust-banner .trust-state-label { font-weight: 600; font-size: 16px; }
+  .trust-banner .trust-state-reason { font-size: 13px; margin-top: 4px; color: var(--text); }
+  .trust-banner .trust-coverage    { font-size: 12px; margin-top: 8px; color: var(--muted); }
+  .block-indicator {
+    display: inline-block; padding: 1px 6px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; margin-left: 6px; vertical-align: middle;
+  }
+  .block-indicator.evidence-backed { background: #143a26; color: #7ce0a3; }
+  .block-indicator.low-confidence  { background: #3a2c0e; color: #f0c97a; }
+  .block-indicator.no-evidence     { background: #1f242b; color: #889099; }
+  .block-indicator.warning         { background: #3a2c0e; color: #f0c97a; }
+  .block-indicator.blocked         { background: #3a1a26; color: #ffc6dd; }
+  .finding-card {
+    padding: 10px 12px; border-radius: 6px; margin-bottom: 8px;
+    border-left: 3px solid; background: #1a1f26;
+    min-width: 0; overflow-wrap: anywhere;
+  }
+  .finding-card.severity-critical { border-color: #c84a78; }
+  .finding-card.severity-warning  { border-color: #c89a3a; }
+  .finding-card.severity-informational { border-color: #6a7689; }
+  .ledger-entry {
+    padding: 8px 10px; border-radius: 4px; background: #161a20;
+    margin-bottom: 4px; font-size: 12px;
+    min-width: 0; overflow-wrap: anywhere;
+  }
   /* Library detail panel: clamp long content (tagged URLs especially)
      so it can never scroll the rest of the page sideways. */
   #lib-detail .panel { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
@@ -2635,6 +2676,17 @@ function _renderAssetCard(a) {
   const statusBadge = a.status
     ? el('span', { class: `badge ${a.status}` }, a.status)
     : null;
+  // Library trust pill — only on reports, and only when the projection
+  // surfaced a trust_state (legacy reports without trust_checks omit it
+  // rather than inventing one — same §6 Principle as everywhere else).
+  // Reads the SAME state the detail view banner shows — single source
+  // of truth.
+  const trustPill = (a.asset_kind === 'report' && a.trust_state)
+    ? el('span', { class: 'badge trust-' + a.trust_state,
+                    style: 'margin-left:6px;',
+                    title: 'Trust layer state — not a human approval' },
+        a.trust_state.replace(/_/g, ' '))
+    : null;
   const grade = (a.grade != null)
     ? ` · grade ${a.grade}` : '';
   const cost = (a.cost_usd != null && a.cost_usd > 0)
@@ -2648,6 +2700,7 @@ function _renderAssetCard(a) {
     el('div', { class: 'row' },
       el('strong', {}, a.title || '(untitled)'),
       kindBadge,
+      trustPill,
     ),
     el('div', { class: 'sub',
       style: 'color:var(--muted); font-size:12px;' },
@@ -2722,8 +2775,204 @@ function _renderAssetDetail(asset, detail) {
     _renderDocumentDetailInto(wrap, asset, detail);
   } else if (asset.asset_kind === 'brief') {
     _renderBriefDetailInto(wrap, asset, detail);
+  } else if (asset.asset_kind === 'report') {
+    _renderReportDetailInto(wrap, asset, detail);
   }
   return wrap;
+}
+
+// Report detail — surfaces the trust banner, approval state, body
+// blocks with per-block indicators, the findings panel, and the
+// evidence ledger panel. All rendered from detail.trust_view +
+// detail.body verbatim — UI never recomputes pass/warn/block.
+function _renderReportDetailInto(wrap, asset, detail) {
+  const view = detail.trust_view || null;
+  const content = (detail.body || {}).content || {};
+  const blocks = content.blocks || [];
+
+  // ---- Trust Summary Banner ------------------------------------------
+  if (view) {
+    const banner = el('div', { class: 'trust-banner trust-' + view.state },
+      el('div', { class: 'row', style: 'justify-content:space-between; gap:8px;' },
+        el('div', {},
+          el('span', { class: 'badge trust-' + view.state },
+            view.state_label || view.state),
+          el('span', { class: 'trust-state-label',
+                        style: 'margin-left:8px;' },
+            view.state_label || ''),
+        ),
+        el('span', { class: 'sub', style: 'font-size:12px;' },
+          'Trust layer — not a human approval')),
+      el('div', { class: 'trust-state-reason' }, view.state_reason || ''),
+      el('div', { class: 'trust-coverage' },
+        `Markers: ${view.coverage.markers_resolved}/${view.coverage.markers_found} resolved · ` +
+        `Numbers: ${view.coverage.numbers_bound}/${view.coverage.numbers_found} bound · ` +
+        `Ledger: ${view.coverage.ledger_size} entr${view.coverage.ledger_size === 1 ? 'y' : 'ies'}`
+        + (view.trust_score != null ? ` · score ${view.trust_score}` : '')),
+    );
+    wrap.appendChild(banner);
+  }
+
+  // ---- Approval State Surface (separate from trust banner) -----------
+  // Shows where the ASSET is in the gate (pending_review / ready /
+  // approved / rejected), combined with the trust layer's
+  // approval_blocked. The trust banner says whether trust permits
+  // approval; this says where the asset actually sits.
+  const approvalState = _computeApprovalState(asset, view);
+  wrap.appendChild(el('div', {
+    class: 'setup-status', style: 'margin-bottom:10px;' },
+    el('strong', {}, 'Approval state: '),
+    el('span', { class: 'badge ' + approvalState.cssBadge,
+                  style: 'margin-left:4px;' },
+      approvalState.label),
+    el('div', { class: 'sub', style: 'font-size:12px; margin-top:2px;' },
+      approvalState.reason)));
+
+  // ---- Body blocks with inline indicators ---------------------------
+  // Each block shows its trust indicator next to its kind label so the
+  // reviewer's eye lands on where the issue is.
+  const indicatorsByIdx = {};
+  for (const ind of (view && view.block_indicators) || []) {
+    indicatorsByIdx[ind.block_idx] = ind;
+  }
+  for (let i = 0; i < blocks.length; i++) {
+    const b = blocks[i];
+    const ind = indicatorsByIdx[i];
+    const headerKids = [b.kind || 'block'];
+    if (ind) {
+      headerKids.push(el('span', {
+        class: 'block-indicator ' + ind.indicator,
+        title: `Trust indicator: ${ind.indicator}` },
+        ind.indicator));
+    }
+    wrap.appendChild(el('div', { class: 'cluster' },
+      el('h4', {}, ...headerKids),
+      el('div', { style: 'white-space:pre-wrap;' }, b.text || ''),
+    ));
+  }
+
+  // ---- Trust Checks Panel (findings grouped by severity) ------------
+  if (view) {
+    const fbs = view.findings_by_severity || {};
+    const det = el('details', { open: view.state !== 'passed',
+                                  style: 'margin-top:14px;' });
+    const counts = view.findings_counts || {};
+    det.appendChild(el('summary', {},
+      `Trust checks — ${counts.critical || 0} critical, `
+      + `${counts.warning || 0} warning, `
+      + `${counts.informational || 0} informational`));
+    const body = el('div', { style: 'margin:6px 0;' });
+    // Severity order: critical first (where the eye lands when blocked).
+    for (const sev of ['critical', 'warning', 'informational']) {
+      const group = fbs[sev] || [];
+      body.appendChild(el('h4', { style: 'margin:8px 0 4px 0;' },
+        `${sev.charAt(0).toUpperCase() + sev.slice(1)} (${group.length})`));
+      if (!group.length) {
+        body.appendChild(el('div', { class: 'sub', style: 'font-size:12px;' },
+          `No ${sev} findings.`));
+        continue;
+      }
+      for (const f of group) {
+        body.appendChild(el('div', { class: 'finding-card severity-' + sev },
+          el('div', {},
+            el('strong', {}, f.discipline || sev),
+            el('span', { style: 'margin-left:6px; color:var(--muted);' },
+              `· ${f.location || 'Unknown location'}`)),
+          el('div', { style: 'margin-top:4px;' },
+            el('strong', {}, 'Claim: '),
+            el('code', {}, f.claim || '—')),
+          el('div', { style: 'margin-top:4px;' },
+            el('strong', {}, 'Issue: '),
+            f.issue || ''),
+          el('div', { style: 'margin-top:4px;' },
+            el('strong', {}, 'Recommended action: '),
+            f.recommended_action || ''),
+        ));
+      }
+    }
+    det.appendChild(body);
+    wrap.appendChild(det);
+  }
+
+  // ---- Evidence Ledger Panel ----------------------------------------
+  if (view && view.ledger && view.ledger.length) {
+    const det = el('details', { style: 'margin-top:10px;' });
+    det.appendChild(el('summary', {},
+      `Evidence ledger — ${view.ledger.length} entr${view.ledger.length === 1 ? 'y' : 'ies'}`));
+    const body = el('div', { style: 'margin:6px 0;' });
+    for (const e of view.ledger) {
+      const tier = e.confidence || 'n_a';
+      const flag = e.baseline_vs_attributed || 'n_a';
+      body.appendChild(el('div', { class: 'ledger-entry' },
+        el('div', {},
+          el('strong', {}, `ev:${e.id}`),
+          el('span', { style: 'margin-left:6px; color:var(--muted);' },
+            `value=${JSON.stringify(e.value)} · tier=${tier} · ${flag}`)),
+        el('div', { style: 'margin-top:2px; color:var(--muted);' },
+          `source: ${e.source || ''}`),
+        el('div', { style: 'margin-top:2px;' }, e.label || ''),
+      ));
+    }
+    det.appendChild(body);
+    wrap.appendChild(det);
+  }
+}
+
+function _computeApprovalState(asset, view) {
+  // Reads the ASSET's actual gate state (status) combined with the
+  // trust layer's approval_blocked. This is distinct from the trust
+  // banner: trust says whether trust permits approval; this says
+  // where the asset sits in the gate.
+  const blocked = view && view.state === 'blocked';
+  const warnings = view && view.state === 'passed_with_warnings';
+  const status = (asset && asset.status) || '';
+  if (status === 'approved') {
+    return {
+      label: 'Approved',
+      cssBadge: 'succeeded',
+      reason: 'A human has signed off on this report.',
+    };
+  }
+  if (status === 'rejected') {
+    return {
+      label: 'Rejected',
+      cssBadge: 'blocked',
+      reason: 'A human reviewer rejected this report.',
+    };
+  }
+  if (blocked) {
+    return {
+      label: 'Blocked from approval',
+      cssBadge: 'trust-blocked',
+      reason: 'Trust layer requires review before approval — critical evidence findings.',
+    };
+  }
+  if (status === 'pending_review') {
+    return {
+      label: 'Pending review',
+      cssBadge: 'pending',
+      reason: 'Sitting in the approval queue. No human has reviewed yet.',
+    };
+  }
+  if (status === 'ready' && warnings) {
+    return {
+      label: 'Approvable (with warnings)',
+      cssBadge: 'trust-passed_with_warnings',
+      reason: 'Trust permits approval — warnings present in findings.',
+    };
+  }
+  if (status === 'ready') {
+    return {
+      label: 'Approvable',
+      cssBadge: 'trust-passed',
+      reason: 'Trust permits approval; ready for the gate.',
+    };
+  }
+  return {
+    label: status || 'Unknown',
+    cssBadge: 'pending',
+    reason: `Asset status: ${status || 'unknown'}.`,
+  };
 }
 
 function _renderContentDetailInto(wrap, asset, detail) {

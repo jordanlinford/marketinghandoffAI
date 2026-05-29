@@ -113,7 +113,14 @@ def _project_report(art: Artifact, products: dict, cost_by_run: dict) -> dict:
     A defensive bug catcher: after backfill the inconsistent state
     shouldn't exist, but if it does we surface it rather than silently
     bucketing as report-with-no-audience.
+
+    trust_state is the compact view-model state ("passed" /
+    "passed_with_warnings" / "blocked") so the Library list can render
+    a trust pill on each report card without fetching the detail.
+    Reads off body.trust_checks via the SAME derivation the detail
+    view-model uses (compact_trust_state) — single source of truth.
     """
+    from app.reports.trust_view import compact_trust_state
     body = art.body or {}
     content = body.get("content") or {}
     metadata = content.get("metadata") or {}
@@ -139,6 +146,7 @@ def _project_report(art: Artifact, products: dict, cost_by_run: dict) -> dict:
         "updated_at": art.created_at.isoformat() if art.created_at else None,
         "cost_usd": cost_by_run.get(art.run_id),
         "grade": (art.grade or {}).get("overall") if art.grade else None,
+        "trust_state": compact_trust_state(body.get("trust_checks")),
         "source_ref": {"table": "artifacts", "id": art.id,
                        "run_id": art.run_id, "artifact_type": art.type},
     }
@@ -421,8 +429,15 @@ def detail_content(artifact_id: str,
                    user: User = Depends(current_user),
                    db: Session = Depends(get_db)) -> dict:
     art = _load_content(db, user.org_id, artifact_id)
-    return {
-        "asset_kind": "content",
+    # asset_kind here mirrors the list projection: report_draft artifacts
+    # surface as kind="report" so the detail view's badge + UI surfaces
+    # are consistent with how the Library lists them.
+    if art.type == _REPORT_TYPE:
+        asset_kind_out = "report"
+    else:
+        asset_kind_out = "content"
+    response = {
+        "asset_kind": asset_kind_out,
         "id": art.id, "title": art.title, "type": art.type,
         "status": art.status, "product_id": art.product_id,
         "run_id": art.run_id, "parent_id": art.parent_id,
@@ -434,6 +449,20 @@ def detail_content(artifact_id: str,
         "tagged_url": (art.body or {}).get("tagged_url"),
         "created_at": art.created_at.isoformat() if art.created_at else None,
     }
+    # Trust visibility surface (read-only rollup of EXISTING stored data
+    # — no new validation, no new decisions). The view-model is
+    # deterministic over body.trust_checks + body.evidence_ledger +
+    # body.content.blocks. We compute on read so legacy artifacts work
+    # without a backfill. Non-report artifacts don't get this field.
+    if art.type == _REPORT_TYPE:
+        from app.reports.trust_view import build_trust_view
+        body = art.body or {}
+        trust_checks = body.get("trust_checks") or {}
+        evidence_ledger = body.get("evidence_ledger") or []
+        blocks = ((body.get("content") or {}).get("blocks") or [])
+        response["trust_view"] = build_trust_view(
+            trust_checks, evidence_ledger, blocks)
+    return response
 
 
 @router.get("/brief/{artifact_id}")

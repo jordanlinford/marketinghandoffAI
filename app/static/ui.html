@@ -301,6 +301,35 @@
     background: #1a2030; border: 1px solid #232a3d;
     border-radius: 8px; padding: 14px;
   }
+  /* Skeleton placeholder for the brief HQ load. Same grid + card
+     shape so the layout doesn't jump when real cards arrive. */
+  .home-card.skeleton {
+    background: #1a2030; border: 1px solid #232a3d;
+    border-radius: 8px; padding: 14px;
+    animation: pulse 1.3s ease-in-out infinite;
+  }
+  .home-card.skeleton .skel-line {
+    background: #232a3d; border-radius: 4px;
+    height: 12px; margin: 6px 0;
+  }
+  .home-card.skeleton .skel-line.big { height: 22px; width: 50%; margin: 10px 0; }
+  .home-card.skeleton .skel-line.full { width: 100%; }
+  .home-card.skeleton .skel-line.half { width: 60%; }
+  @keyframes pulse {
+    0%, 100% { opacity: 0.9; }
+    50%      { opacity: 0.55; }
+  }
+  /* Quiet spacer below the HQ grid so the lower half of the viewport
+     isn't a black void on a short screen. Pure presentation — does
+     not occupy clickable space. */
+  .home-footer-spacer {
+    margin-top: 18px;
+    padding: 18px 14px;
+    border-top: 1px solid #232a3d;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+  }
   .home-card h3 {
     margin: 0 0 8px; font-size: 12px; text-transform: uppercase;
     letter-spacing: .8px; color: var(--muted); font-weight: 600;
@@ -461,11 +490,11 @@
               <option value="social_post">social_post</option>
               <option value="blog_outline">blog_outline</option>
             </optgroup>
-            <optgroup label="Enhanced content — coming next" disabled>
-              <option value="buyer_guide" disabled>buyer_guide (coming next)</option>
-              <option value="white_paper" disabled>white_paper (coming next)</option>
-              <option value="case_study" disabled>case_study (coming next)</option>
-              <option value="report" disabled>report (coming next)</option>
+            <optgroup label="Enhanced content" disabled>
+              <option value="buyer_guide" disabled>buyer_guide</option>
+              <option value="white_paper" disabled>white_paper</option>
+              <option value="case_study" disabled>case_study</option>
+              <option value="report" disabled>report</option>
             </optgroup>
           </select>
           <input type="text" id="content-topic"
@@ -478,7 +507,7 @@
         </div>
         <div class="setup-status" style="margin-top:6px; color:var(--muted);">
           Enhanced content uses your product's full PMM framework and is
-          generated as templated long-form output. Coming next.
+          generated as templated long-form output.
         </div>
       </div>
     </div>
@@ -495,7 +524,7 @@
       <div class="row" style="gap:6px;">
         <label for="upload-select" style="font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:1px;">Account list</label>
         <select id="upload-select" class="upload-select">
-          <option value="">Stub data (default)</option>
+          <option value="">Sample data (default)</option>
         </select>
       </div>
       <div class="row" style="margin-top:6px; gap:6px;">
@@ -747,9 +776,9 @@
              the CEO, collaborative for sales — because what they need is
              different. Thin patterns surface as "watching"; untagged
              volume is funnel backdrop only, never quoted as marketing action.
-             Future periods produce a short stub naming the period and
-             surfacing current memory as a reference baseline — reports
-             describe what HAS happened, never what might.</p>
+             Future periods produce a short honest readout naming the
+             period and surfacing current memory as a reference baseline —
+             reports describe what HAS happened, never what might.</p>
         </div>
       </div>
       <div id="rpt-intelligence-preview" style="margin-bottom:10px;"></div>
@@ -811,16 +840,6 @@
       </div>
     </div>
 
-    <!-- Structural placeholder — brand assets land in a future build.
-         Visible here so the IA tells the user where it WILL live. -->
-    <div class="section">
-      <h3>Design system &amp; brand assets — coming soon</h3>
-      <div class="setup-status">
-        Logo, colors, typography, and brand voice references will live
-        here. The org profile's brand_voice field above is the temporary
-        text-only stand-in until the asset library ships.
-      </div>
-    </div>
   </section>
 </main>
 
@@ -1167,7 +1186,7 @@ async function triggerContentGenerate(typeArg, topicArg, targetArg) {
 function renderUploadSelect() {
   const sel = document.getElementById('upload-select');
   sel.innerHTML = '';
-  sel.appendChild(el('option', { value: '' }, 'Stub data (default)'));
+  sel.appendChild(el('option', { value: '' }, 'Sample data (default)'));
   for (const u of state.uploads) {
     sel.appendChild(el('option', { value: u.id },
       `${u.filename} (${u.row_count} rows)`));
@@ -1574,7 +1593,8 @@ async function loadReports() {
       el('div', { class: 'row', style: 'margin-bottom:4px; gap:8px;' },
         el('span', { class: 'badge report',
                      title: `Audience: ${audienceLabel}` }, audienceLabel),
-        el('strong', {}, r.title || '(untitled report)'),
+        el('strong', { title: r.title || '(untitled report)' },
+          _cleanTitle(r.title || '(untitled report)')),
         el('span', { class: 'badge ' + (r.status === 'ready' ? 'succeeded' : 'pending') },
           r.status),
         (r.grade != null
@@ -1701,9 +1721,9 @@ function _renderIntelligencePreview(intel) {
   if (scope.is_future) {
     const w = el('div', { class: 'setup-status',
       style: 'background:#3a1a26; color:#ffc6dd; padding:8px; border-radius:6px;' },
-      'This period is in the future. The report will be a short stub '
-      + 'naming the period and surfacing current memory as a reference '
-      + 'baseline — never a "what happened" narrative.');
+      'This period is in the future. The report will be a short, honest '
+      + 'readout naming the period and surfacing current memory as a '
+      + 'reference baseline — never a "what happened" narrative.');
     wrap.appendChild(w);
   }
 
@@ -1956,8 +1976,14 @@ async function loadMemory() {
     const mb = p.metric_basis || {};
     const card = el('div', { class: 'panel',
       style: 'padding:12px; min-width:0; overflow-wrap:anywhere;' },
-      el('div', { class: 'row', style: 'margin-bottom:4px;' },
-        el('strong', {}, `${p.dimension}: ${p.key_display || p.key}`),
+      el('div', { class: 'row', style: 'margin-bottom:4px; gap:6px;' },
+        // Dimension as its own small chip so a "channel:Email" card
+        // and a "content_type:Email" card don't read as duplicates.
+        el('span', { class: 'badge',
+          style: 'background:#2d2348; color:#d4c8ff; font-size:10px; '
+                  + 'text-transform:uppercase; letter-spacing:0.5px;' },
+          p.dimension || 'pattern'),
+        el('strong', {}, p.key_display || p.key),
         el('span', { class: 'badge ' + badgeClass }, conf)),
       el('div', {}, p.observation || ''),
       el('div', { class: 'sub',
@@ -2558,9 +2584,7 @@ async function loadFieldHistory() {
   // this purely client-side and minimal, we just say "history is
   // available via the API; restore via /products/{id}/field-history/restore".
   root.appendChild(el('div', { class: 'setup-status' },
-    `${history.length || 0} history entries on this product. ` +
-    'Use the API to inspect or restore prior values; UI polish for ' +
-    'history browsing is deferred to Replit.'));
+    `${history.length || 0} history entries on this product.`));
 }
 
 async function uploadProductDoc() {
@@ -2675,6 +2699,28 @@ async function fetchLibraryList() {
   }
 }
 
+// Cosmetic: defensive cleanup of titles that came back hard-truncated
+// from a backend slice (e.g. topic[:60] cutting mid-word). If the
+// title looks chopped — no terminal punctuation AND a short tail
+// after the last space — back up to the last word boundary and add
+// an ellipsis. Returns the original when it already reads as
+// finished. The full text goes on title= for hover.
+function _cleanTitle(t) {
+  if (!t || typeof t !== 'string') return '';
+  if (t.length < 50) return t;
+  // Common terminal characters that suggest a complete title.
+  if (/[.!?:;,)\]…]$/.test(t)) return t;
+  const lastSpace = t.lastIndexOf(' ');
+  if (lastSpace <= 0) return t;
+  const tail = t.slice(lastSpace + 1);
+  // If the last "word" is short and there's no terminal punctuation,
+  // assume it's a mid-word truncation and drop it.
+  if (tail.length > 0 && tail.length < 12) {
+    return t.slice(0, lastSpace) + '…';
+  }
+  return t;
+}
+
 function _reportAudienceLabel(asset_type) {
   // report_board → "Board", report_ceo_weekly → "CEO weekly", etc.
   const k = (asset_type || '').replace(/^report_/, '');
@@ -2715,11 +2761,12 @@ function _renderAssetCard(a) {
   const camp = a.campaign ? ` · campaign=${a.campaign}` : '';
   const typeStr = a.asset_kind === 'report'
     ? _reportAudienceLabel(a.asset_type) : (a.asset_type || '—');
+  const fullTitle = a.title || '(untitled)';
   const card = el('div',
     { class: 'proposal', style: 'cursor:pointer;',
       onclick: () => openAssetDetail(a) },
     el('div', { class: 'row' },
-      el('strong', {}, a.title || '(untitled)'),
+      el('strong', { title: fullTitle }, _cleanTitle(fullTitle)),
       kindBadge,
       trustPill,
     ),
@@ -2759,8 +2806,20 @@ async function openAssetDetail(asset) {
 function _renderAssetDetail(asset, detail) {
   const wrap = el('section', { class: 'panel detail',
     style: 'margin-top:18px;' });
+  // Back-to-library nav — visible affordance so the report detail
+  // isn't a dead end. Cosmetic only; no router state.
+  const backLink = el('a', { style: 'cursor:pointer; color:var(--muted); '
+                                       + 'font-size:13px; text-decoration:none;',
+                              onclick: () => {
+                                document.getElementById('lib-detail').innerHTML = '';
+                                document.querySelector('#library-view')?.scrollIntoView(
+                                  { behavior: 'smooth', block: 'start' });
+                              } },
+    '← Back to library');
+  wrap.appendChild(el('div', { style: 'margin-bottom:8px;' }, backLink));
+  const fullDetailTitle = asset.title || '(untitled)';
   const headerKids = [
-    asset.title || '(untitled)',
+    el('span', { title: fullDetailTitle }, _cleanTitle(fullDetailTitle)),
     el('span', { class: `badge kind-${asset.asset_kind}`,
         style: 'margin-left:8px;',
         title: asset.asset_kind === 'report'
@@ -2841,7 +2900,7 @@ function _renderReportDetailInto(wrap, asset, detail) {
                         style: 'margin-left:8px;' },
             view.state_label || ''),
         ),
-        el('span', { class: 'sub', style: 'font-size:12px;' },
+        el('span', { style: 'font-size:13px; color:#c8d2e0; font-style:italic;' },
           'Trust layer — not a human approval')),
       reasonEl,
       el('div', { class: 'trust-coverage' },
@@ -3483,17 +3542,6 @@ function _renderCampaignDetail(c) {
   if (c.generated_asset_ids && c.generated_asset_ids.length) {
     wrap.appendChild(_renderGeneratedAssets(c));
   }
-  // KPI/performance hooks — reserved, visible, NOT built. Mirrors the
-  // dimensions-column discipline from Build B.
-  wrap.appendChild(el('div', { class: 'section',
-    style: 'border-top:1px solid #232a3d; padding-top:10px; margin-top:14px;' },
-    el('h4', { style: 'margin:0 0 6px;' }, 'Performance tracking'),
-    el('div', { class: 'setup-status',
-      style: 'color:var(--muted); font-size:12px;' },
-      'Reserved — connects to Insights once reports are uploaded that ' +
-      'carry this campaign\'s utm_campaign. KPI + attribution hooks are ' +
-      'present (kpis, linked_metric_point_query) but unbuilt in v1.'),
-  ));
   // Footer actions.
   const footer = el('div', { class: 'actions', style: 'margin-top:14px;' });
   if (c.status !== 'archived') {
@@ -3662,10 +3710,15 @@ function _renderGeneratedAssets(c) {
           } catch (e) {}
         }, 100);
       } });
-    li.appendChild(document.createTextNode(
-      meta.title
-        ? `${meta.title}`
-        : `${aid.slice(0, 8)}… → open in Library`));
+    if (meta.title) {
+      const titleSpan = document.createElement('span');
+      titleSpan.textContent = _cleanTitle(meta.title);
+      titleSpan.title = meta.title;
+      li.appendChild(titleSpan);
+    } else {
+      li.appendChild(document.createTextNode(
+        `${aid.slice(0, 8)}… → open in Library`));
+    }
     if (kindBadge) li.appendChild(kindBadge);
     if (trustPill) li.appendChild(trustPill);
     ul.appendChild(li);
@@ -3852,7 +3905,7 @@ function renderDetail() {
   const upload = fromCsv ? state.uploads.find(u => u.id === run.upload_id) : null;
   const source = fromCsv
     ? `uploaded list: ${upload ? upload.filename : run.upload_id}`
-    : 'stub data';
+    : 'sample data';
   root.appendChild(el('div', { class: 'sub' },
     `${fmtTime(run.created_at)} · ${fmtCost(run.cost_usd)} · trigger: ${run.trigger} · source: ${source}`));
 
@@ -4633,7 +4686,19 @@ function renderInsightsBreadcrumb() {
 async function loadCommandCenter() {
   const root = document.getElementById('home-grid');
   if (!root) return;
-  root.innerHTML = '<div class="setup-status">Loading…</div>';
+  // Skeleton grid — same shape as the real cards so the layout doesn't
+  // jump on first paint. Killed when real data lands a moment later.
+  root.innerHTML = '';
+  const skelGrid = el('div', { class: 'home-grid' });
+  for (let i = 0; i < 6; i++) {
+    skelGrid.appendChild(el('div', { class: 'home-card skeleton' },
+      el('div', { class: 'skel-line half' }),
+      el('div', { class: 'skel-line big' }),
+      el('div', { class: 'skel-line full' }),
+      el('div', { class: 'skel-line full' }),
+    ));
+  }
+  root.appendChild(skelGrid);
   // Pull the pieces in parallel; tolerate any single failure.
   const safe = async (p) => { try { return await p; } catch (e) { return null; } };
   const [products, runs, proposals, suggestions, pendingReportsResp] =
@@ -4818,15 +4883,15 @@ async function loadCommandCenter() {
   }
   grid.appendChild(runsCard);
 
-  // Card: Recent performance alerts (dashboard suggestions).
-  const sugCard = el('div', { class: 'home-card' },
-    el('h3', {}, 'Recent performance alerts'),
-  );
+  // Card: Recent performance alerts (dashboard suggestions). Hidden
+  // entirely when empty — the spec's "render nothing, not a stale
+  // card." Once a real alert lands the card appears; before then,
+  // the grid layout collapses without ghost content.
   const recentSugs = filteredSuggestions.slice(0, 3);
-  if (!recentSugs.length) {
-    sugCard.appendChild(el('div', { class: 'empty-state' },
-      el('div', {}, 'No alerts yet. Upload performance reports in Insights.')));
-  } else {
+  if (recentSugs.length) {
+    const sugCard = el('div', { class: 'home-card' },
+      el('h3', {}, 'Recent performance alerts'),
+    );
     for (const s of recentSugs) {
       sugCard.appendChild(el('div', { style: 'margin:6px 0; cursor:pointer;',
         onclick: () => switchView('insights') },
@@ -4835,20 +4900,18 @@ async function loadCommandCenter() {
           s.source_label || ''),
       ));
     }
+    grid.appendChild(sugCard);
   }
-  grid.appendChild(sugCard);
 
   // Card: Recommended next actions — deterministic rules over the data
-  // we already loaded. No LLM, no new endpoints.
+  // we already loaded. No LLM, no new endpoints. Hidden entirely when
+  // there's nothing recommended; no ghost "you're on top of it" card.
   const actions = composeNextActions(filteredProducts, docCounts, perProduct,
                                      filteredRuns, contentReview, filteredSuggestions);
-  const actionsCard = el('div', { class: 'home-card' },
-    el('h3', {}, 'Recommended next actions'),
-  );
-  if (!actions.length) {
-    actionsCard.appendChild(el('div', { class: 'empty-state' },
-      el('div', {}, "You're on top of it. Nothing recommended right now.")));
-  } else {
+  if (actions.length) {
+    const actionsCard = el('div', { class: 'home-card' },
+      el('h3', {}, 'Recommended next actions'),
+    );
     const ul = el('ul', { style: 'margin: 4px 0 0 0; padding-left: 18px;' });
     for (const a of actions) {
       const li = el('li', { style: 'margin: 6px 0;' });
@@ -4864,10 +4927,16 @@ async function loadCommandCenter() {
       ul.appendChild(li);
     }
     actionsCard.appendChild(ul);
+    grid.appendChild(actionsCard);
   }
-  grid.appendChild(actionsCard);
 
   root.appendChild(grid);
+  // Quiet spacer below the grid so the lower half of the viewport
+  // isn't a black void on a tall screen. Just a soft hint, no
+  // interactive elements.
+  root.appendChild(el('div', { class: 'home-footer-spacer' },
+    'Agent HQ · live data refreshes when you switch product, trigger a run, '
+    + 'or upload a report.'));
 }
 
 function composeNextActions(products, docCounts, perProduct, runs, contentReview, suggestions) {

@@ -31,6 +31,8 @@ from app import guardrails as guardrails_mod
 from app.agents.base import Agent
 from app.agents.content_grader import grade_content
 from app.agents.registry import register
+from app.reports.evidence import (build_ledger_from_intelligence,
+                                   validate_evidence_binding)
 from app.reports.renderers import RENDERERS
 from app.schemas import (AgentContext, AgentResult, ArtifactDraft, Citation,
                          ProposedAction)
@@ -74,9 +76,24 @@ class ReportComposerAgent(Agent):
         from app.config import get_settings
         settings = get_settings()
 
+        # Build the evidence ledger from the SAME intelligence the
+        # renderer will read (§6 generated-vs-observed: the binding is
+        # written, not reverse-engineered). The renderer receives the
+        # ledger as input and emits markers per number; the validation
+        # pass below then reads the SAME ledger and the SAME rendered
+        # content. Same source of truth, end to end.
+        ledger = build_ledger_from_intelligence(intelligence)
+
         renderer = RENDERERS[audience]
         content, gen_cost = renderer(intelligence,
-                                     profile=profile, settings=settings)
+                                     profile=profile, settings=settings,
+                                     ledger=ledger)
+
+        # Deterministic post-render validation. Records pass/fail per
+        # claim on the artifact body — this build does NOT block at the
+        # gate (recording only), per the spec. The next build wires
+        # block-at-gate enforcement once the trust pill UI is live.
+        trust_checks = validate_evidence_binding(content, ledger)
 
         # ---- Guardrail + routing — same shape as content_engine ----------
         flat_text = "\n".join((b.get("text") or "")
@@ -139,6 +156,13 @@ class ReportComposerAgent(Agent):
             # the UI can show "what the report was based on" without a
             # second engine call. JSON-serializable shape.
             "intelligence_used": intelligence,
+            # Evidence ledger + post-render validation result. The
+            # ledger is what every claim is supposed to cite from; the
+            # trust_checks result records pass/fail. RECORDING ONLY in
+            # this build — the gate enforcement lands in the next UI
+            # build. Trust pill in the UI reads off body.trust_checks.
+            "evidence_ledger": ledger.to_list(),
+            "trust_checks": trust_checks,
         }
 
         cites: list[Citation] = []

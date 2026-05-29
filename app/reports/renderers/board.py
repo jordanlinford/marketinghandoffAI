@@ -8,8 +8,10 @@ individual run cost detail.
 """
 from __future__ import annotations
 
+from app.reports.evidence import (build_ledger_from_intelligence,
+                                   validate_evidence_binding)
 from app.reports.renderers._common import (
-    compose_style_lines, fmt_num, fmt_pct, future_stub_blocks,
+    cite_num, compose_style_lines, fmt_num, fmt_pct, future_stub_blocks,
     is_future_scope, llm_render, memory_lines, period_header,
     schema_example,
 )
@@ -40,12 +42,14 @@ def _select(intelligence: dict) -> dict:
         "production_summary": {
             "artifacts_total": (intelligence.get("production") or {}).get("artifacts_total", 0),
             "artifacts_ready": (intelligence.get("production") or {}).get("artifacts_ready", 0),
+            "artifacts_pending_review": (intelligence.get("production") or {}).get(
+                "artifacts_pending_review", 0),
             "cost_usd_total": (intelligence.get("production") or {}).get("cost_usd_total", 0.0),
         },
     }
 
 
-def _deterministic_blocks(sel: dict) -> list[dict]:
+def _deterministic_blocks(sel: dict, ledger=None) -> list[dict]:
     blocks: list[dict] = []
     sc = sel["scope"]
     blocks.append({
@@ -57,20 +61,27 @@ def _deterministic_blocks(sel: dict) -> list[dict]:
     attr = (sel["period_summary"].get("attributed") or {})
     deltas = sel["period_summary"].get("deltas")
     lines = [
-        f"Attributed clicks: {fmt_num(attr.get('clicks'))}",
-        f"Attributed conversions: {fmt_num(attr.get('conversions'))}",
-        f"Attributed conversion rate: {fmt_pct(attr.get('conversion_rate'))}",
+        f"Attributed clicks: {cite_num(ledger, 'period_summary.attributed.clicks', attr.get('clicks'), formatter=fmt_num)}",
+        f"Attributed conversions: {cite_num(ledger, 'period_summary.attributed.conversions', attr.get('conversions'), formatter=fmt_num)}",
+        f"Attributed conversion rate: {cite_num(ledger, 'period_summary.attributed.conversion_rate', attr.get('conversion_rate'), formatter=fmt_pct)}",
     ]
     if deltas:
         bits = []
         if (deltas.get("clicks") or {}).get("pct") is not None:
-            bits.append(f"clicks {deltas['clicks']['pct'] * 100:+.0f}%")
+            pct = deltas['clicks']['pct']
+            bits.append("clicks " + cite_num(
+                ledger, "period_summary.deltas.clicks.pct", pct,
+                formatter=lambda v: f"{v * 100:+.0f}%"))
         if (deltas.get("conversions") or {}).get("pct") is not None:
-            bits.append(
-                f"conversions {deltas['conversions']['pct'] * 100:+.0f}%")
+            pct = deltas['conversions']['pct']
+            bits.append("conversions " + cite_num(
+                ledger, "period_summary.deltas.conversions.pct", pct,
+                formatter=lambda v: f"{v * 100:+.0f}%"))
         if (deltas.get("conversion_rate") or {}).get("pct") is not None:
-            bits.append(
-                f"conversion rate {deltas['conversion_rate']['pct'] * 100:+.0f}%")
+            pct = deltas['conversion_rate']['pct']
+            bits.append("conversion rate " + cite_num(
+                ledger, "period_summary.deltas.conversion_rate.pct", pct,
+                formatter=lambda v: f"{v * 100:+.0f}%"))
         if bits:
             lines.append("Trajectory vs prior period: " + "; ".join(bits) + ".")
     else:
@@ -82,8 +93,9 @@ def _deterministic_blocks(sel: dict) -> list[dict]:
                    "text": "What the data is saying (memory highlights)"})
     if sel["memory_highlights"]:
         evidence_lines = []
-        for h in sel["memory_highlights"][:4]:
-            evidence_lines.append(f"- {h.get('observation', '')}")
+        for i, h in enumerate(sel["memory_highlights"][:4]):
+            evidence_lines.append(
+                _format_memory_line(h, i, ledger))
         blocks.append({"kind": "body", "text": "\n".join(evidence_lines)})
     else:
         blocks.append({
@@ -96,14 +108,14 @@ def _deterministic_blocks(sel: dict) -> list[dict]:
                    "text": "Campaign performance"})
     if sel["campaigns"]:
         campaign_lines = []
-        for c in sel["campaigns"][:4]:
-            attr = c["attributed"]
+        for i, c in enumerate(sel["campaigns"][:4]):
+            c_attr = c["attributed"]
             campaign_lines.append(
                 f"- {c['name']} ({c['status']}): "
-                f"{fmt_num(attr.get('conversions'))} attributed conversion(s) "
-                f"on {fmt_num(attr.get('clicks'))} click(s); "
-                f"{c.get('plan_items')} planned item(s), "
-                f"{c.get('generated_assets')} generated.")
+                f"{cite_num(ledger, f'campaigns[{i}].attributed.conversions', c_attr.get('conversions'), formatter=fmt_num)} attributed conversion(s) "
+                f"on {cite_num(ledger, f'campaigns[{i}].attributed.clicks', c_attr.get('clicks'), formatter=fmt_num)} click(s); "
+                f"{cite_num(ledger, f'campaigns[{i}].plan_items', c.get('plan_items'), formatter=fmt_num)} planned item(s), "
+                f"{cite_num(ledger, f'campaigns[{i}].generated_assets', c.get('generated_assets'), formatter=fmt_num)} generated.")
         blocks.append({"kind": "body", "text": "\n".join(campaign_lines)})
     else:
         blocks.append({
@@ -117,15 +129,41 @@ def _deterministic_blocks(sel: dict) -> list[dict]:
     p = sel["production_summary"]
     blocks.append({
         "kind": "body",
-        "text": (f"{p.get('artifacts_total', 0)} asset(s) produced "
-                 f"this period at an LLM cost of ${p.get('cost_usd_total', 0):.2f}; "
-                 f"{p.get('artifacts_ready', 0)} have been approved + are "
-                 f"shipped or shippable.")})
+        "text": (
+            cite_num(ledger, "production.artifacts_total",
+                     p.get('artifacts_total', 0), formatter=fmt_num)
+            + " asset(s) produced this period at an LLM cost of "
+            + cite_num(ledger, "production.cost_usd_total",
+                       p.get('cost_usd_total', 0),
+                       formatter=lambda v: f"${float(v):.2f}")
+            + "; "
+            + cite_num(ledger, "production.artifacts_ready",
+                       p.get('artifacts_ready', 0), formatter=fmt_num)
+            + " have been approved + are shipped or shippable.")})
 
     blocks.append({"kind": "section_heading",
                    "text": "Strategic asks"})
     if sel["asks"]:
-        asks_lines = [f"- {q}" for q in sel["asks"][:4]]
+        # The engine's _compute_open_questions embeds numbers inline for
+        # the "approval queue depth" question. We rebuild that specific
+        # shape with a ledger marker so the validator binds. Other
+        # questions are text-only and emit verbatim.
+        prod_info = sel.get("production_summary") or {}
+        pending_review = prod_info.get("artifacts_pending_review")
+        asks_lines = []
+        for q in sel["asks"][:4]:
+            if q.startswith("There are ") and "draft(s) sitting" in q \
+                    and pending_review is not None:
+                asks_lines.append(
+                    "- There are "
+                    + cite_num(ledger,
+                                "production.artifacts_pending_review",
+                                pending_review, formatter=fmt_num)
+                    + " draft(s) sitting in the approval queue. "
+                    "Reviewing them is the cheapest way to convert "
+                    "produced work into shipped work.")
+            else:
+                asks_lines.append(f"- {q}")
         blocks.append({"kind": "body", "text": "\n".join(asks_lines)})
     else:
         blocks.append({"kind": "body",
@@ -134,9 +172,66 @@ def _deterministic_blocks(sel: dict) -> list[dict]:
     if sel["honesty_notes"]:
         blocks.append({"kind": "section_heading",
                        "text": "Notes on what this report is and isn't"})
-        notes_lines = [f"- {n}" for n in sel["honesty_notes"][:4]]
+        notes_lines = []
+        # The "untagged volume excluded" note from the engine's
+        # _compute_honesty_notes embeds the backdrop counts inline. We
+        # rebuild it with per-number ledger markers so the validator
+        # binds (it would otherwise see three bare integers). Other
+        # honesty-note shapes are text-only and emit verbatim.
+        intel_ps = (sel.get("period_summary") or {})
+        backdrop = intel_ps.get("backdrop") or {}
+        for n in sel["honesty_notes"][:4]:
+            if n.startswith("Untagged volume excluded"):
+                notes_lines.append(
+                    "- Untagged volume excluded from attributed numbers: "
+                    + cite_num(ledger, "period_summary.backdrop.clicks",
+                                backdrop.get("clicks"), formatter=fmt_num)
+                    + " click(s), "
+                    + cite_num(ledger, "period_summary.backdrop.conversions",
+                                backdrop.get("conversions"), formatter=fmt_num)
+                    + " conversion(s) across "
+                    + cite_num(ledger, "period_summary.backdrop.data_points",
+                                backdrop.get("data_points"), formatter=fmt_num)
+                    + " backdrop data point(s). These are funnel context "
+                    "only — never quoted in this report as something "
+                    "marketing drove.")
+            else:
+                notes_lines.append(f"- {n}")
         blocks.append({"kind": "body", "text": "\n".join(notes_lines)})
     return blocks
+
+
+def _format_memory_line(highlight: dict, i: int, ledger) -> str:
+    """Build a memory-highlight line with PER-NUMBER markers so each
+    cited figure binds to its ledger entry. We rewrite the observation
+    rather than emit the raw `observation` text because that raw text
+    is a single string containing multiple values, none of which carry
+    markers — the validator would correctly flag every number as
+    unbound. Same facts, marker-bound phrasing."""
+    mb = highlight.get("metric_basis") or {}
+    label = highlight.get("key_display") or highlight.get("key") or f"highlight {i}"
+    parts = [f"{label}:"]
+    rate = mb.get("conversion_rate")
+    clicks = mb.get("clicks")
+    convs = mb.get("conversions")
+    dp = mb.get("data_points")
+    if rate is not None:
+        parts.append(cite_num(
+            ledger, f"memory_highlights[{i}].metric_basis.conversion_rate",
+            rate, formatter=fmt_pct) + " conversion rate")
+    elif convs:
+        parts.append(cite_num(
+            ledger, f"memory_highlights[{i}].metric_basis.conversions",
+            convs, formatter=fmt_num) + " conversions")
+    if clicks:
+        parts.append("from " + cite_num(
+            ledger, f"memory_highlights[{i}].metric_basis.clicks",
+            clicks, formatter=fmt_num) + " clicks")
+    if dp:
+        parts.append("across " + cite_num(
+            ledger, f"memory_highlights[{i}].metric_basis.data_points",
+            dp, formatter=fmt_num) + " data points")
+    return "- " + " ".join(parts) + "."
 
 
 def _llm_system_msg(profile: dict | None) -> str:
@@ -152,8 +247,16 @@ def _llm_system_msg(profile: dict | None) -> str:
         "paraphrase, or label them in the output." + voice_block + "\n\n"
         "HARD RULES (non-negotiable):\n"
         "  * Past-tense only. Describe what HAS happened. NEVER predict.\n"
-        "  * Numbers come from the user message's intelligence object. "
-        "Do NOT invent statistics, customer quotes, or proof points.\n"
+        "  * EVERY quantitative claim — every number, percentage, "
+        "currency figure, or count — MUST be followed immediately by a "
+        "ledger marker of the form ⟦ev:<id>⟧ where <id> is "
+        "the id of the matching entry in the EVIDENCE LEDGER provided in "
+        "the user message. Example: 'Conversions rose 12%⟦ev:ev3⟧ "
+        "vs prior period.' NEVER state a number that does not appear in "
+        "the ledger. NEVER cite an id not in the ledger.\n"
+        "  * Numbers come from the user message's intelligence object + "
+        "ledger. Do NOT invent statistics, customer quotes, or proof "
+        "points.\n"
         "  * Untagged metric_points are funnel backdrop ONLY — never "
         "attribute them to a campaign or to marketing action. The "
         "honesty_notes call this out; respect it.\n"
@@ -166,19 +269,27 @@ def _llm_system_msg(profile: dict | None) -> str:
 
 def render_board(intelligence: dict, *,
                  profile: dict | None = None,
-                 settings=None) -> tuple[dict, float]:
+                 settings=None,
+                 ledger=None) -> tuple[dict, float]:
+    # Build the evidence ledger up front so both the deterministic
+    # blocks AND the LLM prompt can cite from the same source of truth.
+    # Caller may pre-pass a ledger (the agent does — it needs the same
+    # ledger for the post-render validation pass).
+    if ledger is None:
+        ledger = build_ledger_from_intelligence(intelligence)
     # Future-date guard: when the engine flags the scope as future,
     # no renderer may synthesize a "what happened" narrative. Emit the
     # shared honest stub instead — current memory survives as a clearly-
-    # labeled reference baseline.
+    # labeled reference baseline, with per-number markers so the
+    # validator binds it correctly.
     if is_future_scope(intelligence):
         blocks, metadata = future_stub_blocks(
             intelligence, content_type=_CONTENT_TYPE,
-            audience_label=_AUDIENCE_LABEL)
+            audience_label=_AUDIENCE_LABEL, ledger=ledger)
         return ({"content_type": _CONTENT_TYPE, "blocks": blocks,
                  "metadata": metadata}, 0.0)
     sel = _select(intelligence)
-    fallback_blocks = _deterministic_blocks(sel)
+    fallback_blocks = _deterministic_blocks(sel, ledger=ledger)
     metadata = {
         "audience": _AUDIENCE_LABEL,
         "scope": sel["scope"],
@@ -195,6 +306,10 @@ def render_board(intelligence: dict, *,
         f"Audience: Board update. {period_header(intelligence)}.\n\n"
         f"Intelligence to render (use these facts; do not invent):\n"
         f"{_json.dumps(sel, indent=2, default=str)}\n\n"
+        f"EVIDENCE LEDGER — every quantitative claim MUST cite an id "
+        f"from this list via the marker ⟦ev:<id>⟧ immediately after "
+        f"the number. NEVER state a number not in this ledger.\n"
+        f"{_json.dumps(ledger.prompt_payload(), indent=2, default=str)}\n\n"
         "Return ONLY a JSON object matching this exact shape (no prose, "
         "no markdown fences). Each block's `text` is finished prose — "
         "replace the placeholder description with real content. Keep the "

@@ -4082,12 +4082,19 @@ def main() -> None:
                    f"{int(attr['clicks']):,}" in det_text, (
                 "deterministic fallback must include period summary numbers. "
                 f"clicks={attr['clicks']}, body[:300]={det_text[:300]}")
-        # A memory highlight observation must surface if intel has any.
+        # The top memory highlight's KEY (e.g. "LinkedIn") must surface
+        # in the body. The board renderer now rewrites memory lines
+        # with per-number ledger markers (Build P8.2) rather than
+        # emitting the raw observation verbatim, so we check for the
+        # key_display rather than the full observation string.
         if intel["memory_highlights"]:
-            top_obs = intel["memory_highlights"][0]["observation"]
-            assert top_obs in det_text, (
-                "deterministic fallback must surface at least one memory "
-                "highlight observation. Top obs missing from body.")
+            top_label = intel["memory_highlights"][0].get(
+                "key_display") or intel["memory_highlights"][0].get("key")
+            if top_label:
+                assert top_label in det_text, (
+                    "deterministic fallback must surface the top memory "
+                    f"highlight's key ({top_label!r}) somewhere in the body. "
+                    f"body[:300]={det_text[:300]}")
         assert "deterministic" in (det_content.get("metadata") or {}).get(
             "render_strategy", ""), det_content.get("metadata")
         print(f"[OK] Report (9): deterministic fallback — no-key render "
@@ -4435,6 +4442,173 @@ def main() -> None:
               f"asset_kind=report filter sees it. Unresolvable "
               f"content_type renders as asset_kind=unknown, not "
               f"silently bucketed.")
+
+        # (13) Evidence ledger — §6 generated-vs-observed enforcement.
+        # Presence + absence + behavior per docs/cross-layer-disciplines.md.
+        # The binding is WRITTEN at generation time (renderer holds the
+        # ledger and emits markers); the validator independently checks
+        # every quantitative claim in prose resolves to a real entry.
+        from app.reports.evidence import (
+            build_ledger_from_intelligence, validate_evidence_binding,
+            Ledger as _Ledger,
+        )
+
+        # ---- PRESENCE: ledger built from populated intelligence -------
+        # Use the smoke's earlier `intel` (populated, non-future). Walk
+        # the ledger and confirm entries exist for the load-bearing
+        # fields: period_summary.attributed, memory_highlights, and at
+        # least one campaign + production figure. Each entry carries
+        # source, confidence (existing vocabulary), and
+        # baseline_vs_attributed flag.
+        ledger_p = build_ledger_from_intelligence(intel)
+        assert len(ledger_p) > 0, "ledger must have entries for populated intel"
+        sources = {e["source"] for e in ledger_p}
+        assert "period_summary.attributed.clicks" in sources, sources
+        assert "period_summary.attributed.conversion_rate" in sources, sources
+        # Memory highlights entries — at least one with confidence
+        # from the EXISTING tier vocabulary (high/moderate/low/
+        # insufficient — NO new tiers).
+        memory_entries = [e for e in ledger_p
+                          if e["source"].startswith("memory_highlights[")]
+        assert memory_entries, "ledger must include memory_highlights entries"
+        for e in memory_entries:
+            assert e["confidence"] in (
+                "high", "moderate", "low", "insufficient", "n_a"), \
+                f"ledger entry confidence must use existing tiers; got " \
+                f"{e['confidence']!r}"
+            assert e["baseline_vs_attributed"] == "attributed", (
+                "memory entries are attributed (Bug 1 — memory excludes "
+                "untagged). Got: " + str(e))
+        # Backdrop entries (when present) carry the backdrop flag.
+        backdrop_entries = [e for e in ledger_p
+                            if e["source"].startswith("period_summary.backdrop.")]
+        for e in backdrop_entries:
+            assert e["baseline_vs_attributed"] == "backdrop", (
+                "backdrop entries MUST be flagged backdrop, not "
+                "attributed (§3 discipline). Got: " + str(e))
+        print(f"[OK] Report (13a): ledger built from populated intel — "
+              f"{len(ledger_p)} entry(s) covering period_summary, "
+              f"{len(memory_entries)} memory, "
+              f"{len(backdrop_entries)} backdrop; tiers from existing "
+              "vocabulary; baseline/attributed flag correct.")
+
+        # ---- PRESENCE: a generated report's trust_checks passes -------
+        # The Report (5) board artifact `rpt_art` was generated via the
+        # full agent path which now builds the ledger + runs validation.
+        # Reload and verify trust_checks.
+        db.refresh(rpt_art)
+        tc = (rpt_art.body or {}).get("trust_checks")
+        assert tc is not None, "report body must carry trust_checks"
+        # Every marker resolves; no numbers are unbound. This is the
+        # binding-presence check — the renderer wrote markers for every
+        # quantitative claim and they all point at real ledger entries.
+        assert tc["markers_unresolved"] == [], (
+            "every emitted marker must resolve to a ledger entry. "
+            "Unresolved: " + str(tc["markers_unresolved"]))
+        assert tc["numbers_unbound"] == [], (
+            "every number-shaped token in the report must carry a "
+            "resolving marker. Unbound: "
+            + str(tc["numbers_unbound"]))
+        assert tc["passed"] is True, tc
+        # Ledger size matches what was rendered (no stripping in the
+        # composer).
+        assert tc["ledger_size"] > 0
+        # Markers found > 0 means the renderer actually emitted them.
+        assert tc["markers_found"] > 0
+        print(f"[OK] Report (13b): binding presence — generated report's "
+              f"trust_checks.passed=True; {tc['markers_found']} marker(s) "
+              f"all resolved; {tc['numbers_found']} number(s) found and "
+              f"all bound to ledger entries.")
+
+        # ---- ABSENCE (load-bearing) — bare number must fail -----------
+        # Construct a synthetic content with a quantitative claim that
+        # has NO marker. Validation MUST flag it as a violation,
+        # passed=False. Without this check, the system would be
+        # structurally-green-while-actually-broken: regex-matching a
+        # post-hoc claim is exactly the failure mode §6 exists to
+        # prevent.
+        bare_content = {
+            "content_type": "report_board",
+            "blocks": [
+                {"kind": "body",
+                 "text": "Email had 42 conversions last quarter."},
+            ],
+            "metadata": {},
+        }
+        tc_bare = validate_evidence_binding(bare_content, ledger_p)
+        assert tc_bare["passed"] is False, (
+            "VALIDATION REGRESSION: a bare number with no marker MUST "
+            "fail validation. trust_checks=" + str(tc_bare))
+        assert tc_bare["numbers_unbound"], (
+            "bare number must appear in numbers_unbound. Got: "
+            + str(tc_bare))
+        assert any(u["text"] == "42" for u in tc_bare["numbers_unbound"]), (
+            "the bare '42' must be flagged specifically. Got: "
+            + str(tc_bare["numbers_unbound"]))
+
+        # ---- ABSENCE (load-bearing) — unresolved marker must fail ----
+        bogus_content = {
+            "content_type": "report_board",
+            "blocks": [
+                {"kind": "body",
+                 "text": "Sales drove 100⟦ev:nonexistent⟧ conversions."},
+            ],
+            "metadata": {},
+        }
+        tc_bogus = validate_evidence_binding(bogus_content, ledger_p)
+        assert tc_bogus["passed"] is False, (
+            "VALIDATION REGRESSION: a marker pointing at no ledger "
+            "entry MUST fail validation. trust_checks="
+            + str(tc_bogus))
+        assert "nonexistent" in tc_bogus["markers_unresolved"], (
+            "unresolved marker id must appear in markers_unresolved. "
+            "Got: " + str(tc_bogus["markers_unresolved"]))
+        # The bogus marker doesn't resolve, so the number it claimed
+        # to source is ALSO unbound (no resolving marker nearby).
+        # This is the "the check is behavioral, not structural" proof:
+        # a regex would have found the marker and called it good; the
+        # validator finds the marker, tries to resolve it, fails, and
+        # therefore counts the number as unbound too.
+        assert tc_bogus["numbers_unbound"], (
+            "unresolved marker means the number it claimed to source "
+            "is effectively unbound. Got: " + str(tc_bogus))
+        print(f"[OK] Report (13c): ABSENCE checks (the behavioral proof) "
+              f"— bare number triggers FAIL with the bare '42' in "
+              f"numbers_unbound; unresolved marker triggers FAIL with "
+              f"'nonexistent' in markers_unresolved + the orphaned number "
+              "in numbers_unbound.")
+
+        # ---- BEHAVIOR — future scope has empty ledger / stub passes ---
+        # When the engine returns is_future intelligence, the ledger
+        # contains only memory_highlights (no period_summary entries).
+        # The future_stub_blocks emit markers next to memory numbers.
+        # Validation passes: zero unbound, zero unresolved.
+        ledger_f = build_ledger_from_intelligence(fut_intel)
+        # Future-scope ledger excludes period_summary entries (they are
+        # None / omitted). Only memory + open_questions content.
+        sources_f = {e["source"] for e in ledger_f}
+        assert not any(s.startswith("period_summary.attributed")
+                        for s in sources_f), (
+            "future-scope ledger MUST NOT carry period_summary entries "
+            "(the engine omitted them). Got: " + str(sources_f))
+        # Generate a future-scope board report and check trust_checks.
+        db.refresh(fut_art)
+        tc_fut = (fut_art.body or {}).get("trust_checks")
+        assert tc_fut is not None, "future-scope report must carry trust_checks"
+        assert tc_fut["passed"] is True, (
+            "future-scope stub MUST pass validation (no false positives "
+            "on the honest stub). trust_checks=" + str(tc_fut))
+        # No unbound numbers — even though the stub body MAY contain
+        # numbers in memory reference observations, every one has a
+        # marker.
+        assert tc_fut["numbers_unbound"] == [], (
+            "future-scope stub must have ZERO unbound numbers. Got: "
+            + str(tc_fut["numbers_unbound"]))
+        assert tc_fut["markers_unresolved"] == [], tc_fut
+        print(f"[OK] Report (13d): behavior — future-scope ledger excludes "
+              f"period_summary entries; future-scope stub passes "
+              f"validation with zero unbound numbers + zero unresolved "
+              f"markers (no false positives on the honest stub).")
 
         print("[OK] Smoke test passed.")
     finally:

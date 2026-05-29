@@ -7,6 +7,10 @@ this module owns:
   * The deterministic fallback assembly — strict facts from the
     intelligence object, no narrative leaps.
   * JSON envelope tolerance (same parser the campaign propose path uses).
+  * Inline citation emission via cite_num — the renderer emits a number
+    AND its evidence-ledger marker in one call, so the §6 generated-vs-
+    observed discipline is enforced at the writing site, not regex-
+    matched afterward.
 
 These helpers do NOT introduce a new artifact shape — renderers return
 a content_dict in the same {content_type, blocks, metadata} structure
@@ -16,7 +20,7 @@ machinery for free.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Callable
 
 
 # --------------------------------------------------------------------------
@@ -120,6 +124,43 @@ def fmt_pct(p) -> str:
 
 
 # --------------------------------------------------------------------------
+# Inline citation helper — the §6 enforcement site.
+# --------------------------------------------------------------------------
+def cite_num(ledger, source: str, value: Any, *,
+             formatter: Callable[[Any], str] | None = None) -> str:
+    """Return f"{formatted}{marker}" — number plus its evidence marker.
+
+    Empty-string marker when the value isn't in the ledger (None
+    values, or sources the ledger doesn't know about) — caller still
+    gets the formatted string without a broken marker. This keeps
+    cite_num drop-in for "fmt_num(x)" or "fmt_pct(x)" at every emission
+    site so the renderer can always cite.
+
+    When the ledger is None (caller didn't pass one), we just format —
+    no marker. Used by tests and legacy paths that skip binding.
+    """
+    formatted = (formatter(value) if formatter is not None else str(value))
+    if ledger is None or value is None:
+        return formatted
+    marker = ledger.cite(source, value)
+    if not marker:
+        # Try source-only lookup as a fallback for cases where the
+        # exact value canonicalization missed (rounding edge cases).
+        marker = ledger.cite(source)
+    return f"{formatted}{marker}" if marker else formatted
+
+
+def cite_inline(ledger, source: str, value: Any) -> str:
+    """Return the marker token alone (no number). Used when the prose
+    is already written and we want to attach a marker after a phrase
+    rather than embed it next to a number — e.g. a memory observation
+    that already contains the numbers in its own format."""
+    if ledger is None or value is None:
+        return ""
+    return ledger.cite(source, value) or ledger.cite(source)
+
+
+# --------------------------------------------------------------------------
 # LLM call — only invoked when settings.anthropic_api_key is present.
 # Caller falls back to deterministic on any failure.
 # --------------------------------------------------------------------------
@@ -206,7 +247,8 @@ def is_future_scope(intelligence: dict) -> bool:
 
 def future_stub_blocks(intelligence: dict, *,
                         content_type: str,
-                        audience_label: str) -> tuple[list[dict], dict]:
+                        audience_label: str,
+                        ledger=None) -> tuple[list[dict], dict]:
     scope = intelligence.get("scope") or {}
     today = scope.get("today") or ""
     start, end = scope.get("start") or "?", scope.get("end") or "?"
@@ -221,10 +263,39 @@ def future_stub_blocks(intelligence: dict, *,
                  f"in the future (today is {today})."),
     })
     if highlights:
+        # Build the reference baseline with per-number markers so the
+        # validator sees every figure as bound to a ledger entry.
+        # Numbers in stub mode are EXPLICITLY framed as "as of today,
+        # not for the requested period" — they don't claim anything
+        # about the future, but they're still real numbers the system
+        # has to cite honestly.
         ref_lines = ["For reference — what memory currently knows "
                      "(AS OF TODAY, not for the requested period):"]
-        for h in highlights[:4]:
-            ref_lines.append(f"- {h.get('observation', '')}")
+        for i, h in enumerate(highlights[:4]):
+            mb = h.get("metric_basis") or {}
+            label = h.get("key_display") or h.get("key") or f"highlight {i}"
+            rate = mb.get("conversion_rate")
+            clicks = mb.get("clicks")
+            convs = mb.get("conversions")
+            dp = mb.get("data_points")
+            parts = [f"{label}:"]
+            if rate is not None:
+                parts.append(cite_num(
+                    ledger, f"memory_highlights[{i}].metric_basis.conversion_rate",
+                    rate, formatter=fmt_pct) + " conversion rate")
+            elif convs is not None and convs:
+                parts.append(cite_num(
+                    ledger, f"memory_highlights[{i}].metric_basis.conversions",
+                    convs, formatter=fmt_num) + " conversions")
+            if clicks is not None and clicks:
+                parts.append("from " + cite_num(
+                    ledger, f"memory_highlights[{i}].metric_basis.clicks",
+                    clicks, formatter=fmt_num) + " clicks")
+            if dp is not None and dp:
+                parts.append("across " + cite_num(
+                    ledger, f"memory_highlights[{i}].metric_basis.data_points",
+                    dp, formatter=fmt_num) + " data points")
+            ref_lines.append("- " + " ".join(parts) + ".")
         blocks.append({"kind": "body", "text": "\n".join(ref_lines)})
         blocks.append({"kind": "body", "text": reference_label})
     else:

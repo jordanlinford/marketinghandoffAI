@@ -7,8 +7,9 @@ funnel tables, full campaign list, comprehensive production accounting.
 """
 from __future__ import annotations
 
+from app.reports.evidence import build_ledger_from_intelligence
 from app.reports.renderers._common import (
-    compose_style_lines, fmt_num, fmt_pct, future_stub_blocks,
+    cite_num, compose_style_lines, fmt_num, fmt_pct, future_stub_blocks,
     is_future_scope, llm_render, period_header, schema_example,
 )
 
@@ -17,25 +18,44 @@ _CONTENT_TYPE = "report_ceo_weekly"
 _AUDIENCE_LABEL = "CEO weekly digest"
 
 
-def _pick_lead(intelligence: dict) -> str:
+def _pick_lead(intelligence: dict, ledger=None) -> str:
     deltas = (intelligence.get("period_summary") or {}).get("deltas") or {}
     convs = deltas.get("conversions")
     if convs and convs.get("pct") is not None and abs(convs["pct"]) >= 0.15:
-        return (f"Conversions {'up' if convs['direction'] == 'up' else 'down'} "
-                f"{abs(convs['pct']) * 100:.0f}% vs last week.")
+        pct = convs["pct"]
+        return ("Conversions " + cite_num(
+            ledger, "period_summary.deltas.conversions.pct", pct,
+            formatter=lambda v: f"{'up' if v > 0 else 'down'} {abs(v) * 100:.0f}%")
+            + " vs last week.")
     if intelligence.get("memory_highlights"):
         top = intelligence["memory_highlights"][0]
+        # Rebuild the observation with markers so the validator can bind
+        # every number to a ledger entry. Same facts; marker-aware
+        # phrasing.
+        mb = top.get("metric_basis") or {}
+        label = top.get("key_display") or top.get("key") or "top channel"
+        rate = mb.get("conversion_rate")
+        if rate is not None:
+            return (f"{label}: " + cite_num(
+                ledger, "memory_highlights[0].metric_basis.conversion_rate",
+                rate, formatter=fmt_pct) + " conversion rate "
+                + ("from " + cite_num(
+                    ledger, "memory_highlights[0].metric_basis.clicks",
+                    mb.get("clicks"), formatter=fmt_num) + " clicks"
+                   if mb.get("clicks") else ""))
         return top.get("observation") or "Memory surfaced a top pattern."
     if intelligence.get("campaigns"):
         c = intelligence["campaigns"][0]
         return (f"Campaign {c['name']!r} is {c['status']} — "
-                f"{int((c['attributed'].get('conversions') or 0))} "
-                f"attributed conversion(s) to date.")
+                + cite_num(ledger, "campaigns[0].attributed.conversions",
+                            c['attributed'].get('conversions'),
+                            formatter=fmt_num)
+                + " attributed conversion(s) to date.")
     return ("No statistically meaningful movement to call out this "
             "period. The system is watching.")
 
 
-def _select(intelligence: dict) -> dict:
+def _select(intelligence: dict, ledger=None) -> dict:
     """CEO-specific cut. Signal-only — three bullets and a watch line."""
     notable_for_ceo: list[dict] = []
     for c in (intelligence.get("notable_changes") or []):
@@ -47,7 +67,7 @@ def _select(intelligence: dict) -> dict:
             notable_for_ceo.append(c)
     return {
         "audience": "ceo_weekly",
-        "lead": _pick_lead(intelligence),
+        "lead": _pick_lead(intelligence, ledger=ledger),
         "notable_changes": notable_for_ceo[:3],
         "watching": intelligence.get("watching") or [],
         "open_questions": intelligence.get("open_questions") or [],
@@ -57,17 +77,55 @@ def _select(intelligence: dict) -> dict:
     }
 
 
-def _deterministic_blocks(sel: dict) -> list[dict]:
+def _deterministic_blocks(sel: dict, ledger=None) -> list[dict]:
     blocks: list[dict] = []
     blocks.append({"kind": "headline", "text": sel["lead"]})
-    # Two to three bullets of what changed.
+    # Two to three bullets of what changed. notable_changes carry their
+    # own delta_pct field which the ledger knows about — we attach a
+    # marker at the end of each bullet for binding.
     bullet_lines: list[str] = []
-    for c in sel["notable_changes"][:3]:
-        bullet_lines.append(f"- {c.get('observation', '')}")
+    for i_change, c in enumerate(sel["notable_changes"][:3]):
+        obs = c.get("observation", "")
+        dp = c.get("delta_pct")
+        # Build a marker-aware bullet. If the change has a delta_pct,
+        # we embed the marker; otherwise the bullet is a non-numeric
+        # observation (e.g. memory_top_highlight which we cite via the
+        # memory section instead).
+        if dp is not None:
+            stage = c.get("stage", "metric")
+            # Original observation already mentions a percentage —
+            # rewrite to a marker-bound phrasing so the validator sees
+            # the binding.
+            direction = "up" if dp > 0 else ("down" if dp < 0 else "flat")
+            bullet_lines.append(
+                f"- {stage.title()} {direction} "
+                + cite_num(ledger,
+                            f"notable_changes[{i_change}].delta_pct", dp,
+                            formatter=lambda v: f"{abs(v) * 100:.0f}%")
+                + " vs prior period.")
+        elif obs:
+            # Non-numeric notable (e.g. campaign attribution rollup) —
+            # safe to emit verbatim; it doesn't carry standalone
+            # numbers the validator would flag.
+            bullet_lines.append(f"- {obs}")
     if not bullet_lines and sel["memory_highlights"]:
         # Fall back to top memory observations as the "what changed."
-        for h in sel["memory_highlights"][:2]:
-            bullet_lines.append(f"- {h.get('observation', '')}")
+        # Same marker rewrite as the lead.
+        for i, h in enumerate(sel["memory_highlights"][:2]):
+            mb = h.get("metric_basis") or {}
+            label = h.get("key_display") or h.get("key") or "channel"
+            rate = mb.get("conversion_rate")
+            if rate is not None:
+                bullet_lines.append(
+                    f"- {label}: " + cite_num(
+                        ledger, f"memory_highlights[{i}].metric_basis.conversion_rate",
+                        rate, formatter=fmt_pct) + " conversion rate.")
+            elif mb.get("conversions"):
+                bullet_lines.append(
+                    f"- {label}: " + cite_num(
+                        ledger, f"memory_highlights[{i}].metric_basis.conversions",
+                        mb.get("conversions"), formatter=fmt_num)
+                    + " attributed conversion(s).")
     if not bullet_lines:
         bullet_lines.append(
             "- Nothing crossed the 'notable' threshold this week. "
@@ -76,6 +134,9 @@ def _deterministic_blocks(sel: dict) -> list[dict]:
     blocks.append({"kind": "body", "text": "\n".join(bullet_lines)})
 
     # One watch line — only if there IS something worth watching.
+    # The watching observation defers (no rate quoted per Bug 3
+    # discipline), so it carries no standalone numbers the validator
+    # would flag. Emit verbatim.
     if sel["watching"]:
         top_watch = sel["watching"][0]
         blocks.append({
@@ -103,6 +164,11 @@ def _llm_system_msg(profile: dict | None) -> str:
         "paraphrase, or label them in the output." + voice_block + "\n\n"
         "HARD RULES (non-negotiable):\n"
         "  * Past-tense observations. Never predict outcomes.\n"
+        "  * EVERY quantitative claim — every number, percentage, "
+        "currency figure, or count — MUST be followed immediately by a "
+        "ledger marker ⟦ev:<id>⟧ matching its entry in the EVIDENCE "
+        "LEDGER provided in the user message. NEVER state a number not "
+        "in the ledger.\n"
         "  * Lead with a single headline sentence — what's the one thing "
         "the CEO should know this week?\n"
         "  * 2-3 bullet observations, each ONE LINE.\n"
@@ -117,15 +183,18 @@ def _llm_system_msg(profile: dict | None) -> str:
 
 def render_ceo_weekly(intelligence: dict, *,
                       profile: dict | None = None,
-                      settings=None) -> tuple[dict, float]:
+                      settings=None,
+                      ledger=None) -> tuple[dict, float]:
+    if ledger is None:
+        ledger = build_ledger_from_intelligence(intelligence)
     if is_future_scope(intelligence):
         blocks, metadata = future_stub_blocks(
             intelligence, content_type=_CONTENT_TYPE,
-            audience_label=_AUDIENCE_LABEL)
+            audience_label=_AUDIENCE_LABEL, ledger=ledger)
         return ({"content_type": _CONTENT_TYPE, "blocks": blocks,
                  "metadata": metadata}, 0.0)
-    sel = _select(intelligence)
-    fallback_blocks = _deterministic_blocks(sel)
+    sel = _select(intelligence, ledger=ledger)
+    fallback_blocks = _deterministic_blocks(sel, ledger=ledger)
     metadata = {
         "audience": _AUDIENCE_LABEL,
         "scope": sel["scope"],
@@ -142,6 +211,10 @@ def render_ceo_weekly(intelligence: dict, *,
         f"Audience: CEO weekly. {period_header(intelligence)}.\n\n"
         f"Intelligence to render (use these facts; do not invent):\n"
         f"{_json.dumps(sel, indent=2, default=str)}\n\n"
+        f"EVIDENCE LEDGER — every quantitative claim MUST cite an id "
+        f"from this list via the marker ⟦ev:<id>⟧ immediately after "
+        f"the number. NEVER state a number not in this ledger.\n"
+        f"{_json.dumps(ledger.prompt_payload(), indent=2, default=str)}\n\n"
         "Return ONLY a JSON object matching this exact shape (no prose, "
         "no markdown fences). Each block's `text` is the polished line — "
         "single sentence for `headline`, 2-3 lines max for `body`, ONE "

@@ -47,7 +47,7 @@ For each listed rule, the spec must:
 A spec that names cross-layer rules but doesn't specify consumer enforcement + tests has not
 applied this discipline. Spec review should flag that.
 
-## The six rules
+## The rules
 
 ### §1 — Thin-data honesty
 
@@ -270,6 +270,43 @@ ledger entries.
 
 Status: BACKLOG. Not scheduled. Named so the next spec author finds it before reaching for
 the easy wrong fix (binding the artifact counts).
+
+---
+
+### §7 — Derivation Discipline
+
+**Failure mode:** a derivative asset (carousel, social post, email, blog, exec summary)
+introduces a factual claim — a statistic, a customer outcome, a market assertion — that does
+not exist in its source anchor. The derivative looks consistent and on-brand while quietly
+fabricating, and because it ships to channels, the fabrication goes straight out the door.
+Independently, uncontrolled derivatives drift from each other and from the anchor, destroying
+message consistency across a fan-out.
+
+**Receiving-component requirement:** a derivative renderer may ONLY select, summarize,
+condense, reorder, reframe, or reformat claims present in its source anchor. It may NOT
+invent, expand beyond source claims, or introduce new statistics, customer outcomes, or
+market assertions. The derivative validator checks the derivative's claims against the
+ANCHOR's validated claim set / evidence ledger — not against raw sources.
+
+**Why it composes with §6:** a derivative that introduces no net-new claim inherits the
+anchor's evidence binding transitively. Every claim it carries was already bound when the
+anchor passed §6. So derivative validation reduces to a containment check (derivative claims
+⊆ anchor claims), not a re-binding against Level-1 sources. §7 is what makes §6 transitive
+down the content stack.
+
+**Test pattern:**
+- *Presence:* every factual claim in the derivative traces to a claim in the source anchor.
+- *Absence:* the derivative contains no statistic / outcome / assertion absent from the anchor
+  (the load-bearing check — same absence-assertion discipline as §6's bare-number test, now
+  scoped to "claim not in source").
+- *Behavior:* a derivative that smuggles in a net-new number/outcome FAILS validation against
+  the anchor; a derivative that only re-expresses anchor claims passes without re-validating
+  raw sources.
+
+**Originating layer:** Level 4 derivative renderers.
+**Consumers to enforce:** every derivative renderer (carousel, social, email, blog, exec
+summary, ad copy). Becomes load-bearing when the Derivative Engine ships. See
+docs/content-architecture.md for the full content hierarchy this sits in.
 
 ---
 

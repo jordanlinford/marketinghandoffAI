@@ -1056,13 +1056,23 @@ function renderRuns() {
     return;
   }
   for (const r of state.runs) {
+    // Trust pill — same source + class as the HQ Recent Runs row
+    // and the library list pill. Single state, identical surfaces.
+    const trustPill = r.report_trust_state
+      ? el('span', { class: 'badge trust-' + r.report_trust_state,
+                      style: 'margin-left:6px;',
+                      title: 'Trust layer state — not human approval' },
+          r.report_trust_state.replace(/_/g, ' '))
+      : null;
+    const topRow = el('div', { class: 'top' },
+      el('span', {}, r.display_label || r.agent_key),
+      el('span', { class: `badge ${r.status}` }, r.status),
+    );
+    if (trustPill) topRow.appendChild(trustPill);
     const item = el('div',
       { class: 'run-item' + (r.id === state.selectedRunId ? ' selected' : ''),
         onclick: () => selectRun(r.id) },
-      el('div', { class: 'top' },
-        el('span', {}, r.display_label || r.agent_key),
-        el('span', { class: `badge ${r.status}` }, r.status),
-      ),
+      topRow,
       el('div', { class: 'meta' }, `${fmtTime(r.created_at)} · ${fmtCost(r.cost_usd)} · ${r.trigger}`),
     );
     list.appendChild(item);
@@ -3614,8 +3624,28 @@ function _renderGeneratedAssets(c) {
   box.appendChild(el('h4', {},
     `Generated assets (${(c.generated_asset_ids || []).length})`));
   const ids = c.generated_asset_ids || [];
+  // generated_assets_meta carries per-asset kind + trust_state for
+  // reports. Same source as the library list pill and run trust pill:
+  // compact_trust_state() on body.trust_checks. We read it here
+  // verbatim — no recomputation.
+  const metaById = {};
+  for (const m of (c.generated_assets_meta || [])) {
+    metaById[m.id] = m;
+  }
   const ul = el('ul', { class: 'recs' });
   for (const aid of ids) {
+    const meta = metaById[aid] || {};
+    const isReport = meta.kind === 'report';
+    const trustPill = (isReport && meta.trust_state)
+      ? el('span', { class: 'badge trust-' + meta.trust_state,
+                      style: 'margin-left:6px;',
+                      title: 'Trust layer state — not human approval' },
+          meta.trust_state.replace(/_/g, ' '))
+      : null;
+    const kindBadge = meta.kind
+      ? el('span', { class: 'badge kind-' + meta.kind,
+                      style: 'margin-left:6px;' }, meta.kind)
+      : null;
     const li = el('li', { style: 'cursor:pointer;',
       onclick: () => {
         // Hop to the library detail for this asset.
@@ -3623,14 +3653,21 @@ function _renderGeneratedAssets(c) {
         setTimeout(async () => {
           try {
             const detail = await api(`/api/assets/content/${aid}`);
-            openAssetDetail({ id: aid, asset_kind: 'content',
+            openAssetDetail({ id: aid,
+              asset_kind: isReport ? 'report' : 'content',
               title: detail.title, asset_type: ((detail.body || {})
                 .content || {}).content_type || 'content',
               created_at: detail.created_at,
               product_name: null, status: detail.status });
           } catch (e) {}
         }, 100);
-      } }, `${aid.slice(0, 8)}… → open in Library`);
+      } });
+    li.appendChild(document.createTextNode(
+      meta.title
+        ? `${meta.title}`
+        : `${aid.slice(0, 8)}… → open in Library`));
+    if (kindBadge) li.appendChild(kindBadge);
+    if (trustPill) li.appendChild(trustPill);
     ul.appendChild(li);
   }
   box.appendChild(ul);
@@ -4755,12 +4792,24 @@ async function loadCommandCenter() {
       el('div', {}, 'No runs yet. Trigger one from Create.')));
   } else {
     for (const r of recentRuns) {
+      // Trust pill mirrors the library list pill EXACTLY — same
+      // .badge.trust-{state} class, same value source (RunOut.
+      // report_trust_state, computed via compact_trust_state on the
+      // produced report's body.trust_checks). Single source, no
+      // recomputation in the UI.
+      const trustPill = r.report_trust_state
+        ? el('span', { class: 'badge trust-' + r.report_trust_state,
+                        style: 'margin-left:6px;',
+                        title: 'Trust layer state — not human approval' },
+            r.report_trust_state.replace(/_/g, ' '))
+        : null;
       runsCard.appendChild(el('div', { style: 'margin:6px 0; cursor:pointer;',
         onclick: () => { switchView('create'); selectRun(r.id); } },
         el('div', {},
           r.display_label || r.agent_key,
           el('span', { class: `badge ${r.status}`,
-            style: 'margin-left:8px;' }, r.status)),
+            style: 'margin-left:8px;' }, r.status),
+          trustPill),
         el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
           `${fmtTime(r.created_at)} · ${fmtCost(r.cost_usd)}` +
           (r.product_id ? ' · product-scoped' : '')),

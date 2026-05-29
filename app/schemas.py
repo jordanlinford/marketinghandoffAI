@@ -143,9 +143,16 @@ class RunOut(BaseModel):
     # agents render their agent_key as before. Pulled from task (no
     # new data — just shaped for the UI).
     display_label: str | None = None
+    # report_trust_state — for report_composer runs that produced a
+    # report artifact, this carries the SAME trust state the library
+    # list pill and the detail banner show. Single source via
+    # `compact_trust_state(body.trust_checks)` — never recomputed.
+    # Populated by list_runs at projection time; None for non-report
+    # runs and for report runs whose artifact hasn't landed yet.
+    report_trust_state: str | None = None
 
     @classmethod
-    def of(cls, r) -> "RunOut":
+    def of(cls, r, *, report_trust_state: str | None = None) -> "RunOut":
         task = r.task or {}
         display_label = None
         if r.agent_key == "report_composer":
@@ -167,6 +174,7 @@ class RunOut(BaseModel):
             product_id=r.product_id,
             created_at=r.created_at.isoformat(),
             display_label=display_label,
+            report_trust_state=report_trust_state,
         )
 
 

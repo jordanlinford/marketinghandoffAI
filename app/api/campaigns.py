@@ -223,7 +223,41 @@ def get_campaign(campaign_id: str,
     _maybe_flip_generating_to_active(c)
     db.commit()
     db.refresh(c)
-    return _serialize(c)
+    out = _serialize(c)
+    # generated_assets_meta — minimal per-asset projection for the
+    # campaign detail view. Carries the asset's kind + (for reports)
+    # its trust_state via the SAME compact_trust_state function the
+    # library list pill and the detail banner use. Single source.
+    # Cheap: one bulk query for all generated_asset_ids.
+    asset_ids = list(c.generated_asset_ids or [])
+    meta: list[dict] = []
+    if asset_ids:
+        from app.reports.trust_view import compact_trust_state
+        arts = db.execute(
+            scoped(Artifact, user.org_id).where(Artifact.id.in_(asset_ids))
+        ).scalars().all()
+        by_id = {a.id: a for a in arts}
+        # Preserve the order generated_asset_ids was stored in.
+        for aid in asset_ids:
+            a = by_id.get(aid)
+            if a is None:
+                meta.append({"id": aid, "kind": None,
+                              "title": None, "trust_state": None,
+                              "status": None})
+                continue
+            body = a.body or {}
+            ct = (body.get("content") or {}).get("content_type") or ""
+            is_report = (a.type == "report_draft"
+                          or ct.startswith("report_"))
+            kind = "report" if is_report else "content"
+            trust_state = (compact_trust_state(body.get("trust_checks"))
+                            if is_report else None)
+            meta.append({
+                "id": aid, "kind": kind, "title": a.title,
+                "status": a.status, "trust_state": trust_state,
+            })
+    out["generated_assets_meta"] = meta
+    return out
 
 
 # ---- Patch (Step 3 + general edits) --------------------------------------

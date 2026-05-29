@@ -62,8 +62,29 @@ def trigger_run(body: TriggerRunIn, user: User = Depends(current_user),
 
 @router.get("", response_model=list[RunOut])
 def list_runs(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    runs = db.execute(scoped(Run, user.org_id).order_by(Run.created_at.desc())).scalars().all()
-    return [RunOut.of(r) for r in runs]
+    runs = list(db.execute(
+        scoped(Run, user.org_id).order_by(Run.created_at.desc())
+    ).scalars().all())
+    # For report_composer runs that produced a report, look up the
+    # artifact ONCE in bulk and map run_id → trust_state via the SAME
+    # compact_trust_state() function the library list pill + detail
+    # banner use. Single source — never recomputed per surface.
+    report_run_ids = [r.id for r in runs
+                       if r.agent_key == "report_composer"]
+    trust_by_run: dict[str, str | None] = {}
+    if report_run_ids:
+        from app.reports.trust_view import compact_trust_state
+        arts = db.execute(
+            scoped(Artifact, user.org_id).where(
+                Artifact.run_id.in_(report_run_ids),
+                Artifact.type == "report_draft",
+            )
+        ).scalars().all()
+        for a in arts:
+            tc = (a.body or {}).get("trust_checks") or {}
+            trust_by_run[a.run_id] = compact_trust_state(tc)
+    return [RunOut.of(r, report_trust_state=trust_by_run.get(r.id))
+            for r in runs]
 
 
 @router.get("/{run_id}")

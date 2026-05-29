@@ -5361,6 +5361,185 @@ def main() -> None:
               "fallback returns [] (quiet empty); no fabricated "
               "industry framing, no alert card.")
 
+        # (17) FIRST-CLASS REPORT STATES — single-source across every
+        # surface. The §6 Principle in surface form: report state is
+        # a VIEW of trust truth (compact_trust_state), never a stored
+        # field. Every surface that lists or shows a report MUST
+        # render the same state for the same report at the same
+        # moment. Flipping approval_blocked in the artifact's body
+        # MUST flip ALL surfaces together — no per-surface caching
+        # that can drift.
+        from app.reports.trust_view import compact_trust_state as _cts
+
+        # Use the Report (5) board artifact (rpt_art) which has both a
+        # known trust_state and a known producing run (rpt_run).
+        db.refresh(rpt_art)
+        rb17 = rpt_art.body or {}
+        ground_truth = _cts(rb17.get("trust_checks"))
+        assert ground_truth is not None
+        # Surface A: Library list pill (?asset_kind=report&product_id)
+        lib17 = client.get(
+            f"/api/assets?asset_kind=report&product_id={sl_id}&limit=200",
+            headers=H_ONIT).json()["assets"]
+        lib_row = next((a for a in lib17 if a["id"] == rpt_art.id), None)
+        assert lib_row is not None, "library list MUST include rpt_art"
+        assert lib_row["trust_state"] == ground_truth, (
+            "library pill trust_state MUST equal compact_trust_state(); "
+            f"ground={ground_truth!r} pill={lib_row['trust_state']!r}")
+        # Surface B: Report detail trust_view banner
+        det17 = client.get(
+            f"/api/assets/content/{rpt_art.id}",
+            headers=H_ONIT).json()
+        view17 = det17.get("trust_view") or {}
+        assert view17.get("state") == ground_truth, (
+            "detail banner view.state MUST equal compact_trust_state(); "
+            f"ground={ground_truth!r} view={view17.get('state')!r}")
+        # Surface C: RunOut.report_trust_state (HQ Recent Runs +
+        # Create run list both read this)
+        runs17 = client.get("/api/runs", headers=H_ONIT).json()
+        run_row = next((r for r in runs17 if r["id"] == rpt_run.id), None)
+        assert run_row is not None, "RunOut MUST include rpt_run"
+        assert run_row.get("report_trust_state") == ground_truth, (
+            "RunOut.report_trust_state MUST equal compact_trust_state(); "
+            f"ground={ground_truth!r} run={run_row.get('report_trust_state')!r}")
+        print(f"[OK] Report (17a): same report ({rpt_art.id[:8]}) "
+              f"resolves to state={ground_truth!r} on Library pill + "
+              f"detail banner + RunOut — IDENTICALLY across surfaces.")
+
+        # ---- 17b BEHAVIOR (load-bearing): flipping flips ALL ---------
+        # Mutate the artifact's body.trust_checks.approval_blocked and
+        # confirm every surface flips on the next read. NO per-surface
+        # caching may diverge.
+        original_blocked = rb17.get("trust_checks", {}).get("approval_blocked")
+        flipped_body = dict(rb17)
+        flipped_tc = dict(flipped_body.get("trust_checks") or {})
+        flipped_tc["approval_blocked"] = True
+        flipped_tc["findings"] = list(flipped_tc.get("findings") or []) + [{
+            "severity": "critical", "discipline": "§6",
+            "claim": "synthetic flip", "location": "Test",
+            "block_idx": 0,
+            "issue": "Synthetic for surface-flip test",
+            "recommended_action": "Revert",
+        }]
+        flipped_tc["findings_by_severity"] = {
+            "critical": (flipped_tc.get("findings_by_severity", {}).get("critical", 0) + 1),
+            "warning": flipped_tc.get("findings_by_severity", {}).get("warning", 0),
+            "informational": flipped_tc.get("findings_by_severity", {}).get("informational", 0),
+        }
+        flipped_body["trust_checks"] = flipped_tc
+        rpt_art.body = flipped_body
+        db.commit()
+        db.refresh(rpt_art)
+        new_ground = _cts(rpt_art.body.get("trust_checks"))
+        assert new_ground == "blocked", (
+            "flipping approval_blocked to True MUST shift "
+            "compact_trust_state to 'blocked'. Got: " + str(new_ground))
+        # Re-read every surface; all must show 'blocked' now.
+        lib_flip = client.get(
+            f"/api/assets?asset_kind=report&product_id={sl_id}&limit=200",
+            headers=H_ONIT).json()["assets"]
+        lib_row_flip = next((a for a in lib_flip if a["id"] == rpt_art.id), None)
+        assert lib_row_flip["trust_state"] == "blocked", (
+            "Library pill MUST flip when approval_blocked flips. "
+            "Got: " + str(lib_row_flip["trust_state"]))
+        det_flip = client.get(
+            f"/api/assets/content/{rpt_art.id}",
+            headers=H_ONIT).json()
+        assert (det_flip.get("trust_view") or {}).get("state") == "blocked", (
+            "Detail banner MUST flip with approval_blocked. Got: "
+            + str(det_flip.get("trust_view")))
+        runs_flip = client.get("/api/runs", headers=H_ONIT).json()
+        run_row_flip = next((r for r in runs_flip if r["id"] == rpt_run.id), None)
+        assert run_row_flip["report_trust_state"] == "blocked", (
+            "RunOut.report_trust_state MUST flip with approval_blocked. "
+            "Got: " + str(run_row_flip["report_trust_state"]))
+
+        # Restore original state so subsequent assertions about
+        # rpt_art remain stable across the full smoke run.
+        restored_tc = dict(rpt_art.body.get("trust_checks") or {})
+        restored_tc["approval_blocked"] = bool(original_blocked)
+        restored_tc["findings"] = [f for f in (restored_tc.get("findings") or [])
+                                    if f.get("claim") != "synthetic flip"]
+        restored_tc["findings_by_severity"] = {
+            "critical": max(0, restored_tc.get("findings_by_severity", {}).get(
+                "critical", 1) - 1),
+            "warning": restored_tc.get("findings_by_severity", {}).get("warning", 0),
+            "informational": restored_tc.get("findings_by_severity", {}).get(
+                "informational", 0),
+        }
+        new_body = dict(rpt_art.body or {})
+        new_body["trust_checks"] = restored_tc
+        rpt_art.body = new_body
+        db.commit()
+        db.refresh(rpt_art)
+        assert _cts(rpt_art.body.get("trust_checks")) == ground_truth, (
+            "smoke restore failed — subsequent tests may be unstable")
+        print(f"[OK] Report (17b): BEHAVIOR (load-bearing) — flipping "
+              f"approval_blocked True → ALL surfaces (library pill, "
+              "detail banner, RunOut.report_trust_state) flipped to "
+              "'blocked' together; flipping back restored. Single "
+              "source, no per-surface caching diverged.")
+
+        # ---- 17c Campaign generated_assets_meta carries trust_state -
+        # When a campaign's generated_asset_ids include a report, the
+        # campaign detail's generated_assets_meta entry for that
+        # report MUST carry the same trust_state — same source.
+        # We use the "Memory loop test campaign" (mem_camp from
+        # earlier smoke) and attach rpt_art as a generated asset.
+        mem_camp_id = mem_camp.id
+        # Pin rpt_art as a generated asset of the memory campaign by
+        # stamping its campaign_id back-reference — that's what the
+        # campaign detail endpoint's _refresh_generated_asset_ids
+        # scans for. (Real campaigns wouldn't have reports here today;
+        # the wire is in place for when they do — same source, no
+        # special-case path.)
+        original_campaign_id = rpt_art.campaign_id
+        rpt_art.campaign_id = mem_camp_id
+        db.commit()
+
+        camp_resp = client.get(f"/api/campaigns/{mem_camp_id}",
+                                headers=H_ONIT)
+        assert camp_resp.status_code == 200
+        camp_data = camp_resp.json()
+        meta = camp_data.get("generated_assets_meta") or []
+        meta_by_id = {m["id"]: m for m in meta}
+        assert rpt_art.id in meta_by_id, (
+            "campaign detail MUST surface generated_assets_meta with "
+            "an entry for every generated_asset_id. Got: "
+            + str([m["id"][:8] for m in meta]))
+        rpt_meta = meta_by_id[rpt_art.id]
+        assert rpt_meta["kind"] == "report", (
+            "report asset MUST project kind='report' in campaign meta")
+        assert rpt_meta["trust_state"] == ground_truth, (
+            "Campaign generated_assets_meta trust_state MUST equal "
+            "compact_trust_state(); ground=" + str(ground_truth)
+            + " camp=" + str(rpt_meta["trust_state"]))
+        print(f"[OK] Report (17c): campaign generated_assets_meta — "
+              f"report entry carries kind='report' + trust_state="
+              f"{rpt_meta['trust_state']!r}, identical to the library "
+              "pill + detail banner + RunOut for the same artifact.")
+        # Restore the back-reference so subsequent tests don't see
+        # rpt_art tied to a campaign it wasn't originally tied to.
+        rpt_art.campaign_id = original_campaign_id
+        db.commit()
+
+        # ---- 17d DETERMINISM across surfaces -------------------------
+        # Calling each surface twice yields the same state both times
+        # (no caching of a derived value that drifts). We already know
+        # the value is right; we just confirm it's stable.
+        lib_2 = client.get(
+            f"/api/assets?asset_kind=report&product_id={sl_id}",
+            headers=H_ONIT).json()["assets"]
+        lib_row_2 = next((a for a in lib_2 if a["id"] == rpt_art.id), None)
+        runs_2 = client.get("/api/runs", headers=H_ONIT).json()
+        run_row_2 = next((r for r in runs_2 if r["id"] == rpt_run.id), None)
+        assert lib_row_2["trust_state"] == lib_row["trust_state"]
+        assert run_row_2["report_trust_state"] == run_row["report_trust_state"]
+        print(f"[OK] Report (17d): determinism — back-to-back reads on "
+              f"each surface yield the same trust_state; no surface "
+              "stores or caches a value that can drift from "
+              "compact_trust_state().")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

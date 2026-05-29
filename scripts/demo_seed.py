@@ -182,31 +182,47 @@ def _induce_warning(db, art: Artifact) -> None:
 
 
 def _induce_blocked(db, art: Artifact) -> None:
-    """Remove TWO ledger entries to provoke unresolved markers in the
-    body. Re-validation fires two CRITICAL §6 findings — a real ledger
-    drift, not a synthetic finding. approval_blocked → pending_review.
+    """Remove the LEAST-cited ledger entry from the body's evidence
+    ledger. Re-validation fires 2-4 CRITICAL §6 findings — one per
+    occurrence of the removed id, plus any adjacent numbers that lose
+    their proximity-bound marker. A real ledger drift caught by the
+    real validator, NOT synthetic findings injected to hit a count.
+
+    Why "least-cited" instead of "first two": removing an entry cited
+    N times produces ~2N findings (one unresolved-marker finding + one
+    unbound-number finding per occurrence). Removing two heavily-cited
+    entries cascades into a ~16-finding wall that a viewer reads as a
+    malfunction rather than as the system catching a specific fixable
+    problem. We want 2-4 — small, legible, one-bug-shaped.
     """
+    from collections import Counter
+
     body = dict(art.body or {})
     ledger_entries = list(body.get("evidence_ledger") or [])
     content = body.get("content") or {}
     scope = (content.get("metadata") or {}).get("scope") or {}
 
-    # Collect every marker id used in body so we know which entries
-    # are actually cited (removing a non-cited entry would produce no
-    # finding).
     blocks = content.get("blocks") or []
     cited_ids: list[str] = []
     for b in blocks:
         text = (b or {}).get("text") or ""
         cited_ids.extend(_MARKER_RE.findall(text))
-    seen = set()
-    distinct_cited = [i for i in cited_ids if not (i in seen or seen.add(i))]
-    to_remove = set(distinct_cited[:2])
-    if len(to_remove) < 2:
-        # Couldn't find 2 distinct cited entries — fall back to
-        # removing the first two ledger entries by position.
-        for e in ledger_entries[:2]:
-            to_remove.add(e["id"])
+    citation_count = Counter(cited_ids)
+    # Rank ledger entries by how many times their id appears in body
+    # markers. Prefer the smallest count (1 → ~2 findings; 2 → ~4
+    # findings; both safely inside the 2-4 target band). Entries
+    # cited 0 times aren't useful — removing them produces no
+    # findings, so we filter them out.
+    cited_ledger = [e for e in ledger_entries
+                    if citation_count.get(e["id"], 0) >= 1]
+    if not cited_ledger:
+        # Fallback: nothing in the ledger is actually cited in the
+        # body — pick the first entry and remove it (low chance, but
+        # keep behavior deterministic).
+        to_remove = {ledger_entries[0]["id"]} if ledger_entries else set()
+    else:
+        cited_ledger.sort(key=lambda e: citation_count[e["id"]])
+        to_remove = {cited_ledger[0]["id"]}
 
     new_ledger = [e for e in ledger_entries if e["id"] not in to_remove]
     body["evidence_ledger"] = new_ledger
@@ -306,9 +322,30 @@ def main() -> None:
         ]
         for slug, audience, scope, induce in plan:
             title = _DEMO_TITLES[slug]
-            if _exists_by_title(db, onit.id, product.id, title):
-                print(f"Demo seed: {slug!r} already exists — skipping.")
-                continue
+            existing = _exists_by_title(db, onit.id, product.id, title)
+            if existing is not None:
+                # Idempotency exception: the blocked report's tuning
+                # is a moving target — if the existing artifact has
+                # too many critical findings (the pre-tweak shape),
+                # re-run the induction on the same body so the live
+                # demo lands in the 2-4 band. The body's other content
+                # is unchanged.
+                if slug == "sales_blocked":
+                    tc = (existing.body or {}).get("trust_checks") or {}
+                    n_crit = (tc.get("findings_by_severity") or {}).get(
+                        "critical", 0)
+                    if 2 <= n_crit <= 4:
+                        print(f"Demo seed: {slug!r} already in target "
+                              f"band ({n_crit} critical) — skipping.")
+                        continue
+                    print(f"Demo seed: {slug!r} has {n_crit} critical "
+                          f"findings (outside 2-4 target); deleting + "
+                          f"regenerating.")
+                    db.delete(existing)
+                    db.commit()
+                else:
+                    print(f"Demo seed: {slug!r} already exists — skipping.")
+                    continue
             run = _trigger_report(db, onit.id, product.id, report_reg.id,
                                    user.id, audience, scope)
             if run.status != "succeeded":

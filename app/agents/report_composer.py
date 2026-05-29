@@ -176,8 +176,15 @@ class ReportComposerAgent(Agent):
         title = (f"{audience_titles.get(audience, audience.title())} — "
                  f"{scope_label}")
 
+        # Reports are first-class assets: top-level Artifact.type is
+        # "report_draft" so the Library kind filter resolves off the
+        # same field every other kind uses (content/document/brief).
+        # The block-based body shape is reused — reports inherit the
+        # .md download, grade pill, and approval gate that content has,
+        # for free. Audience (board / ceo_weekly / sales_leadership)
+        # still lives in body.content.content_type for badge text.
         art = ArtifactDraft(
-            type="content_draft",
+            type="report_draft",
             title=title, body=body, citations=cites,
             status=artifact_status,
             parent_id=task.get("parent_artifact_id"),

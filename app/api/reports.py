@@ -150,9 +150,13 @@ def list_reports(audience: str | None = None,
                  limit: int = 100,
                  user: User = Depends(current_user),
                  db: Session = Depends(get_db)) -> list[dict]:
-    """Thin projection over Artifacts with content_type=report_*."""
+    """Thin projection over Artifacts. The kind field (Artifact.type) is
+    now "report_draft" for new reports; legacy reports that still carry
+    type="content_draft" are picked up via the body.content.content_type
+    check below until the backfill catches them on the next API
+    startup."""
     q = scoped(Artifact, user.org_id).where(
-        Artifact.type == "content_draft"
+        Artifact.type.in_(("report_draft", "content_draft"))
     ).order_by(Artifact.created_at.desc())
     if product_id:
         q = q.where(Artifact.product_id == product_id)

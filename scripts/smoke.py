@@ -3896,22 +3896,30 @@ def main() -> None:
         rpt_art = db.execute(
             scoped(Artifact, onit.id)
             .where(Artifact.run_id == rpt_run.id,
-                   Artifact.type == "content_draft")
+                   Artifact.type == "report_draft")
         ).scalar_one()
         assert rpt_art.status == "ready", rpt_art.status
         body = rpt_art.body or {}
         ct = (body.get("content") or {}).get("content_type")
         assert ct == "report_board", f"report content_type must be 'report_board'; got {ct!r}"
-        # Library projection picks it up as content with the report_board asset_type.
+        # Library projection picks it up as a TOP-LEVEL "report" kind —
+        # not a content sub-kind. The filter resolves off the same field
+        # every other kind uses (Artifact.type).
         lib = client.get(
-            f"/api/assets?asset_type_prefix=report_&product_id={sl_id}",
+            f"/api/assets?asset_kind=report&product_id={sl_id}",
             headers=H_ONIT)
         assert lib.status_code == 200, lib.text
-        lib_ids = {x["id"] for x in lib.json()["assets"]}
+        lib_assets = lib.json()["assets"]
+        lib_ids = {x["id"] for x in lib_assets}
         assert rpt_art.id in lib_ids, (
             "report artifact must appear in the Library projection with "
-            "asset_type_prefix=report_")
-        # .md download — same path as content_draft already supports.
+            "asset_kind=report")
+        # All returned assets must be asset_kind=report (the projection
+        # surfaces the top-level kind).
+        for x in lib_assets:
+            assert x["asset_kind"] == "report", (
+                f"asset_kind=report filter returned a non-report: {x}")
+        # .md download — same content path accepts report_draft too.
         dl = client.get(
             f"/api/assets/content/{rpt_art.id}/download?format=md",
             headers=H_ONIT)
@@ -3928,7 +3936,7 @@ def main() -> None:
         rpt_art_v2 = db.execute(
             scoped(Artifact, onit.id)
             .where(Artifact.run_id == rpt_run_v2.id,
-                   Artifact.type == "content_draft")
+                   Artifact.type == "report_draft")
         ).scalar_one()
         assert rpt_art_v2.parent_id == rpt_art.id, (
             "regenerate must produce a child artifact via parent_id chain. "
@@ -3953,7 +3961,7 @@ def main() -> None:
             gated_art = db.execute(
                 scoped(Artifact, onit.id)
                 .where(Artifact.run_id == gated_run.id,
-                       Artifact.type == "content_draft")
+                       Artifact.type == "report_draft")
             ).scalar_one()
             assert gated_art.status == "pending_review", (
                 "gate_all must route reports to pending_review; got "
@@ -4233,7 +4241,7 @@ def main() -> None:
         fut_art = db.execute(
             scoped(Artifact, onit.id)
             .where(Artifact.run_id == fut_run.id,
-                   Artifact.type == "content_draft")
+                   Artifact.type == "report_draft")
         ).scalar_one()
         fut_body_text = "\n".join(
             (b.get("text") or "")
@@ -4248,6 +4256,185 @@ def main() -> None:
               f"renderers emit a stub naming the period, framing memory "
               f"as 'as of today', no delta/attribution language; "
               f"end-to-end agent run lands a future_stub artifact.")
+
+        # (12) REPORT as a top-level kind in the Library — presence +
+        # absence + behavior, per docs/cross-layer-disciplines.md. The
+        # distinction enforced at the origin (body.content.content_type)
+        # is now re-asserted at the consumer boundary (Library filter +
+        # badge) via the existing top-level Artifact.type field.
+        from app.reports.backfill import backfill_report_artifact_type
+
+        # ---- PRESENCE -------------------------------------------------
+        # The report from Report (5) has Artifact.type="report_draft"
+        # and projects as asset_kind="report" via the kind filter.
+        present_resp = client.get(
+            f"/api/assets?asset_kind=report&product_id={sl_id}",
+            headers=H_ONIT)
+        assert present_resp.status_code == 200, present_resp.text
+        present_assets = present_resp.json()["assets"]
+        assert len(present_assets) > 0, (
+            "asset_kind=report filter must return at least the report "
+            "generated in Report (5)")
+        present_asset_types = {a["asset_type"] for a in present_assets}
+        # asset_type carries the audience slug (report_board / etc.).
+        assert any(t.startswith("report_") for t in present_asset_types), (
+            "report assets must carry an audience-shaped asset_type. Got: "
+            + str(present_asset_types))
+
+        # ---- ABSENCE --------------------------------------------------
+        # Filtering by asset_kind=report returns NO non-report assets.
+        # Filtering by content/document/brief returns NO reports.
+        for a in present_assets:
+            assert a["asset_kind"] == "report", (
+                "asset_kind=report leaked a non-report: " + str(a))
+        for non_report_kind in ("content", "document", "brief"):
+            resp = client.get(
+                f"/api/assets?asset_kind={non_report_kind}&limit=500",
+                headers=H_ONIT)
+            assert resp.status_code == 200
+            for a in resp.json()["assets"]:
+                assert a["asset_kind"] != "report", (
+                    f"asset_kind={non_report_kind} leaked a report: "
+                    + str(a))
+                # Inverse check: a non-report asset must never carry an
+                # asset_type that starts with report_ either (the badge
+                # logic depends on the kind being right).
+                if non_report_kind == "content":
+                    assert not (a.get("asset_type") or "").startswith("report_"), (
+                        "content asset must not carry a report_* asset_type "
+                        "after backfill: " + str(a))
+
+        # ---- BEHAVIOR — backfill picks up legacy reports --------------
+        # Simulate a pre-fix legacy report: write an Artifact with
+        # type="content_draft" but body.content.content_type=report_board.
+        # This is the exact shape the confabulated July report had in
+        # the live DB before this build. The kind filter must NOT see
+        # it (yet) — and after running the backfill, it MUST appear
+        # under asset_kind=report.
+        legacy_art = Artifact(
+            org_id=onit.id, run_id=rpt_run.id, product_id=sl_id,
+            type="content_draft",  # the LEGACY top-level kind
+            title="Legacy board report (pre-backfill simulation)",
+            body={
+                "content": {
+                    "content_type": "report_board",  # audience visible
+                                                      # ONLY in body JSON
+                    "blocks": [{"kind": "body", "text": "Legacy body."}],
+                    "metadata": {"audience": "Board update"},
+                },
+                "provenance": {"intelligence_scope": {}},
+                "grade": {"status": "ungraded", "overall": None,
+                          "per_criterion": [], "suggestions": []},
+            },
+            citations=[],
+            status="ready",
+            grade={"status": "ungraded", "overall": None,
+                   "per_criterion": [], "suggestions": []},
+        )
+        db.add(legacy_art)
+        db.commit(); db.refresh(legacy_art)
+        legacy_id = legacy_art.id
+
+        # Before backfill: filter by asset_kind=report should NOT see
+        # this artifact, because the kind filter resolves off the
+        # top-level Artifact.type (which is "content_draft" here), not
+        # the nested body JSON. This is the load-bearing check — the
+        # filter MUST operate on the top-level field, not body JSON.
+        pre_resp = client.get(
+            f"/api/assets?asset_kind=report&product_id={sl_id}&limit=500",
+            headers=H_ONIT)
+        pre_ids = {a["id"] for a in pre_resp.json()["assets"]}
+        assert legacy_id not in pre_ids, (
+            "Legacy artifact (type=content_draft, body content_type="
+            "report_board) must NOT match asset_kind=report before "
+            "backfill — the filter must operate on the top-level kind "
+            "field, not nested body JSON.")
+
+        # Run the backfill (it's the same function the API startup
+        # invokes). Idempotent — calling twice should also yield zero
+        # additional updates.
+        n_updated = backfill_report_artifact_type(db)
+        assert n_updated >= 1, (
+            f"backfill must find the legacy report; got {n_updated} updates")
+        db.refresh(legacy_art)
+        assert legacy_art.type == "report_draft", (
+            f"backfill must rewrite type to 'report_draft'; got "
+            f"{legacy_art.type!r}")
+        n_again = backfill_report_artifact_type(db)
+        assert n_again == 0, (
+            f"backfill must be idempotent; second run did {n_again} updates")
+
+        # After backfill: asset_kind=report DOES include the legacy
+        # artifact. The filter still operates on the top-level field —
+        # what changed is the field's value, not the filter logic.
+        post_resp = client.get(
+            f"/api/assets?asset_kind=report&product_id={sl_id}&limit=500",
+            headers=H_ONIT)
+        post_ids = {a["id"] for a in post_resp.json()["assets"]}
+        assert legacy_id in post_ids, (
+            "after backfill, legacy artifact MUST appear under "
+            "asset_kind=report. The filter resolves via top-level field.")
+
+        # ---- BEHAVIOR — unresolvable content_type → unknown kind ------
+        # An Artifact with type="report_draft" but body.content.content_type
+        # missing/garbage cannot have its audience resolved. Per §5 of
+        # the cross-layer disciplines (unknown vs. zero), it surfaces
+        # as asset_kind="unknown" rather than silently bucketed as
+        # "report" (which would imply an audience we can't name) or
+        # silently dropped (which would hide the inconsistent state).
+        broken_art = Artifact(
+            org_id=onit.id, run_id=rpt_run.id, product_id=sl_id,
+            type="report_draft",  # claims to be a report
+            title="Broken report (no audience)",
+            body={
+                "content": {
+                    "content_type": "report_unknown_audience",  # not a real audience
+                    "blocks": [{"kind": "body", "text": "x"}],
+                    "metadata": {},
+                },
+            },
+            citations=[],
+            status="ready",
+        )
+        db.add(broken_art)
+        db.commit(); db.refresh(broken_art)
+        broken_id = broken_art.id
+
+        # When listed under ANY kind, the projection surfaces it as
+        # asset_kind="unknown" — never as "report" (we can't resolve
+        # the audience) and never as a non-report default.
+        any_resp = client.get(
+            f"/api/assets?asset_kind=report&product_id={sl_id}&limit=500",
+            headers=H_ONIT)
+        broken_proj = next((a for a in any_resp.json()["assets"]
+                             if a["id"] == broken_id), None)
+        assert broken_proj is not None, (
+            "broken report (type=report_draft) must still surface when "
+            "filtering by asset_kind=report — it lives in that kind's "
+            "type-set, just with an unresolved audience.")
+        assert broken_proj["asset_kind"] == "unknown", (
+            "unresolvable content_type MUST render as asset_kind=unknown "
+            "(§5 discipline). Got: " + str(broken_proj))
+        assert broken_proj["asset_type"] == "unknown", (
+            "unresolvable audience MUST render as asset_type=unknown. "
+            "Got: " + str(broken_proj))
+
+        # Clean up the two synthetic artifacts so they don't leak into
+        # other tests further down (defensive — there are no further
+        # tests, but keeps the DB tidy for the smoke teardown).
+        db.delete(broken_art); db.delete(legacy_art); db.commit()
+
+        print(f"[OK] Report (12): top-level 'report' kind — Library "
+              f"filter resolves off Artifact.type, not body JSON. "
+              f"Presence: asset_kind=report returns reports with audience "
+              f"asset_type (e.g. report_board). Absence: content/document/"
+              f"brief never include reports, content never has report_* "
+              f"asset_type. Behavior: backfill rewrites a legacy "
+              f"(content_draft + body content_type=report_board) artifact "
+              f"to type=report_draft (idempotent on rerun); after, the "
+              f"asset_kind=report filter sees it. Unresolvable "
+              f"content_type renders as asset_kind=unknown, not "
+              f"silently bucketed.")
 
         print("[OK] Smoke test passed.")
     finally:

@@ -36,6 +36,20 @@ _UI_FILE = Path(__file__).parent / "static" / "ui.html"
 def _startup():
     if settings.is_sqlite:  # dev convenience; prod runs sql/schema.sql explicitly
         create_all()
+    # One-time idempotent backfill: legacy reports (Artifact.type=
+    # content_draft with body.content.content_type=report_*) get
+    # promoted to type="report_draft" so the Library kind filter +
+    # badge can resolve them off the top-level field. Runs every
+    # startup; a no-op once everything's migrated.
+    from app.db import SessionLocal
+    from app.reports.backfill import backfill_report_artifact_type
+    _db = SessionLocal()
+    try:
+        n = backfill_report_artifact_type(_db)
+        if n:
+            print(f"[startup] Backfilled report Artifact.type for {n} row(s).")
+    finally:
+        _db.close()
 
 
 @app.get("/healthz")

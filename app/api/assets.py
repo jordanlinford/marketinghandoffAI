@@ -45,7 +45,16 @@ router = APIRouter(prefix="/api/assets", tags=["assets"])
 # Artifact types that count as content assets (drafts + idea lists).
 _CONTENT_TYPES = ("content_draft", "content_ideas")
 _BRIEF_TYPE = "market_brief"
-_KINDS = ("content", "document", "brief")
+# Reports are a top-level kind alongside content/document/brief. The
+# stored Artifact.type for a report is "report_draft" — the body still
+# carries body.content.content_type (report_board / report_ceo_weekly /
+# report_sales_leadership) for audience, but the kind filter resolves
+# off the top-level type. Same field every other kind uses; no new
+# parallel field added.
+_REPORT_TYPE = "report_draft"
+_REPORT_AUDIENCES = ("report_board", "report_ceo_weekly",
+                     "report_sales_leadership")
+_KINDS = ("content", "document", "brief", "report")
 _DEFAULT_LIMIT = 50
 
 
@@ -92,6 +101,47 @@ def _brief_text_blob(art: Artifact) -> str:
 
 def _doc_text_blob(d: ProductDocument) -> str:
     return " ".join(filter(None, [d.filename or "", d.extracted_text or ""]))
+
+
+def _project_report(art: Artifact, products: dict, cost_by_run: dict) -> dict:
+    """Projection for report artifacts.
+
+    asset_kind is "report" when the audience resolves cleanly via
+    body.content.content_type. When the content_type is missing or
+    isn't one of the known report audiences, we fall back to asset_kind
+    = "unknown" — the §5 (unknown vs. zero) discipline applied to kind.
+    A defensive bug catcher: after backfill the inconsistent state
+    shouldn't exist, but if it does we surface it rather than silently
+    bucketing as report-with-no-audience.
+    """
+    body = art.body or {}
+    content = body.get("content") or {}
+    metadata = content.get("metadata") or {}
+    ct = (content.get("content_type") or "").strip()
+    if ct in _REPORT_AUDIENCES:
+        asset_kind = "report"
+        # asset_type carries the audience slug (board / ceo_weekly /
+        # sales_leadership) — what the UI badges with.
+        asset_type = ct
+    else:
+        asset_kind = "unknown"
+        asset_type = "unknown"
+    return {
+        "id": art.id,
+        "asset_kind": asset_kind,
+        "asset_type": asset_type,
+        "title": art.title or metadata.get("topic") or "Untitled report",
+        "product_id": art.product_id,
+        "product_name": products.get(art.product_id) if art.product_id else None,
+        "status": art.status,
+        "campaign": art.utm_campaign,
+        "created_at": art.created_at.isoformat() if art.created_at else None,
+        "updated_at": art.created_at.isoformat() if art.created_at else None,
+        "cost_usd": cost_by_run.get(art.run_id),
+        "grade": (art.grade or {}).get("overall") if art.grade else None,
+        "source_ref": {"table": "artifacts", "id": art.id,
+                       "run_id": art.run_id, "artifact_type": art.type},
+    }
 
 
 def _project_content(art: Artifact, products: dict, cost_by_run: dict) -> dict:
@@ -215,16 +265,22 @@ def list_assets(
 
     projected: list[dict] = []
     run_ids: set[str] = set()
-    # ---- Fetch artifacts (content + brief paths share this) -----------
-    if asset_kind != "document":
+    # ---- Fetch artifacts (content + brief + report paths share this) ----
+    if asset_kind in (None, "content", "brief", "report"):
         art_q = scoped(Artifact, user.org_id)
         # Filter artifact types up front so we don't drag every artifact
-        # type into Python only to throw most away.
+        # type into Python only to throw most away. The kind filter
+        # resolves off the TOP-LEVEL Artifact.type — that's what the
+        # spec calls the "existing asset-kind field" the dropdown
+        # binds to. body.content.content_type is the audience slug,
+        # consulted only inside the projection for badge text.
         types_wanted: list[str] = []
         if asset_kind in (None, "content"):
             types_wanted.extend(_CONTENT_TYPES)
         if asset_kind in (None, "brief"):
             types_wanted.append(_BRIEF_TYPE)
+        if asset_kind in (None, "report"):
+            types_wanted.append(_REPORT_TYPE)
         art_q = art_q.where(Artifact.type.in_(types_wanted))
         if product_id:
             art_q = art_q.where(Artifact.product_id == product_id)
@@ -255,9 +311,20 @@ def list_assets(
                     continue
                 run_ids.add(a.run_id)
                 projected.append(("__brief__", a))
+            elif a.type == _REPORT_TYPE:
+                # asset_type, when supplied, narrows to a specific
+                # audience (e.g. ?asset_type=report_board).
+                ct = (a.body or {}).get("content", {}) \
+                    .get("content_type", "") or ""
+                if asset_type and asset_type not in (ct, _REPORT_TYPE):
+                    continue
+                if asset_type_prefix and not ct.startswith(asset_type_prefix):
+                    continue
+                run_ids.add(a.run_id)
+                projected.append(("__report__", a))
 
     # ---- Fetch documents ---------------------------------------------
-    if asset_kind != "content" and asset_kind != "brief":
+    if asset_kind in (None, "document"):
         # Documents excluded when filtering by campaign (they don't have one).
         if not campaign:
             doc_q = scoped(ProductDocument, user.org_id)
@@ -288,6 +355,16 @@ def list_assets(
             asset = _project_brief(obj, products, cost_by_run)
             if needle and needle not in _brief_text_blob(obj).lower():
                 continue
+        elif tag == "__report__":
+            asset = _project_report(obj, products, cost_by_run)
+            # Reports use the same body shape as content_drafts — reuse
+            # the content text blob for search.
+            if needle and needle not in _content_text_blob(obj).lower():
+                continue
+            # Defensive: when asset_kind resolves to "unknown" the user
+            # asked for "report" but the artifact's content_type wasn't
+            # a known audience. We keep it in the result set (it's still
+            # an artifact of type=report_draft) but flagged.
         else:
             asset = _project_document(obj, products)
             if needle and needle not in _doc_text_blob(obj).lower():
@@ -303,10 +380,17 @@ def list_assets(
 
 # ---- Detail endpoints (native shape per kind) -----------------------------
 def _load_content(db: Session, org_id: str, artifact_id: str) -> Artifact:
+    # Reports share the content_draft body shape — same block-based
+    # structure, same grade attached, same .md download path. The URL
+    # is /api/assets/content/{id} for both so the existing detail +
+    # download paths just work. The Library projection still surfaces
+    # reports as asset_kind="report" so the UI badge + filter resolve
+    # correctly via the top-level Artifact.type field.
+    accepted_types = _CONTENT_TYPES + (_REPORT_TYPE,)
     art = db.execute(
         scoped(Artifact, org_id).where(
             Artifact.id == artifact_id,
-            Artifact.type.in_(_CONTENT_TYPES))
+            Artifact.type.in_(accepted_types))
     ).scalar_one_or_none()
     if art is None:
         raise HTTPException(404, "Content asset not found")

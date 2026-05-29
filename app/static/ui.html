@@ -1820,15 +1820,15 @@ async function generateReport() {
 }
 
 async function openReportDetail(artifactId) {
-  // Reports are content_draft assets — reuse the Library's detail view
-  // (markdown + grade + regenerate-with-critique + download all live
-  // there). Hop to the Library, then open the asset detail.
+  // Reports are first-class assets with their own kind ("report") —
+  // reuse the Library's detail view, passing asset_kind="report" so
+  // the rose REPORT badge resolves correctly. The URL routing shim
+  // inside openAssetDetail handles the /content/ vs /report/ path
+  // detail (both share the same block-based body shape).
   switchView('library');
-  // Defer slightly so the Library view's onEnter has time to populate
-  // its filters and asset list.
   setTimeout(() => {
     if (typeof openAssetDetail === 'function') {
-      openAssetDetail({ id: artifactId, asset_kind: 'content' });
+      openAssetDetail({ id: artifactId, asset_kind: 'report' });
     }
   }, 250);
 }
@@ -2571,15 +2571,10 @@ async function fetchLibraryList() {
   const productFilter = document.getElementById('lib-product').value;
   if (productFilter) params.set('product_id', productFilter);
   const kind = document.getElementById('lib-kind').value;
-  // "report" is a UI sub-kind of content — translate it into
-  // asset_kind=content + asset_type_prefix=report_ so the API filters
-  // to the report content_types specifically.
-  if (kind === 'report') {
-    params.set('asset_kind', 'content');
-    params.set('asset_type_prefix', 'report_');
-  } else if (kind) {
-    params.set('asset_kind', kind);
-  }
+  // Reports are now a top-level kind alongside content/document/brief
+  // — the API resolves them via the same Artifact.type field, no
+  // body-JSON prefix workaround needed.
+  if (kind) params.set('asset_kind', kind);
   const type = document.getElementById('lib-type').value.trim();
   if (type) params.set('asset_type', type);
   const status = document.getElementById('lib-status').value.trim();
@@ -2618,10 +2613,6 @@ async function fetchLibraryList() {
   }
 }
 
-function _isReportAssetType(asset_type) {
-  return typeof asset_type === 'string' && asset_type.startsWith('report_');
-}
-
 function _reportAudienceLabel(asset_type) {
   // report_board → "Board", report_ceo_weekly → "CEO weekly", etc.
   const k = (asset_type || '').replace(/^report_/, '');
@@ -2631,16 +2622,16 @@ function _reportAudienceLabel(asset_type) {
 }
 
 function _renderAssetCard(a) {
-  // Reports are a sub-kind of content but visually distinct — they're
-  // not the same kind of asset as a draft email or ad. Show a REPORT
-  // badge (kind-report color) when asset_type starts with "report_",
-  // with a tooltip naming which audience.
-  const isReport = _isReportAssetType(a.asset_type);
-  const kindBadge = isReport
-    ? el('span', { class: 'badge kind-report',
-                    title: `Audience: ${_reportAudienceLabel(a.asset_type)}` },
-        'report')
-    : el('span', { class: `badge kind-${a.asset_kind}` }, a.asset_kind);
+  // Kind badge resolves directly from asset_kind — which the API now
+  // sets to "report" (top-level) for report artifacts. The audience
+  // (board / ceo_weekly / sales_leadership) is the asset_type, surfaced
+  // in the tooltip + sub line.
+  const kindBadge = el('span',
+    { class: `badge kind-${a.asset_kind}`,
+      title: a.asset_kind === 'report'
+        ? `Audience: ${_reportAudienceLabel(a.asset_type)}`
+        : a.asset_kind },
+    a.asset_kind);
   const statusBadge = a.status
     ? el('span', { class: `badge ${a.status}` }, a.status)
     : null;
@@ -2649,7 +2640,7 @@ function _renderAssetCard(a) {
   const cost = (a.cost_usd != null && a.cost_usd > 0)
     ? ` · ${fmtCost(a.cost_usd)}` : '';
   const camp = a.campaign ? ` · campaign=${a.campaign}` : '';
-  const typeStr = isReport
+  const typeStr = a.asset_kind === 'report'
     ? _reportAudienceLabel(a.asset_type) : (a.asset_type || '—');
   const card = el('div',
     { class: 'proposal', style: 'cursor:pointer;',
@@ -2672,7 +2663,13 @@ async function openAssetDetail(asset) {
   _libState.selectedAssetKind = asset.asset_kind;
   const root = document.getElementById('lib-detail');
   root.innerHTML = '<div class="setup-status">Loading…</div>';
-  const url = `/api/assets/${asset.asset_kind}/${asset.id}`;
+  // Reports share the block-based body shape with content; the existing
+  // /api/assets/content/{id} detail + download path accepts report_draft
+  // too. Route the URL through content to avoid a parallel set of
+  // /report endpoints — same projection, same body, just a different
+  // top-level kind for filtering + badging.
+  const urlKind = asset.asset_kind === 'report' ? 'content' : asset.asset_kind;
+  const url = `/api/assets/${urlKind}/${asset.id}`;
   let detail;
   try {
     detail = await api(url);
@@ -2688,16 +2685,14 @@ async function openAssetDetail(asset) {
 function _renderAssetDetail(asset, detail) {
   const wrap = el('section', { class: 'panel detail',
     style: 'margin-top:18px;' });
-  const isReport = _isReportAssetType(asset.asset_type);
   const headerKids = [
     asset.title || '(untitled)',
-    isReport
-      ? el('span', { class: 'badge kind-report',
-                      style: 'margin-left:8px;',
-                      title: `Audience: ${_reportAudienceLabel(asset.asset_type)}` },
-          'report')
-      : el('span', { class: `badge kind-${asset.asset_kind}`,
-          style: 'margin-left:8px;' }, asset.asset_kind),
+    el('span', { class: `badge kind-${asset.asset_kind}`,
+        style: 'margin-left:8px;',
+        title: asset.asset_kind === 'report'
+          ? `Audience: ${_reportAudienceLabel(asset.asset_type)}`
+          : asset.asset_kind },
+      asset.asset_kind),
   ];
   // Grade pill in the header for content assets — surfaces "78/100" or
   // an honest "ungraded" so the user always sees the rubric verdict.

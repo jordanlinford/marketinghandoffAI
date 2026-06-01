@@ -130,6 +130,9 @@
   .badge.kind-buyer_guide { background: #1a2a3a; color: #a7c3e3; }
   /* Solution Guide — Level-3 anchor. Olive. */
   .badge.kind-solution_guide { background: #2e3a14; color: #d2e3a7; }
+  /* Exec Summary — Level-4 derivative. Plum. Distinguishable from
+     the anchor palette so derivatives don't read as a 5th anchor. */
+  .badge.kind-exec_summary { background: #3a1a3a; color: #e3a7c3; }
   /* Trust visibility surfaces — distinct, non-debug treatment per spec.
      Passed, passed-with-warnings, and blocked each get their own color
      so a quick glance at the banner says "approval permitted by the
@@ -622,6 +625,7 @@
           <option value="whitepaper">whitepaper</option>
           <option value="buyer_guide">buyer guide</option>
           <option value="solution_guide">solution guide</option>
+          <option value="exec_summary">exec summary</option>
           <option value="document">document</option>
           <option value="brief">brief</option>
         </select></div>
@@ -2858,49 +2862,82 @@ function _reportAudienceLabel(asset_type) {
   return map[k] || k;
 }
 
-// Every Level-3 anchor surfaces under the same projection (Library
-// pill + detail banner + RunOut). _ANCHOR_KIND_LABELS is the SINGLE
-// JS-side source for human-readable names; extend it as new anchors
-// register. The CSS badge class is mechanically `.kind-<asset_kind>`.
+// Source anchor's Artifact.type → asset_kind, mirroring the registry
+// in app/api/assets.py. Used by the derivative detail's "open source"
+// link to open the parent via the unified asset detail surface.
+function _anchorKindFromArtifactType(art_type) {
+  const map = {
+    report_draft:         'report',
+    whitepaper_draft:     'whitepaper',
+    buyer_guide_draft:    'buyer_guide',
+    solution_guide_draft: 'solution_guide',
+  };
+  return map[art_type] || 'content';
+}
+
+// Every Level-3 anchor + Level-4 derivative surfaces under the same
+// projection (Library pill + detail banner + RunOut). _ANCHOR_KIND_LABELS
+// holds anchor names; _DERIVATIVE_KIND_LABELS holds derivative names.
+// _isTrustBoundKind covers both — anchors and derivatives both carry a
+// body.trust_checks + trust_view; the CSS badge class is mechanically
+// `.kind-<asset_kind>`.
 const _ANCHOR_KIND_LABELS = {
   report:         null,  // sentinel — use _reportAudienceLabel(asset_type)
   whitepaper:     'White paper',
   buyer_guide:    "Buyer's guide",
   solution_guide: 'Solution guide',
 };
+const _DERIVATIVE_KIND_LABELS = {
+  exec_summary: 'Executive summary',
+};
 const _isAnchorKind = (k) => k in _ANCHOR_KIND_LABELS;
+const _isDerivativeKind = (k) => k in _DERIVATIVE_KIND_LABELS;
+const _isTrustBoundKind = (k) => _isAnchorKind(k) || _isDerivativeKind(k);
 
 function _anchorTitle(asset) {
   if (asset.asset_kind === 'report') {
     return _reportAudienceLabel(asset.asset_type);
   }
-  return _ANCHOR_KIND_LABELS[asset.asset_kind] || asset.asset_kind;
+  if (_isAnchorKind(asset.asset_kind)) {
+    return _ANCHOR_KIND_LABELS[asset.asset_kind] || asset.asset_kind;
+  }
+  if (_isDerivativeKind(asset.asset_kind)) {
+    return _DERIVATIVE_KIND_LABELS[asset.asset_kind] || asset.asset_kind;
+  }
+  return asset.asset_kind;
+}
+
+function _kindTooltip(k) {
+  if (k === 'report' || _isAnchorKind(k)) {
+    return `Anchor: ${_ANCHOR_KIND_LABELS[k] || k}`;
+  }
+  if (_isDerivativeKind(k)) {
+    return `Derivative: ${_DERIVATIVE_KIND_LABELS[k]}`;
+  }
+  return k;
 }
 
 function _renderAssetCard(a) {
   // Kind badge resolves directly from asset_kind. The API sets it to
-  // each anchor's own top-level kind via the registry in
-  // app/api/assets.py. The audience/sub-slug is the asset_type,
+  // each anchor/derivative's own top-level kind via the registries
+  // in app/api/assets.py. The audience/sub-slug is the asset_type,
   // surfaced in the tooltip + sub line.
   const kindBadge = el('span',
     { class: `badge kind-${a.asset_kind}`,
       title: a.asset_kind === 'report'
         ? `Audience: ${_reportAudienceLabel(a.asset_type)}`
-        : (_isAnchorKind(a.asset_kind)
-            ? `Anchor: ${_ANCHOR_KIND_LABELS[a.asset_kind]}`
-            : a.asset_kind) },
+        : _kindTooltip(a.asset_kind) },
     a.asset_kind);
   const statusBadge = a.status
     ? el('span', { class: `badge ${a.status}` }, a.status)
     : null;
-  // Library trust pill — on every Level-3 anchor (report, whitepaper,
-  // buyer_guide, solution_guide, ...), and only when the projection
-  // surfaced a trust_state (legacy rows without trust_checks omit it
-  // rather than inventing one — same §6 Principle as everywhere else).
-  // Reads the SAME state the detail view banner shows — single source
-  // of truth.
-  const isAnchor = _isAnchorKind(a.asset_kind);
-  const trustPill = (isAnchor && a.trust_state)
+  // Library trust pill — on every trust-bound kind (anchors AND
+  // derivatives). Anchors carry §6 trust_checks; derivatives carry §7
+  // containment trust_checks. Both compute via compact_trust_state
+  // off the same body.trust_checks shape. Legacy rows without
+  // trust_checks omit the pill rather than inventing one (§6 Principle).
+  const isTrustBound = _isTrustBoundKind(a.asset_kind);
+  const trustPill = (isTrustBound && a.trust_state)
     ? el('span', { class: 'badge trust-' + a.trust_state,
                     style: 'margin-left:6px;',
                     title: 'Trust layer state — not a human approval' },
@@ -2911,9 +2948,17 @@ function _renderAssetCard(a) {
   const cost = (a.cost_usd != null && a.cost_usd > 0)
     ? ` · ${fmtCost(a.cost_usd)}` : '';
   const camp = a.campaign ? ` · campaign=${a.campaign}` : '';
-  const typeStr = _isAnchorKind(a.asset_kind)
+  const typeStr = _isTrustBoundKind(a.asset_kind)
     ? _anchorTitle(a)
     : (a.asset_type || '—');
+  // Derivative lineage — surface "derived from <anchor>" on the card
+  // (the canonical lineage is body.source_anchor_id; the projection
+  // mirrors source_anchor_title for cheap display).
+  const lineageLine = (a.source_anchor_title)
+    ? el('div', { class: 'sub',
+        style: 'color:var(--muted); font-size:11px; font-style:italic;' },
+        `↳ derived from "${_cleanTitle(a.source_anchor_title)}"`)
+    : null;
   const fullTitle = a.title || '(untitled)';
   const card = el('div',
     { class: 'proposal', style: 'cursor:pointer;',
@@ -2927,6 +2972,7 @@ function _renderAssetCard(a) {
       style: 'color:var(--muted); font-size:12px;' },
       `${typeStr} · ${a.product_name || 'Org-level'} · ` +
       `${fmtTime(a.created_at)}${grade}${cost}${camp}`),
+    lineageLine,
     statusBadge ? el('div', { style: 'margin-top:6px;' }, statusBadge) : null,
   );
   return card;
@@ -2937,13 +2983,13 @@ async function openAssetDetail(asset) {
   _libState.selectedAssetKind = asset.asset_kind;
   const root = document.getElementById('lib-detail');
   root.innerHTML = '<div class="setup-status">Loading…</div>';
-  // Every Level-3 anchor shares the block-based body shape with
-  // content; the existing /api/assets/content/{id} detail + download
-  // path accepts every anchor type. Route the URL through /content/
-  // to avoid a parallel set of anchor endpoints — same projection,
-  // same body, just a different top-level kind for filtering +
-  // badging.
-  const urlKind = _isAnchorKind(asset.asset_kind)
+  // Every Level-3 anchor AND every Level-4 derivative shares the
+  // block-based body shape with content; the existing /api/assets/
+  // content/{id} detail + download path accepts all of them. Route
+  // the URL through /content/ to avoid a parallel set of anchor /
+  // derivative endpoints — same projection, same body, just a
+  // different top-level kind for filtering + badging.
+  const urlKind = _isTrustBoundKind(asset.asset_kind)
     ? 'content' : asset.asset_kind;
   const url = `/api/assets/${urlKind}/${asset.id}`;
   let detail;
@@ -3012,11 +3058,13 @@ function _renderAssetDetail(asset, detail) {
     _renderDocumentDetailInto(wrap, asset, detail);
   } else if (asset.asset_kind === 'brief') {
     _renderBriefDetailInto(wrap, asset, detail);
-  } else if (_isAnchorKind(asset.asset_kind)) {
-    // Every Level-3 anchor (report / whitepaper / buyer_guide /
-    // solution_guide / ...) shares the same body shape and the same
-    // trust view-model — same renderer with the same brand chrome
-    // path. The badge above already distinguishes them by kind.
+  } else if (_isTrustBoundKind(asset.asset_kind)) {
+    // Every Level-3 anchor AND every Level-4 derivative shares the
+    // same body shape (blocks + trust_checks + evidence_ledger +
+    // brand_tokens) and the same trust view-model — same renderer
+    // with the same brand chrome path. The badge above already
+    // distinguishes them by kind. Derivative-specific lineage
+    // ("derived from <anchor>") renders inside _renderReportDetailInto.
     _renderReportDetailInto(wrap, asset, detail);
   }
   return wrap;
@@ -3074,15 +3122,39 @@ function _applyReportBrandChrome(wrap, brand, asset) {
 // detail.body verbatim — UI never recomputes pass/warn/block.
 function _renderReportDetailInto(wrap, asset, detail) {
   const view = detail.trust_view || null;
-  const content = (detail.body || {}).content || {};
+  const body = detail.body || {};
+  const content = body.content || {};
   const blocks = content.blocks || [];
   // Brand tokens — PRESENTATION ONLY. Reads off body.brand_tokens
   // (sibling of body.content). The chrome wrapper applies tokens as
   // inline styles on a dedicated container; we never mutate the
   // block render below. If brand is absent or default, the wrapper
   // still renders — just with platform defaults.
-  const brand = (detail.body || {}).brand_tokens || {};
+  const brand = body.brand_tokens || {};
   _applyReportBrandChrome(wrap, brand, asset);
+  // Derivative lineage — when present, surface "derived from
+  // <anchor>" near the top so the reader knows the trust-bound
+  // basis. The detail link opens the source anchor in the same
+  // Library detail surface. Lineage is body.source_anchor_id /
+  // body.source_anchor_title; absence means this is not a derivative.
+  if (body.source_anchor_id) {
+    wrap.appendChild(el('div', { class: 'setup-status',
+      style: 'margin-bottom:8px; font-size:13px;' },
+      el('strong', {}, 'Derived from: '),
+      el('a', { style: 'cursor:pointer; color:var(--accent); '
+                       + 'text-decoration:underline;',
+                onclick: () => openAssetDetail({
+                  id: body.source_anchor_id,
+                  asset_kind: _anchorKindFromArtifactType(
+                    body.source_anchor_type),
+                }) },
+        body.source_anchor_title || body.source_anchor_id),
+      el('div', { class: 'sub',
+        style: 'color:var(--muted); font-size:12px; margin-top:2px;' },
+        'Every claim in this derivative cites the source '
+        + 'anchor\'s evidence ledger; the trust state above '
+        + 'reflects §7 containment, not §6 binding.')));
+  }
 
   // ---- Trust Summary Banner ------------------------------------------
   if (view) {

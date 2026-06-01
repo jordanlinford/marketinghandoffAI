@@ -83,6 +83,21 @@ def main() -> None:
             db.commit()
             print("Registered report_composer agent for Onit")
 
+        deriv_reg = db.execute(
+            select(AgentRegistration).where(
+                AgentRegistration.org_id == org.id,
+                AgentRegistration.key == "derivative_composer")
+        ).scalar_one_or_none()
+        if deriv_reg is None:
+            db.add(AgentRegistration(
+                org_id=org.id, key="derivative_composer",
+                display_name="Derivative composer",
+                kind="builtin", enabled=True, schedule_cron=None,
+                config={},  # derives from anchor artifacts; §7 containment-gated
+            ))
+            db.commit()
+            print("Registered derivative_composer agent for Onit")
+
         # Default guardrail rules. "content" stays here as the SCOPE shell;
         # OrgProfile.banned_claims is merged in at worker time so the profile
         # remains the single source of truth for which phrases trip the rule.

@@ -4,8 +4,8 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from app.api import (admin, artifacts, assets, brand, campaigns, dashboard,
-                     documents, memory as memory_api, products, profile,
-                     reports, review, runs, uploads)
+                     derivatives, documents, memory as memory_api, products,
+                     profile, reports, review, runs, uploads)
 from app.config import get_settings
 from app.db import create_all
 
@@ -29,6 +29,7 @@ app.include_router(campaigns.router)
 app.include_router(memory_api.router)
 app.include_router(reports.router)
 app.include_router(brand.router)
+app.include_router(derivatives.router)
 
 _UI_FILE = Path(__file__).parent / "static" / "ui.html"
 

@@ -203,6 +203,34 @@ def process_run(db: Session, run: Run) -> None:
     # any §6/§7 validator input.
     from app.api.brand import brand_for_org  # local: keeps cold paths cheap
     brand = brand_for_org(db, run.org_id)
+    # Pre-load the source anchor for derivative_composer runs — the
+    # agent's §7 contract reads from this and ONLY this. Same chassis
+    # discipline as report_intelligence: worker fetches via scoped(),
+    # agent never touches the DB. Tenant isolation is preserved
+    # because scoped() rejects anchor ids that belong to other orgs.
+    source_anchor = None
+    if run.agent_key == "derivative_composer" and isinstance(task, dict):
+        from app.api.assets import _ANCHOR_TYPE_SET  # local: avoid cycle
+        anchor_id = task.get("source_anchor_id")
+        if anchor_id:
+            anchor_art = db.execute(
+                scoped(Artifact, run.org_id).where(
+                    Artifact.id == anchor_id,
+                    Artifact.type.in_(_ANCHOR_TYPE_SET),
+                )
+            ).scalar_one_or_none()
+            if anchor_art:
+                source_anchor = {
+                    "id": anchor_art.id,
+                    "title": anchor_art.title,
+                    "type": anchor_art.type,
+                    "body": anchor_art.body or {},
+                }
+            else:
+                logs.append(
+                    f"derivative_composer: source_anchor_id "
+                    f"{anchor_id!r} does not resolve to an anchor "
+                    f"artifact for this org.")
     ctx = AgentContext(
         org_id=run.org_id,
         org_name=org_name,
@@ -229,6 +257,7 @@ def process_run(db: Session, run: Run) -> None:
         guardrail_rules=rules_by_scope,
         memory_patterns=memory_patterns,
         report_intelligence=report_intelligence,
+        source_anchor=source_anchor,
         brand=brand,
         get_market_data=lambda: _resolve_market_data(db, run.org_id, run.upload_id),
         log=logs.append,

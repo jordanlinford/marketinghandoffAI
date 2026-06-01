@@ -110,6 +110,17 @@ class AgentContext:
     # db session) and handed to the agent — agents never touch the DB.
     # None for non-report runs.
     report_intelligence: dict[str, Any] | None = None
+    # Pre-loaded source anchor artifact for derivative_composer runs.
+    # Same chassis contract as report_intelligence — the worker loads
+    # via scoped(), the agent never queries. Shape:
+    #   {"id", "title", "type", "body": {...content, evidence_ledger,
+    #     trust_checks, ...}}
+    # None for non-derivative runs. The §7 boundary lives here: a
+    # derivative renderer reads this and ONLY this — never the
+    # intelligence engine, never the ledger builder, never raw
+    # sources. If a derivative reaches past this field, it has
+    # stopped deriving and started regenerating.
+    source_anchor: dict[str, Any] | None = None
     # Tenant brand identity — PRESENTATION ONLY. Brand tokens feed
     # chrome (logo, colors, fonts). They MUST NOT enter the
     # intelligence object, the evidence ledger, or any input a §6/§7

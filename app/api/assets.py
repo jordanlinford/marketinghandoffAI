@@ -104,12 +104,37 @@ _ANCHOR_KIND_TO_TYPE: dict[str, str] = {
     spec["kind"]: art_type for art_type, spec in _ANCHOR_KINDS.items()
 }
 
+# ---- Derivative-kind registry --------------------------------------------
+# Level-4 derivatives are SHORTER, channel-shaped re-expressions of
+# Level-3 anchors. They share the projection + detail + Library
+# plumbing with anchors (same trust pill, same trust_view, same body
+# shape) — same kind-promotion mechanism, separate registry.
+#
+# A derivative's body carries body.source_anchor_id (the canonical
+# lineage field); the projection surfaces it so the UI can render
+# "derived from <anchor>" without a graph.
+_DERIVATIVE_KINDS: dict[str, dict] = {
+    "exec_summary_draft": {
+        "kind":           "exec_summary",
+        "content_types":  ("exec_summary",),
+        "default_title":  "Untitled executive summary",
+        "title_label":    "executive summary",
+    },
+}
+
+_DERIVATIVE_TYPE_SET: tuple[str, ...] = tuple(_DERIVATIVE_KINDS.keys())
+_DERIVATIVE_KIND_SET: tuple[str, ...] = tuple(
+    spec["kind"] for spec in _DERIVATIVE_KINDS.values())
+
 # Back-compat constants. Some external surfaces still reference the
 # specific "report" anchor (e.g. /api/reports). Anchors generally read
 # off the registry above.
 _REPORT_TYPE = "report_draft"
 _REPORT_AUDIENCES = _ANCHOR_KINDS["report_draft"]["content_types"]
-_KINDS: tuple[str, ...] = ("content", "document", "brief") + _ANCHOR_KIND_SET
+_KINDS: tuple[str, ...] = (
+    ("content", "document", "brief")
+    + _ANCHOR_KIND_SET + _DERIVATIVE_KIND_SET
+)
 _DEFAULT_LIMIT = 50
 
 
@@ -207,6 +232,53 @@ def _project_anchor(art: Artifact, products: dict,
         "cost_usd": cost_by_run.get(art.run_id),
         "grade": (art.grade or {}).get("overall") if art.grade else None,
         "trust_state": compact_trust_state(body.get("trust_checks")),
+        "source_ref": {"table": "artifacts", "id": art.id,
+                       "run_id": art.run_id, "artifact_type": art.type},
+    }
+
+
+def _project_derivative(art: Artifact, products: dict,
+                        cost_by_run: dict) -> dict:
+    """Projection for Level-4 derivative artifacts. Mirrors
+    _project_anchor field-for-field plus the lineage fields
+    (source_anchor_id, source_anchor_title, source_anchor_type) that
+    the UI uses to render 'derived from <anchor>'. Trust pill reads
+    from the SAME compact_trust_state — derivatives go through the
+    SAME trust view-model as anchors, just driven by the containment
+    validator's output instead of validate_evidence_binding."""
+    from app.reports.trust_view import compact_trust_state
+    spec = _DERIVATIVE_KINDS.get(art.type)
+    body = art.body or {}
+    content = body.get("content") or {}
+    metadata = content.get("metadata") or {}
+    ct = (content.get("content_type") or "").strip()
+    if spec and ct in spec["content_types"]:
+        asset_kind = spec["kind"]
+        asset_type = ct
+        default_title = spec["default_title"]
+    else:
+        asset_kind = "unknown"
+        asset_type = "unknown"
+        default_title = "Untitled derivative"
+    return {
+        "id": art.id,
+        "asset_kind": asset_kind,
+        "asset_type": asset_type,
+        "title": art.title or metadata.get("topic") or default_title,
+        "product_id": art.product_id,
+        "product_name": products.get(art.product_id) if art.product_id else None,
+        "status": art.status,
+        "campaign": art.utm_campaign,
+        "created_at": art.created_at.isoformat() if art.created_at else None,
+        "updated_at": art.created_at.isoformat() if art.created_at else None,
+        "cost_usd": cost_by_run.get(art.run_id),
+        "grade": (art.grade or {}).get("overall") if art.grade else None,
+        "trust_state": compact_trust_state(body.get("trust_checks")),
+        # Lineage — canonical from body, mirrored into the projection
+        # so the Library card can show the link without fetching detail.
+        "source_anchor_id":    body.get("source_anchor_id"),
+        "source_anchor_title": body.get("source_anchor_title"),
+        "source_anchor_type":  body.get("source_anchor_type"),
         "source_ref": {"table": "artifacts", "id": art.id,
                        "run_id": art.run_id, "artifact_type": art.type},
     }
@@ -333,8 +405,8 @@ def list_assets(
 
     projected: list[dict] = []
     run_ids: set[str] = set()
-    # ---- Fetch artifacts (content + brief + every anchor kind) ---------
-    _fetch_kinds = ("content", "brief") + _ANCHOR_KIND_SET
+    # ---- Fetch artifacts (content + brief + anchors + derivatives) ----
+    _fetch_kinds = ("content", "brief") + _ANCHOR_KIND_SET + _DERIVATIVE_KIND_SET
     if asset_kind in (None,) + _fetch_kinds:
         art_q = scoped(Artifact, user.org_id)
         # Filter artifact types up front so we don't drag every artifact
@@ -353,6 +425,11 @@ def list_assets(
         for anchor_type, spec in _ANCHOR_KINDS.items():
             if asset_kind in (None, spec["kind"]):
                 types_wanted.append(anchor_type)
+        # Every derivative (exec_summary, ...) is registered in
+        # _DERIVATIVE_KINDS — sibling registry, same plumbing.
+        for deriv_type, spec in _DERIVATIVE_KINDS.items():
+            if asset_kind in (None, spec["kind"]):
+                types_wanted.append(deriv_type)
         art_q = art_q.where(Artifact.type.in_(types_wanted))
         if product_id:
             art_q = art_q.where(Artifact.product_id == product_id)
@@ -397,6 +474,18 @@ def list_assets(
                     continue
                 run_ids.add(a.run_id)
                 projected.append(("__anchor__", a))
+            elif a.type in _DERIVATIVE_TYPE_SET:
+                # Derivatives — exec_summary today — share the
+                # filter/projection plumbing but go through a
+                # lineage-aware projection that surfaces source_anchor_id.
+                ct = (a.body or {}).get("content", {}) \
+                    .get("content_type", "") or ""
+                if asset_type and asset_type not in (ct, a.type):
+                    continue
+                if asset_type_prefix and not ct.startswith(asset_type_prefix):
+                    continue
+                run_ids.add(a.run_id)
+                projected.append(("__derivative__", a))
 
     # ---- Fetch documents ---------------------------------------------
     if asset_kind in (None, "document"):
@@ -440,6 +529,10 @@ def list_assets(
             # asked for an anchor kind but the artifact's content_type
             # didn't match the registry. We keep it in the result set
             # (it's still an artifact of an anchor type) but flagged.
+        elif tag == "__derivative__":
+            asset = _project_derivative(obj, products, cost_by_run)
+            if needle and needle not in _content_text_blob(obj).lower():
+                continue
         else:
             asset = _project_document(obj, products)
             if needle and needle not in _doc_text_blob(obj).lower():
@@ -455,14 +548,17 @@ def list_assets(
 
 # ---- Detail endpoints (native shape per kind) -----------------------------
 def _load_content(db: Session, org_id: str, artifact_id: str) -> Artifact:
-    # Every anchor (report, whitepaper, buyer_guide, solution_guide,
-    # ...) shares the content_draft body shape — same block-based
-    # structure, same grade attached, same .md download path. The URL
-    # is /api/assets/content/{id} for all of them so existing detail
-    # + download paths just work. The Library projection surfaces
-    # each as its own asset_kind via the top-level Artifact.type
-    # field, so the badge + filter resolve correctly per kind.
-    accepted_types = _CONTENT_TYPES + _ANCHOR_TYPE_SET
+    # Every anchor (report / whitepaper / buyer_guide / solution_guide /
+    # ...) AND every Level-4 derivative (exec_summary / ...) shares
+    # the content_draft body shape — same block-based structure, same
+    # grade attached, same .md download path. The URL is
+    # /api/assets/content/{id} for all of them so existing detail +
+    # download paths just work. The Library projection surfaces each
+    # as its own asset_kind via the top-level Artifact.type field, so
+    # the badge + filter resolve correctly per kind.
+    accepted_types = (
+        _CONTENT_TYPES + _ANCHOR_TYPE_SET + _DERIVATIVE_TYPE_SET
+    )
     art = db.execute(
         scoped(Artifact, org_id).where(
             Artifact.id == artifact_id,
@@ -497,13 +593,16 @@ def detail_content(artifact_id: str,
                    user: User = Depends(current_user),
                    db: Session = Depends(get_db)) -> dict:
     art = _load_content(db, user.org_id, artifact_id)
-    # asset_kind here mirrors the list projection: anchor artifacts
-    # surface as their own anchor kind (report / whitepaper /
-    # buyer_guide / solution_guide / ...) so the detail view's badge
-    # + UI surfaces stay consistent with how the Library lists them.
+    # asset_kind here mirrors the list projection: anchor + derivative
+    # artifacts each surface as their own kind so the detail view's
+    # badge + UI surfaces stay consistent with how the Library lists
+    # them.
     anchor_spec = _ANCHOR_KINDS.get(art.type)
+    deriv_spec = _DERIVATIVE_KINDS.get(art.type)
     if anchor_spec:
         asset_kind_out = anchor_spec["kind"]
+    elif deriv_spec:
+        asset_kind_out = deriv_spec["kind"]
     else:
         asset_kind_out = "content"
     response = {
@@ -523,11 +622,11 @@ def detail_content(artifact_id: str,
     # — no new validation, no new decisions). The view-model is
     # deterministic over body.trust_checks + body.evidence_ledger +
     # body.content.blocks. We compute on read so legacy artifacts work
-    # without a backfill. Every anchor (report, whitepaper,
-    # buyer_guide, solution_guide, ...) shares the trust surface —
-    # they go through the SAME validate_evidence_binding + severity
-    # layer, so the view-model is identical.
-    if art.type in _ANCHOR_TYPE_SET:
+    # without a backfill. Every anchor + every derivative shares the
+    # trust surface — anchors go through validate_evidence_binding,
+    # derivatives go through validate_containment, but both produce
+    # the same trust_checks shape, so the view-model is identical.
+    if art.type in _ANCHOR_TYPE_SET or art.type in _DERIVATIVE_TYPE_SET:
         from app.reports.trust_view import build_trust_view
         body = art.body or {}
         trust_checks = body.get("trust_checks") or {}

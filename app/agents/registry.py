@@ -26,3 +26,4 @@ def list_agent_keys() -> list[str]:
 from app.agents import market_intel  # noqa: E402,F401
 from app.agents import content_engine  # noqa: E402,F401
 from app.agents import report_composer  # noqa: E402,F401
+from app.agents import derivative_composer  # noqa: E402,F401

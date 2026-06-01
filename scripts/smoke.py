@@ -6288,6 +6288,365 @@ def main() -> None:
               f"(counts={ {k: len(v) for k, v in kind_sets.items()} }), "
               f"and kinds are mutually disjoint (no double-bucketing).")
 
+        # ================================================================
+        # Derivative (21) — §7 Containment, the load-bearing proof.
+        #
+        # An exec_summary derivative is generated end-to-end from a
+        # passing anchor and checked through every angle the brief
+        # names:
+        #   21a presence — every derivative claim maps to an anchor
+        #        ledger entry; trust_checks populated; lineage recorded;
+        #        Library exposes it as its own kind.
+        #   21b ABSENCE (the keystone) — inject a number absent from
+        #        the source anchor → containment validator fires
+        #        CRITICAL §7 → approval_blocked.
+        #   21c citing a ledger id not in the source anchor → fails as
+        #        §7 critical.
+        #   21d transitivity — a derivative whose claims all map to a
+        #        passed anchor passes containment WITHOUT re-binding
+        #        against raw sources. This is §6 inherited via §7.
+        #   21e determinism — same anchor + same content → identical
+        #        containment result.
+        #   21f tenant isolation — Acme cannot derive from Onit's
+        #        anchor; the API + worker both reject.
+        #   21g brand invariant inherited — same byte-identical proof
+        #        we hold across anchors, now on derivatives.
+        # ================================================================
+        print("---- Derivative (21) — Executive Summary + §7 containment ----")
+        from app.reports.derivatives import (
+            DERIVATIVE_RENDERERS, render_exec_summary,
+            trust_checks_with_containment_findings, validate_containment,
+        )
+        from app.agents.derivative_composer import DerivativeComposerAgent
+
+        # Pick ANY passing anchor (containment proof only makes sense
+        # from a clean source). Scan every anchor kind — the earlier
+        # smoke sections leave a mix of states behind (gate_all
+        # toggles, induced-blocked demo seeds in some runs, etc.), so
+        # we don't assume position.
+        source_anchor_id = None
+        for kind in ("whitepaper", "buyer_guide", "solution_guide",
+                      "report"):
+            assets = client.get(
+                f"/api/assets?asset_kind={kind}&limit=50",
+                headers=H_ONIT).json()["assets"]
+            passing = [a for a in assets if a.get("trust_state") == "passed"]
+            if passing:
+                source_anchor_id = passing[0]["id"]
+                break
+        assert source_anchor_id, (
+            "smoke setup: no passing anchor found across any kind — "
+            "the containment proof requires a clean source")
+        src_detail = client.get(
+            f"/api/assets/content/{source_anchor_id}",
+            headers=H_ONIT).json()
+        assert (src_detail.get("trust_view") or {}).get("state") == "passed", (
+            "smoke setup: chosen anchor detail does not corroborate "
+            "the Library trust_state — single-source discipline broke.")
+
+        # ---- 21a PRESENCE — end-to-end through the worker ------------
+        r = client.post("/api/derivatives/generate", headers=H_ONIT, json={
+            "derivative_type": "exec_summary",
+            "source_anchor_id": source_anchor_id,
+        })
+        assert r.status_code == 200, (
+            f"POST /api/derivatives/generate failed: {r.text}")
+        gen = r.json()
+        assert gen["derivative_type"] == "exec_summary"
+        assert gen["source_anchor_id"] == source_anchor_id
+        assert run_once() is True, ("worker did not pick up the "
+                                     "derivative job")
+        deriv_run = db.execute(
+            scoped(Run, onit.id).where(Run.id == gen["run_id"])
+        ).scalar_one()
+        assert deriv_run.status == "succeeded", (
+            f"derivative run failed: {deriv_run.error}")
+        deriv_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.run_id == deriv_run.id)
+        ).scalar_one()
+        assert deriv_art.type == "exec_summary_draft", (
+            f"derivative artifact MUST persist as type='exec_summary_draft'; "
+            f"got {deriv_art.type!r}")
+        deriv_body = deriv_art.body or {}
+        # Lineage — body.source_anchor_id is canonical.
+        assert deriv_body.get("source_anchor_id") == source_anchor_id, (
+            "derivative body.source_anchor_id MUST equal the input "
+            f"anchor id. got {deriv_body.get('source_anchor_id')!r}")
+        # Trust path inherited — same shape, populated by the
+        # containment validator.
+        tc = deriv_body.get("trust_checks") or {}
+        assert tc.get("validator") == "containment", (
+            "derivative trust_checks MUST be marked 'containment' "
+            "validator — the agent's check is §7, not §6.")
+        assert tc.get("passed") is True, (
+            f"derivative containment MUST pass on clean source; "
+            f"trust_checks={tc!r}")
+        assert tc.get("approval_blocked") is False
+        assert tc.get("findings_by_severity", {}).get("critical") == 0
+        # Lineage in the Library projection.
+        lib = client.get("/api/assets?asset_kind=exec_summary&limit=50",
+                          headers=H_ONIT).json()["assets"]
+        rows = [a for a in lib if a["id"] == deriv_art.id]
+        assert rows, "derivative MUST appear in /api/assets?asset_kind=exec_summary"
+        row = rows[0]
+        assert row["asset_kind"] == "exec_summary"
+        assert row["trust_state"] == "passed"
+        assert row["source_anchor_id"] == source_anchor_id
+        assert row["source_anchor_title"], ("Library projection MUST "
+                                              "carry source_anchor_title "
+                                              "for the 'derived from' line")
+        # Detail surface returns kind=exec_summary + trust_view.
+        d = client.get(f"/api/assets/content/{deriv_art.id}",
+                        headers=H_ONIT).json()
+        assert d["asset_kind"] == "exec_summary"
+        assert d.get("trust_view"), ("derivative detail MUST carry "
+                                      "trust_view via SAME view-model")
+        # RunOut.anchor_trust_state surfaces the SAME state for
+        # derivative runs (the filter now includes
+        # _DERIVATIVE_TYPE_SET).
+        runs_proj = client.get("/api/runs", headers=H_ONIT).json()
+        rr = next((x for x in runs_proj if x["id"] == deriv_run.id), None)
+        assert rr is not None
+        assert rr["anchor_trust_state"] == "passed", (
+            f"RunOut.anchor_trust_state for derivative runs MUST equal "
+            f"the projection trust_state; got "
+            f"{rr['anchor_trust_state']!r}")
+        # Library filters: exec_summary MUST NOT bleed into any anchor
+        # kind, and anchor kinds MUST NOT include the derivative.
+        for k in ("report", "whitepaper", "buyer_guide", "solution_guide",
+                   "content"):
+            others = client.get(
+                f"/api/assets?asset_kind={k}&limit=500",
+                headers=H_ONIT).json()["assets"]
+            assert not any(a["id"] == deriv_art.id for a in others), (
+                f"kind={k} MUST NOT include the exec_summary derivative.")
+        print(f"[OK] Derivative (21a): PRESENCE — exec_summary generated "
+              f"end-to-end via /api/derivatives/generate. "
+              f"artifact.type='exec_summary_draft', lineage="
+              f"body.source_anchor_id={source_anchor_id[:8]}, "
+              f"trust_checks.validator='containment' + passed=True, "
+              f"Library kind='exec_summary' (isolated from anchors + "
+              f"content), trust_view present via SAME view-model.")
+
+        # ---- 21b ABSENCE (load-bearing): bare number absent from source ---
+        # Take the rendered derivative content and inject a number that
+        # does not exist in the source anchor's ledger. Run the SAME
+        # containment validator. Assert §7 critical fires +
+        # approval_blocked.
+        clean_content = deriv_body.get("content") or {}
+        injected_blocks = list(clean_content.get("blocks") or [])
+        for i, b in enumerate(injected_blocks):
+            if b.get("kind") == "body":
+                injected_blocks[i] = {
+                    **b,
+                    "text": (b.get("text") or "")
+                            + "\nNote: 117 buyers said yes in pilot.",
+                }
+                break
+        injected_content = {**clean_content, "blocks": injected_blocks}
+        # Build the anchor's Ledger from its evidence_ledger (the SAME
+        # ledger the renderer cited from). Containment runs against it.
+        anchor_ledger_entries = (src_detail.get("body") or {}).get(
+            "evidence_ledger") or []
+        from app.reports.evidence import Ledger
+        anchor_ledger = Ledger.from_entries(anchor_ledger_entries)
+        tc_inj = validate_containment(injected_content, anchor_ledger)
+        tc_inj = trust_checks_with_containment_findings(
+            tc_inj, anchor_ledger_entries, injected_content)
+        assert tc_inj.get("passed") is False, (
+            "ABSENCE invariant broken: bare '117' (not in source "
+            "anchor) did NOT fail containment.")
+        assert tc_inj.get("approval_blocked") is True, (
+            "ABSENCE invariant broken: containment §7 fail did NOT "
+            "set approval_blocked=True. Gate weaker than report's.")
+        crit = tc_inj["findings_by_severity"]["critical"]
+        assert crit >= 1, (
+            f"ABSENCE invariant broken: critical={crit}, expected ≥1.")
+        sevenfind = [f for f in (tc_inj.get("findings") or [])
+                      if f.get("discipline") == "§7"
+                      and f.get("severity") == "critical"]
+        assert sevenfind, (
+            "ABSENCE invariant broken: no §7 critical finding — the "
+            "containment classifier did not fire. §7 is NOT enforced.")
+        print(f"[OK] Derivative (21b): ABSENCE (load-bearing) — bare "
+              f"'117' (absent from source anchor's ledger) trips "
+              f"CRITICAL §7 containment breach with approval_blocked="
+              f"True. §7 is enforced, not aspirational.")
+
+        # ---- 21c marker citing an id NOT in the source anchor ------
+        # Build content carrying a marker whose id does not exist in
+        # the source anchor's ledger. Containment must flag it as a
+        # §7 critical (cited but not in source).
+        # Pick an id that's guaranteed not present.
+        existing_ids = {e["id"] for e in anchor_ledger_entries}
+        bogus_id = "999999_not_in_source"
+        assert bogus_id not in existing_ids
+        bogus_blocks = [
+            {"kind": "title", "text": "Test executive summary"},
+            {"kind": "body",
+             "text": f"The signal was 5.0%⟦ev:{bogus_id}⟧ in scope."},
+        ]
+        bogus_content = {"content_type": "exec_summary",
+                          "blocks": bogus_blocks}
+        tc_bogus = validate_containment(bogus_content, anchor_ledger)
+        tc_bogus = trust_checks_with_containment_findings(
+            tc_bogus, anchor_ledger_entries, bogus_content)
+        assert tc_bogus.get("passed") is False, (
+            "ABSENCE invariant broken: marker citing a ledger id NOT "
+            "in the source anchor did NOT fail containment.")
+        assert tc_bogus.get("approval_blocked") is True
+        unresolved_ids = [
+            m.get("id") for m in (tc_bogus.get("markers_unresolved") or [])
+        ]
+        assert bogus_id in unresolved_ids, (
+            f"§7 must flag bogus marker id {bogus_id!r}; got "
+            f"unresolved={unresolved_ids!r}")
+        # And the finding's discipline tag is §7 (cited but not in source).
+        sevenfind_bogus = [f for f in (tc_bogus.get("findings") or [])
+                            if f.get("discipline") == "§7"
+                            and f.get("severity") == "critical"]
+        assert sevenfind_bogus, (
+            "§7 critical finding missing for bogus-id case — the "
+            "classifier did not fire on a 'cited but not in source' "
+            "marker.")
+        print(f"[OK] Derivative (21c): citing a ledger id absent from "
+              f"the source anchor fires CRITICAL §7 (cited but not "
+              f"in source). markers_unresolved carries the bogus id.")
+
+        # ---- 21d TRANSITIVITY: clean derivative passes WITHOUT
+        # re-binding raw sources. The deriv we generated in 21a
+        # already proved containment passes; here we ASSERT the
+        # transitive property explicitly by re-validating it against
+        # JUST the anchor's ledger (no raw sources, no engine call).
+        tc_re = validate_containment(clean_content, anchor_ledger)
+        tc_re = trust_checks_with_containment_findings(
+            tc_re, anchor_ledger_entries, clean_content)
+        assert tc_re.get("passed") is True, (
+            "Transitivity broken: a clean derivative re-validated "
+            "against ONLY the anchor's ledger did not pass. The "
+            "derivative depended on something outside the anchor — "
+            "that's a §7 leak.")
+        # The derivative's markers count must equal the resolved
+        # markers count — every claim binds.
+        assert tc_re["markers_found"] == tc_re["markers_resolved"]
+        assert tc_re["numbers_found"] == tc_re["numbers_bound"]
+        print(f"[OK] Derivative (21d): TRANSITIVITY — the clean "
+              f"derivative passes containment against ONLY the source "
+              f"anchor's ledger (no engine, no raw sources). "
+              f"{tc_re['markers_found']} marker(s) all resolve; "
+              f"{tc_re['numbers_found']} number(s) all bind. §6 "
+              f"inherited via §7.")
+
+        # ---- 21e DETERMINISM — same input → same containment result ---
+        tc_again = validate_containment(clean_content, anchor_ledger)
+        tc_again = trust_checks_with_containment_findings(
+            tc_again, anchor_ledger_entries, clean_content)
+        import json as _jsonmod
+        # Compare the stable JSON shape — full equality of every field.
+        a_blob = _jsonmod.dumps(tc_re, sort_keys=True, default=str)
+        b_blob = _jsonmod.dumps(tc_again, sort_keys=True, default=str)
+        assert a_blob == b_blob, ("containment must be deterministic "
+                                    "— back-to-back calls differ.")
+        print(f"[OK] Derivative (21e): determinism — same anchor + "
+              f"same derivative content yield byte-identical "
+              f"containment trust_checks.")
+
+        # ---- 21f TENANT ISOLATION — Acme can't derive from Onit's anchor
+        # The API surface fails fast (404), the worker rejects via
+        # scoped(). Either failure mode is acceptable — both prove
+        # cross-tenant access is denied. We assert the API 404.
+        ra = client.post("/api/derivatives/generate", headers=H_ACME, json={
+            "derivative_type": "exec_summary",
+            "source_anchor_id": source_anchor_id,  # Onit's anchor
+        })
+        assert ra.status_code in (403, 404), (
+            f"Acme generating from Onit's anchor MUST be denied; got "
+            f"{ra.status_code} {ra.text}")
+        print(f"[OK] Derivative (21f): tenant isolation — Acme cannot "
+              f"derive from Onit's anchor ({ra.status_code}).")
+
+        # ---- 21g BRAND INVARIANT inherited ----------------------------
+        # Same byte-identical proof as #18c/#19c/#20-C, now on a
+        # derivative. Re-render the same exec_summary directly via the
+        # agent, switching brand state between calls. content +
+        # trust_checks + evidence_ledger must NOT differ.
+        row_brand = db.execute(scoped(OrgBrand, onit.id)).scalar_one_or_none()
+        if row_brand:
+            db.delete(row_brand); db.commit()
+        unset_brand = brand_for_org(db, onit.id)
+        assert unset_brand["is_default"] is True
+
+        # Build the source-anchor dict the agent expects (the worker
+        # normally does this).
+        anchor_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.id == source_anchor_id)
+        ).scalar_one()
+        anchor_dict = {
+            "id": anchor_art.id, "title": anchor_art.title,
+            "type": anchor_art.type, "body": anchor_art.body or {},
+        }
+
+        class _NoLLMDeriv:
+            anthropic_api_key = ""
+
+        def _render_deriv_with_brand(brand_dict: dict) -> dict:
+            ctx = AgentContext(
+                org_id=onit.id, org_name=onit.name,
+                agent_key="derivative_composer", registration_id="x",
+                run_id="x", trigger="manual",
+                task={"derivative_type": "exec_summary",
+                      "source_anchor_id": source_anchor_id},
+                source_anchor=anchor_dict,
+                profile={}, org_profile={},
+                guardrail_rules={}, memory_patterns=[],
+                brand=brand_dict, config={},
+            )
+            import app.config as _cfg
+            real = _cfg.get_settings
+            _cfg.get_settings = lambda: _NoLLMDeriv()
+            try:
+                result = DerivativeComposerAgent().run(ctx)
+            finally:
+                _cfg.get_settings = real
+            assert result.artifacts and result.artifacts[0].type == "exec_summary_draft"
+            return result.artifacts[0].body
+
+        body_unset = _render_deriv_with_brand(unset_brand)
+        custom_brand = {
+            "color_primary":    "#7a3aff",
+            "color_secondary":  "#00b894",
+            "color_accent":     "#ffb86c",
+            "color_background": "#101418",
+            "color_text":       "#f5f7fa",
+            "font_heading":     "Space Grotesk",
+            "font_body":        "Inter",
+        }
+        client.put("/api/brand", json=custom_brand, headers=H_ONIT)
+        set_brand = brand_for_org(db, onit.id)
+        body_set = _render_deriv_with_brand(set_brand)
+
+        def _stable_d(x):
+            return _jsonmod.dumps(x, sort_keys=True, default=str)
+
+        assert _stable_d(body_unset["content"]) == _stable_d(body_set["content"]), (
+            "INVARIANT VIOLATION (derivative): body.content differs "
+            "across brand-unset vs brand-set. Brand reached the claim "
+            "layer in the exec_summary renderer.")
+        assert _stable_d(body_unset["trust_checks"]) == _stable_d(body_set["trust_checks"]), (
+            "INVARIANT VIOLATION (derivative): body.trust_checks "
+            "differs across brand states.")
+        assert _stable_d(body_unset["evidence_ledger"]) == _stable_d(body_set["evidence_ledger"]), (
+            "INVARIANT VIOLATION (derivative): body.evidence_ledger "
+            "differs across brand states.")
+        assert _stable_d(body_unset["brand_tokens"]) != _stable_d(body_set["brand_tokens"]), (
+            "Brand tokens identical unset vs set for derivative — "
+            "brand pipe is dead.")
+        print(f"[OK] Derivative (21g): BRAND INVARIANT inherited — "
+              f"exec_summary renders byte-identical content / "
+              f"trust_checks / evidence_ledger across brand unset vs "
+              f"set. Only body.brand_tokens differs. §7 contract "
+              f"holds: brand is still presentation, never claim.")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

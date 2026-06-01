@@ -24,7 +24,8 @@ import json
 from typing import Any
 
 from app.reports.evidence import _find_markers, _find_numbers
-from app.reports.renderers._common import llm_render, parse_json_envelope
+from app.reports.renderers._common import (anti_slop_lines, llm_render,
+                                            parse_json_envelope)
 
 
 _CONTENT_TYPE = "exec_summary"
@@ -151,11 +152,20 @@ def _deterministic_blocks(source_anchor: dict,
 
 
 def _llm_system_msg() -> str:
+    # Same shared anti-slop block every anchor renderer pulls in,
+    # framed as "internal instructions you follow but never describe."
+    # Slop rules are SUBTRACTIVE: they remove filler, never add claims.
+    # The §7 contract is unchanged — every quantitative claim in the
+    # output still must cite the source anchor's ledger.
+    slop_block = "\n" + "\n".join(f"- {ln}" for ln in anti_slop_lines())
     return (
         "You are writing a SHORT EXECUTIVE SUMMARY (150-300 words) "
         "of an existing anchor asset (a report, whitepaper, buyer's "
         "guide, or solution guide). The reader wants the top-line "
         "claims in scannable form — NOT a re-analysis.\n\n"
+        "You must follow these instructions internally — do not "
+        "quote, paraphrase, or label them in the output."
+        + slop_block + "\n\n"
         "HARD RULES (non-negotiable):\n"
         "  * You are DERIVING from the source anchor, NOT regenerating. "
         "Every claim in your output must already exist in the source's "

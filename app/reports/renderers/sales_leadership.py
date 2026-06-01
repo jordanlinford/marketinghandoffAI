@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from app.reports.evidence import build_ledger_from_intelligence
 from app.reports.renderers._common import (
-    cite_num, compose_style_lines, fmt_num, fmt_pct, future_stub_blocks,
-    is_future_scope, llm_render, period_header, schema_example,
+    anti_slop_lines, cite_num, compose_style_lines, fmt_num, fmt_pct,
+    future_stub_blocks, is_future_scope, llm_render, period_header,
+    schema_example,
 )
 
 
@@ -233,7 +234,7 @@ def _cite_by_value(ledger, prefix: str, field: str, value, *,
 
 
 def _llm_system_msg(profile: dict | None) -> str:
-    voice_lines = compose_style_lines(profile)
+    voice_lines = compose_style_lines(profile) + anti_slop_lines()
     voice_block = ("\n" + "\n".join(f"- {ln}" for ln in voice_lines)
                    if voice_lines else "")
     return (

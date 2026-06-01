@@ -78,6 +78,60 @@ def compose_style_lines(profile: dict | None) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# Anti-slop instructions — SHARED across every LLM-touching renderer
+# (anchor reports / whitepaper / buyer's guide / solution guide /
+# executive summary derivative).
+#
+# LOAD-BEARING DISCIPLINE: these rules SUBTRACT empty language; they
+# must NEVER cause a new claim to appear. The fix for vagueness is to
+# CUT or to bind to a figure already in the ledger — NEVER to invent
+# a number, outcome, or specific to satisfy them. Same family as
+# §6/§7: the fix for "this check wants concreteness" is never
+# "manufacture concreteness."
+#
+# The brand-invariant-style proof still holds across these rules:
+# tightening the prose changes HOW claims are phrased, not WHICH
+# claims are asserted. If a claim or figure appears in a render that
+# wasn't there before, the model is mis-reading the instruction as
+# "add specifics" — that's the fabrication failure mode these rules
+# are meant to prevent, not enable.
+# --------------------------------------------------------------------------
+def anti_slop_lines() -> list[str]:
+    return [
+        ("Every sentence must assert something specific. Cut "
+         "throat-clearing, setup, and transitions whose only job is to "
+         "fill space. If a sentence wouldn't survive a tough editor's "
+         "'what does this tell me?' question, delete it — do not "
+         "rewrite it."),
+        ("Banned filler openers and connectives — do NOT use any of "
+         "these phrasings or close variants: \"It's important to "
+         "note\", \"In today's [adjective] landscape/environment/"
+         "world\", \"plays a [key/crucial/pivotal/vital] role\", "
+         "\"In an era of\", \"When it comes to\", \"At the end of "
+         "the day\", \"It's worth mentioning\", \"needless to say\", "
+         "\"In conclusion\". These are AI-text tells; removing them "
+         "costs no information."),
+        ("Vague intensifiers — \"significant\", \"robust\", "
+         "\"meaningful\", \"substantial\", \"considerable\", \"key\", "
+         "\"important\" — must either be replaced by the concrete "
+         "figure they stand in for (ONLY when that figure is already "
+         "in the EVIDENCE LEDGER, never invented) or CUT entirely. "
+         "If no bound figure backs the intensifier, the sentence "
+         "loses the intensifier without compensating."),
+        ("No rule-of-three padding. Two examples is enough if the "
+         "evidence supports two. Three-item lists are not a stylistic "
+         "default."),
+        ("Do not restate the introduction in the conclusion. Do not "
+         "restate any section's claim later in the same document."),
+        ("If a section has nothing specific and sourced to say, say "
+         "less — or omit the section. NEVER fabricate a claim or "
+         "invent a number to fill a slot. The fix for vagueness is "
+         "to CUT or to bind to something already in the ledger; the "
+         "fix is never to manufacture concreteness."),
+    ]
+
+
+# --------------------------------------------------------------------------
 # Memory / evidence rendering — past-tense observations only. No
 # predictions, no projected percentages.
 # --------------------------------------------------------------------------

@@ -6647,6 +6647,85 @@ def main() -> None:
               f"set. Only body.brand_tokens differs. §7 contract "
               f"holds: brand is still presentation, never claim.")
 
+        # ================================================================
+        # Anti-slop (22) — STRUCTURAL regression guard.
+        #
+        # The anti-slop instructions are a PROMPT-DISCIPLINE change, not
+        # a new validation layer. They steer LLM output away from
+        # filler at the renderer prompt site. Smoke runs the
+        # deterministic path (no LLM call), so it cannot observe the
+        # prose-quality effect; what it CAN verify is that the
+        # instruction block is wired into every renderer's system
+        # message. If a future commit drops the call, this assertion
+        # surfaces it.
+        #
+        # No claim-layer assertion here — the brand-invariant tests
+        # above (#18c / #19c / #20-C / #21g) are the proof that prompt
+        # changes do not move claims/trust/ledger. This is the seventh
+        # check the brief calls "smoke stays green, claims identical."
+        # ================================================================
+        print("---- Anti-slop (22) — prompt regression guard ----")
+        from app.reports.renderers._common import anti_slop_lines
+        slop = anti_slop_lines()
+        # A distinctive substring that's unlikely to drift into prose
+        # by accident — the literal banned-opener phrase.
+        slop_marker = "Banned filler openers"
+        slop_principle = "fix for vagueness is to CUT"
+        assert any(slop_marker in ln for ln in slop), (
+            "anti_slop_lines() must carry the 'Banned filler openers' "
+            "section — the test marker for downstream presence checks.")
+        assert any(slop_principle in ln for ln in slop), (
+            "anti_slop_lines() must carry the §6/§7 principle "
+            "restated in style terms ('the fix for vagueness is to "
+            "CUT, never to manufacture concreteness').")
+
+        from app.reports.renderers import (board as _bm,
+                                             buyer_guide as _bgm,
+                                             ceo_weekly as _cwm,
+                                             sales_leadership as _slm,
+                                             solution_guide as _sgm,
+                                             whitepaper as _wpm)
+        from app.reports.derivatives import exec_summary as _esm
+        renderer_msgs = {
+            "board":          _bm._llm_system_msg({}),
+            "ceo_weekly":     _cwm._llm_system_msg({}),
+            "sales_leadership": _slm._llm_system_msg({}),
+            "whitepaper":     _wpm._llm_system_msg({}),
+            "buyer_guide":    _bgm._llm_system_msg({}),
+            "solution_guide": _sgm._llm_system_msg({}),
+            "exec_summary":   _esm._llm_system_msg(),
+        }
+        missing = []
+        for name, msg in renderer_msgs.items():
+            if slop_marker not in msg:
+                missing.append(name)
+        assert not missing, (
+            "Anti-slop instructions missing from these renderers' "
+            f"system messages: {missing!r}. The shared anti_slop_lines() "
+            "helper isn't being called there.")
+        # And the §6/§7 principle restatement must also appear in
+        # each — the load-bearing rule that the fix for vague is CUT,
+        # never INVENT. If a future edit weakens this to "make it more
+        # specific" without the CUT clause, the LLM will start
+        # fabricating to satisfy the slop check.
+        missing_principle = [
+            name for name, msg in renderer_msgs.items()
+            if slop_principle not in msg
+        ]
+        assert not missing_principle, (
+            "§6/§7-restating principle missing from these renderers' "
+            f"system messages: {missing_principle!r}. Anti-slop "
+            "instruction must NEVER drift into 'add specifics' framing.")
+        print(f"[OK] Anti-slop (22): structural — every renderer "
+              f"system message ({len(renderer_msgs)} of them: anchors "
+              f"+ exec_summary derivative) carries the shared "
+              f"anti_slop_lines() block AND the §6/§7-restating "
+              f"principle ('the fix for vagueness is to CUT, never to "
+              f"manufacture concreteness'). Prompt-layer regression "
+              f"guard only — no claim-layer behavior change asserted "
+              f"here; the brand-invariant tests above are the "
+              f"behavioral proof.")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

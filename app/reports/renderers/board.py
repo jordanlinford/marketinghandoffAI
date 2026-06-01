@@ -11,9 +11,9 @@ from __future__ import annotations
 from app.reports.evidence import (build_ledger_from_intelligence,
                                    validate_evidence_binding)
 from app.reports.renderers._common import (
-    cite_num, compose_style_lines, fmt_num, fmt_pct, future_stub_blocks,
-    is_future_scope, llm_render, memory_lines, period_header,
-    schema_example,
+    anti_slop_lines, cite_num, compose_style_lines, fmt_num, fmt_pct,
+    future_stub_blocks, is_future_scope, llm_render, memory_lines,
+    period_header, schema_example,
 )
 
 
@@ -235,7 +235,11 @@ def _format_memory_line(highlight: dict, i: int, ledger) -> str:
 
 
 def _llm_system_msg(profile: dict | None) -> str:
-    voice_lines = compose_style_lines(profile)
+    # voice + anti-slop are both "internal instructions you follow but
+    # never describe in the output" — they live in the same bullet
+    # block. anti_slop_lines() is universal; compose_style_lines() is
+    # org-specific voice/banned-claims.
+    voice_lines = compose_style_lines(profile) + anti_slop_lines()
     voice_block = ("\n" + "\n".join(f"- {ln}" for ln in voice_lines)
                    if voice_lines else "")
     return (

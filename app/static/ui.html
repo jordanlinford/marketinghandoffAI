@@ -497,13 +497,16 @@
               <option value="social_post">social_post</option>
               <option value="blog_outline">blog_outline</option>
             </optgroup>
-            <optgroup label="Enhanced content" disabled>
-              <option value="buyer_guide" disabled>buyer_guide</option>
-              <option value="white_paper" disabled>white_paper</option>
-              <option value="case_study" disabled>case_study</option>
-              <option value="report" disabled>report</option>
-            </optgroup>
           </select>
+          <!-- Long-form anchor types (whitepaper / buyer_guide /
+               solution_guide / report) are NOT generated here — they
+               live in the Anchors pane above (#rpt-audience) and
+               dispatch via /api/reports/generate → report_composer →
+               RENDERERS. The content_engine path is for atomized,
+               channel-shaped content (Level 4) only. case_study is
+               BACKLOG (waits on the §6 qualitative-binding
+               extension); when it lands it joins the Anchors pane,
+               not this one. -->
           <input type="text" id="content-topic"
             placeholder="topic (e.g. cut weekly review overhead)" />
         </div>
@@ -513,8 +516,9 @@
           <button id="content-generate-btn">Generate</button>
         </div>
         <div class="setup-status" style="margin-top:6px; color:var(--muted);">
-          Enhanced content uses your product's full PMM framework and is
-          generated as templated long-form output.
+          Channel content — email, ad, social, blog outline. For
+          long-form anchor types (whitepaper, buyer's guide, solution
+          guide, audience reports), use the Anchors pane above.
         </div>
       </div>
     </div>
@@ -721,24 +725,33 @@
       <div id="dash-memory"></div>
     </div>
     <div class="section">
-      <h3>Reports</h3>
+      <h3>Anchors (reports + long-form)</h3>
       <div class="setup-status" style="margin-bottom:6px;">
         The storytelling layer — turn the substrate + memory + production
-        lane into a narrative readout. Pick an audience (Board / CEO weekly /
-        Sales leadership) and a scope; preview the structured intelligence
-        the report will be based on before generating; the rendered report
-        lands in the Library alongside content, routes through the same
+        lane into a long-form anchor asset. Pick a type (audience report,
+        whitepaper, buyer's guide, or solution guide) and a scope; preview
+        the structured intelligence the anchor will be based on; the
+        rendered output lands in the Library, routes through the same
         approval gate, and is regenerable via "give me something better."
+        Every anchor shares ONE engine + ledger + validator — the type
+        only changes how the intelligence is rendered.
       </div>
       <div class="setup-paths" style="margin-bottom:10px;">
         <div class="setup-path">
           <h4>Compose</h4>
           <div class="field" style="margin-bottom:8px;">
-            <label>Audience</label>
+            <label>Type</label>
             <select id="rpt-audience">
-              <option value="board">Board update</option>
-              <option value="ceo_weekly">CEO weekly digest</option>
-              <option value="sales_leadership">Sales leadership update</option>
+              <optgroup label="Audience reports">
+                <option value="board">Board update</option>
+                <option value="ceo_weekly">CEO weekly digest</option>
+                <option value="sales_leadership">Sales leadership update</option>
+              </optgroup>
+              <optgroup label="Long-form anchors">
+                <option value="whitepaper">White paper</option>
+                <option value="buyer_guide">Buyer's guide</option>
+                <option value="solution_guide">Solution guide</option>
+              </optgroup>
             </select>
           </div>
           <div class="field" style="margin-bottom:8px;">
@@ -774,25 +787,27 @@
           </div>
           <div class="row" style="gap:6px; margin-top:10px;">
             <button id="rpt-preview-btn" class="ghost">Preview intelligence</button>
-            <button id="rpt-generate-btn">Generate report</button>
+            <button id="rpt-generate-btn">Generate anchor</button>
           </div>
           <div id="rpt-compose-status" class="setup-status"
                style="margin-top:6px;"></div>
         </div>
         <div class="setup-path">
           <h4>What this is</h4>
-          <p>Three audiences, ONE intelligence engine. The same data renders
-             three different ways — defensive for the board, signal-dense for
-             the CEO, collaborative for sales — because what they need is
-             different. Thin patterns surface as "watching"; untagged
-             volume is funnel backdrop only, never quoted as marketing action.
-             Future periods produce a short honest readout naming the
-             period and surfacing current memory as a reference baseline —
-             reports describe what HAS happened, never what might.</p>
+          <p>Six anchor renderers, ONE intelligence engine. The same
+             data renders many ways — defensive for the board, signal-
+             dense for the CEO, collaborative for sales, thesis-driven
+             as a whitepaper, comparative as a buyer's guide, problem→
+             solution as a solution guide. Thin patterns surface as
+             "watching"; untagged volume is funnel backdrop only, never
+             quoted as marketing action. Future periods produce a short
+             honest readout naming the period and surfacing current
+             memory as a reference baseline — anchors describe what
+             HAS happened or what IS supported, never what might.</p>
         </div>
       </div>
       <div id="rpt-intelligence-preview" style="margin-bottom:10px;"></div>
-      <h4 style="margin:8px 0;">Recent reports</h4>
+      <h4 style="margin:8px 0;">Recent anchors</h4>
       <div id="rpt-list"></div>
     </div>
   </section>
@@ -1608,9 +1623,10 @@ async function loadDashboard() {
   await Promise.all([loadFunnel(), loadSuggestions(), loadMemory(), loadReports()]);
 }
 
-// "Reports" — list of generated reports for the org, scoped by product.
-// Reports are first-class content assets — opening one reuses the
-// Library detail view (same markdown + grade + regenerate path).
+// "Anchors" — list of every Level-3 anchor (audience reports +
+// long-form anchors) for the org, scoped by product. Anchors are
+// first-class assets — opening one reuses the Library detail view
+// (same markdown + grade + regenerate path).
 const _AUDIENCE_LABEL = {
   board: 'Board',
   ceo_weekly: 'CEO weekly',
@@ -1621,53 +1637,85 @@ async function loadReports() {
   const root = document.getElementById('rpt-list');
   if (!root) return;
   root.innerHTML = '<div class="setup-status">Loading…</div>';
-  const qs = state.selectedProductId
-    ? `?product_id=${encodeURIComponent(state.selectedProductId)}` : '';
-  let rows;
-  try { rows = await api('/api/reports' + qs); }
-  catch (e) {
-    root.innerHTML = `<div class="err">Couldn't load reports: ${e.message}</div>`;
+  // Read every anchor kind from the unified /api/assets projection
+  // in parallel. Previously this called /api/reports which only
+  // returned audience reports — long-form anchors (whitepaper /
+  // buyer_guide / solution_guide) never showed up here. The unified
+  // surface mirrors the Library and stays in step as new anchor
+  // kinds register.
+  const anchorKinds = Object.keys(_ANCHOR_KIND_LABELS);
+  const productQs = state.selectedProductId
+    ? `&product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+  let bundles;
+  try {
+    bundles = await Promise.all(anchorKinds.map((kind) =>
+      api(`/api/assets?asset_kind=${kind}&limit=50${productQs}`)));
+  } catch (e) {
+    root.innerHTML = `<div class="err">Couldn't load anchors: ${e.message}</div>`;
     return;
   }
   await _populateReportCampaignPicker();
   // Default the date inputs to last 30 days on first paint.
   _setQuickPick('last30');
+  const rows = [];
+  for (const b of bundles) {
+    for (const a of (b.assets || [])) rows.push(a);
+  }
+  rows.sort((x, y) => (y.created_at || '').localeCompare(x.created_at || ''));
   root.innerHTML = '';
   if (!rows.length) {
     root.appendChild(el('div', { class: 'empty-state' },
-      el('div', { class: 'big' }, 'No reports yet'),
-      el('div', {}, 'Compose one above — Board, CEO weekly, or Sales leadership.')));
+      el('div', { class: 'big' }, 'No anchors yet'),
+      el('div', {}, 'Compose one above — pick a type (report audience '
+        + 'or long-form anchor) and a scope.')));
     return;
   }
   const list = el('div', { style: 'display:flex; flex-direction:column; gap:6px;' });
   for (const r of rows.slice(0, 25)) {
-    const audienceLabel = _AUDIENCE_LABEL[r.audience] || r.audience;
-    const scopeSummary = r.scope && r.scope.kind === 'campaign'
-      ? `campaign=${r.scope.campaign_name || r.scope.campaign_id || '?'}`
-      : (r.scope && r.scope.is_future
-        ? `future ${r.scope.start} → ${r.scope.end}`
-        : `${(r.scope && r.scope.start) || '?'} → ${(r.scope && r.scope.end) || '?'}`);
+    // The badge text + class come from the unified anchor label map.
+    // Audience reports surface the audience (Board / CEO weekly /
+    // Sales leadership); long-form anchors surface the kind itself.
+    let badgeText, badgeClass, badgeTitle;
+    if (r.asset_kind === 'report') {
+      const audKey = (r.asset_type || '').replace(/^report_/, '');
+      badgeText = _AUDIENCE_LABEL[audKey] || audKey || 'Report';
+      badgeClass = 'badge kind-report';
+      badgeTitle = `Audience: ${badgeText}`;
+    } else {
+      badgeText = _ANCHOR_KIND_LABELS[r.asset_kind] || r.asset_kind;
+      badgeClass = `badge kind-${r.asset_kind}`;
+      badgeTitle = `Anchor: ${badgeText}`;
+    }
+    const statusKind = (r.status === 'ready' || r.status === 'succeeded')
+      ? 'succeeded' : 'pending';
+    const trustPill = r.trust_state
+      ? el('span', { class: 'badge trust-' + r.trust_state,
+                      style: 'margin-left:6px;',
+                      title: 'Trust layer state — not human approval' },
+          r.trust_state.replace(/_/g, ' '))
+      : null;
     const card = el('div', { class: 'panel',
       style: 'padding:10px; min-width:0; overflow-wrap:anywhere;' },
       el('div', { class: 'row', style: 'margin-bottom:4px; gap:8px;' },
-        el('span', { class: 'badge report',
-                     title: `Audience: ${audienceLabel}` }, audienceLabel),
-        el('strong', { title: r.title || '(untitled report)' },
-          _cleanTitle(r.title || '(untitled report)')),
-        el('span', { class: 'badge ' + (r.status === 'ready' ? 'succeeded' : 'pending') },
-          r.status),
+        el('span', { class: badgeClass, title: badgeTitle }, badgeText),
+        el('strong', { title: r.title || '(untitled anchor)' },
+          _cleanTitle(r.title || '(untitled anchor)')),
+        el('span', { class: 'badge ' + statusKind }, r.status),
+        trustPill,
         (r.grade != null
           ? el('span', { class: 'badge', title: 'Advisory grade' },
               `grade ${r.grade}`)
           : null)),
       el('div', { class: 'sub',
         style: 'color:var(--muted); font-size:12px;' },
-        `${scopeSummary} · ${r.created_at ? r.created_at.slice(0, 10) : '?'}`
-        + (r.render_strategy ? ` · ${r.render_strategy}` : '')),
+        `${(r.created_at || '?').slice(0, 10)}`
+        + (r.product_name ? ` · ${r.product_name}` : ' · Org-level')
+        + (r.campaign ? ` · campaign=${r.campaign}` : '')),
       el('div', { class: 'row', style: 'margin-top:6px; gap:6px;' },
         el('a', { href: `/api/assets/content/${r.id}/download?format=md`,
                   target: '_blank' }, 'Download .md'),
-        el('a', { onclick: () => openReportDetail(r.id) }, 'Open →')),
+        el('a', { onclick: () => openAssetDetail(
+            { id: r.id, asset_kind: r.asset_kind }) }, 'Open →')),
     );
     list.appendChild(card);
   }
@@ -1920,11 +1968,25 @@ function _renderListSection(label, items, opts) {
   return det;
 }
 
+// Maps the renderer audience name (the value of #rpt-audience) to the
+// Library asset_kind. Audience reports collapse into kind=report; each
+// long-form anchor type has its own kind. Single source for the
+// JS-side rendering of "what kind did this audience produce?"
+const _AUDIENCE_TO_KIND = {
+  board:            'report',
+  ceo_weekly:       'report',
+  sales_leadership: 'report',
+  whitepaper:       'whitepaper',
+  buyer_guide:      'buyer_guide',
+  solution_guide:   'solution_guide',
+};
+
 async function generateReport() {
   const status = document.getElementById('rpt-compose-status');
-  status.textContent = 'Enqueueing report…';
+  status.textContent = 'Enqueueing anchor…';
   try {
     const audience = document.getElementById('rpt-audience').value;
+    const kind = _AUDIENCE_TO_KIND[audience] || 'report';
     const scope = _readReportScope();
     const body = {
       audience, scope,
@@ -1934,26 +1996,34 @@ async function generateReport() {
     const r = await api('/api/reports/generate', {
       method: 'POST', body: JSON.stringify(body) });
     status.textContent = `Queued as run ${r.run_id.slice(0,8)}… — polling.`;
-    // Poll the report list until the run lands. We watch for a report
-    // whose ID is NEW (didn't exist before our request).
-    const beforeRows = await api('/api/reports').catch(() => []);
-    const beforeIds = new Set((beforeRows || []).map(x => x.id));
+    // Poll the RUN itself — /api/runs/{id} returns artifacts for the
+    // run when it lands, regardless of which anchor kind it produced.
+    // The previous report-list poll could not see whitepaper / buyer_
+    // guide / solution_guide artifacts because that endpoint filters
+    // on report content_types only.
     for (let i = 0; i < 30; i++) {
       await new Promise((res) => setTimeout(res, 1000));
       try {
-        const rows = await api('/api/reports');
-        const fresh = (rows || []).find(x => !beforeIds.has(x.id)
-                                          && x.audience === audience);
-        if (fresh) {
-          status.textContent = `Report ready: ${fresh.title}`;
+        const detail = await api(`/api/runs/${r.run_id}`);
+        const runStatus = detail && detail.run && detail.run.status;
+        if (runStatus === 'failed') {
+          status.innerHTML = `<span class="err">Run failed: `
+            + `${(detail.run.error || 'unknown error')}</span>`;
+          return;
+        }
+        const arts = (detail && detail.artifacts) || [];
+        if (runStatus === 'succeeded' && arts.length) {
+          const art = arts[0];
+          status.textContent = `${kind} ready: ${art.title}`;
           await loadReports();
-          // Open the new report inline.
-          openReportDetail(fresh.id);
+          // Open via the unified asset detail — the kind drives the
+          // URL routing shim inside openAssetDetail.
+          openAssetDetail({ id: art.id, asset_kind: kind });
           return;
         }
       } catch (e) { /* keep polling */ }
     }
-    status.textContent = 'Report did not land within 30s — refresh the list.';
+    status.textContent = 'Anchor did not land within 30s — refresh the list.';
     await loadReports();
   } catch (e) {
     status.innerHTML = `<span class="err">Generate failed: ${e.message}</span>`;

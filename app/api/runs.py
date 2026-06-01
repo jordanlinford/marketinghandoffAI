@@ -65,28 +65,33 @@ def list_runs(user: User = Depends(current_user), db: Session = Depends(get_db))
     runs = list(db.execute(
         scoped(Run, user.org_id).order_by(Run.created_at.desc())
     ).scalars().all())
-    # For report_composer runs that produced a report, look up the
-    # artifact ONCE in bulk and map run_id → trust_state via the SAME
-    # compact_trust_state() function the library list pill + detail
-    # banner use. Single source — never recomputed per surface.
-    report_run_ids = [r.id for r in runs
+    # For report_composer runs that produced an anchor artifact
+    # (report / whitepaper / buyer_guide / solution_guide / ...),
+    # look up the artifact ONCE in bulk and map run_id →
+    # trust_state via the SAME compact_trust_state() function the
+    # library list pill + detail banner use. Single source — never
+    # recomputed per surface.
+    from app.api.assets import _ANCHOR_TYPE_SET
+    anchor_run_ids = [r.id for r in runs
                        if r.agent_key == "report_composer"]
     trust_by_run: dict[str, str | None] = {}
-    if report_run_ids:
+    if anchor_run_ids:
         from app.reports.trust_view import compact_trust_state
         arts = db.execute(
             scoped(Artifact, user.org_id).where(
-                Artifact.run_id.in_(report_run_ids),
-                # Whitepaper anchor goes through the SAME report_composer
-                # path and the SAME trust validation; pull both anchor
-                # artifact types into the trust_state map.
-                Artifact.type.in_(("report_draft", "whitepaper_draft")),
+                Artifact.run_id.in_(anchor_run_ids),
+                # Every anchor goes through the SAME report_composer
+                # path + trust validation. The registry in
+                # app/api/assets.py is the single source for "what's
+                # an anchor type"; reading off it keeps this filter
+                # automatically in step as new anchors register.
+                Artifact.type.in_(_ANCHOR_TYPE_SET),
             )
         ).scalars().all()
         for a in arts:
             tc = (a.body or {}).get("trust_checks") or {}
             trust_by_run[a.run_id] = compact_trust_state(tc)
-    return [RunOut.of(r, report_trust_state=trust_by_run.get(r.id))
+    return [RunOut.of(r, anchor_trust_state=trust_by_run.get(r.id))
             for r in runs]
 
 

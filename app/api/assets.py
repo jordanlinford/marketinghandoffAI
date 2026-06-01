@@ -51,19 +51,65 @@ _BRIEF_TYPE = "market_brief"
 # report_sales_leadership) for audience, but the kind filter resolves
 # off the top-level type. Same field every other kind uses; no new
 # parallel field added.
+# ---- Anchor-kind registry --------------------------------------------------
+# Every Level-3 anchor follows the SAME mechanism: a top-level
+# Artifact.type ("<anchor>_draft") drives the Library kind filter, the
+# body.content.content_type carries the audience slug for badging, and
+# the same intelligence engine + ledger + validator + severity layer +
+# trust view-model power every anchor. New anchors register ONE entry
+# here and the rest of the projection / list / detail paths pick them
+# up automatically.
+#
+# Each entry:
+#   artifact_type → {
+#       "kind":             top-level asset_kind name (Library filter)
+#       "content_types":    valid body.content.content_type values
+#                           (badge text + "unknown" §5 guard)
+#       "default_title":    fallback when art.title is empty
+#       "title_label":      human noun for empty-state copy / search
+#   }
+_ANCHOR_KINDS: dict[str, dict] = {
+    "report_draft": {
+        "kind":           "report",
+        "content_types":  ("report_board", "report_ceo_weekly",
+                            "report_sales_leadership"),
+        "default_title":  "Untitled report",
+        "title_label":    "report",
+    },
+    "whitepaper_draft": {
+        "kind":           "whitepaper",
+        "content_types":  ("whitepaper",),
+        "default_title":  "Untitled whitepaper",
+        "title_label":    "whitepaper",
+    },
+    "buyer_guide_draft": {
+        "kind":           "buyer_guide",
+        "content_types":  ("buyer_guide",),
+        "default_title":  "Untitled buyer's guide",
+        "title_label":    "buyer's guide",
+    },
+    "solution_guide_draft": {
+        "kind":           "solution_guide",
+        "content_types":  ("solution_guide",),
+        "default_title":  "Untitled solution guide",
+        "title_label":    "solution guide",
+    },
+}
+
+# Derived lookups so callers don't iterate the dict on every request.
+_ANCHOR_TYPE_SET: tuple[str, ...] = tuple(_ANCHOR_KINDS.keys())
+_ANCHOR_KIND_SET: tuple[str, ...] = tuple(
+    spec["kind"] for spec in _ANCHOR_KINDS.values())
+_ANCHOR_KIND_TO_TYPE: dict[str, str] = {
+    spec["kind"]: art_type for art_type, spec in _ANCHOR_KINDS.items()
+}
+
+# Back-compat constants. Some external surfaces still reference the
+# specific "report" anchor (e.g. /api/reports). Anchors generally read
+# off the registry above.
 _REPORT_TYPE = "report_draft"
-_REPORT_AUDIENCES = ("report_board", "report_ceo_weekly",
-                     "report_sales_leadership")
-# Whitepaper is a Level-3 ANCHOR alongside report — same
-# mechanism, separate kind. body.content.content_type='whitepaper'
-# and Artifact.type='whitepaper_draft'. The Library filter resolves
-# off Artifact.type, exactly like report. NO new pipeline — same
-# intelligence engine, same ledger, same validator, same severity
-# layer, same gate. See docs/content-architecture.md Level 3 and
-# the brief that added this anchor.
-_WHITEPAPER_TYPE = "whitepaper_draft"
-_WHITEPAPER_CONTENT_TYPES = ("whitepaper",)
-_KINDS = ("content", "document", "brief", "report", "whitepaper")
+_REPORT_AUDIENCES = _ANCHOR_KINDS["report_draft"]["content_types"]
+_KINDS: tuple[str, ...] = ("content", "document", "brief") + _ANCHOR_KIND_SET
 _DEFAULT_LIMIT = 50
 
 
@@ -112,85 +158,46 @@ def _doc_text_blob(d: ProductDocument) -> str:
     return " ".join(filter(None, [d.filename or "", d.extracted_text or ""]))
 
 
-def _project_report(art: Artifact, products: dict, cost_by_run: dict) -> dict:
-    """Projection for report artifacts.
+def _project_anchor(art: Artifact, products: dict,
+                    cost_by_run: dict) -> dict:
+    """Single projection for every Level-3 anchor artifact (report,
+    whitepaper, buyer_guide, solution_guide, ...). Reads the
+    artifact_type → kind spec from _ANCHOR_KINDS; falls back to
+    asset_kind='unknown' (§5 discipline) when the body.content
+    .content_type doesn't match the spec's content_types — a
+    defensive bug catcher so a malformed body doesn't get silently
+    bucketed as a generic anchor.
 
-    asset_kind is "report" when the audience resolves cleanly via
-    body.content.content_type. When the content_type is missing or
-    isn't one of the known report audiences, we fall back to asset_kind
-    = "unknown" — the §5 (unknown vs. zero) discipline applied to kind.
-    A defensive bug catcher: after backfill the inconsistent state
-    shouldn't exist, but if it does we surface it rather than silently
-    bucketing as report-with-no-audience.
-
-    trust_state is the compact view-model state ("passed" /
-    "passed_with_warnings" / "blocked") so the Library list can render
-    a trust pill on each report card without fetching the detail.
+    trust_state is the compact view-model state ('passed' /
+    'passed_with_warnings' / 'blocked') so the Library list can
+    render a trust pill on each card without fetching the detail.
     Reads off body.trust_checks via the SAME derivation the detail
-    view-model uses (compact_trust_state) — single source of truth.
+    view-model uses (compact_trust_state) — single source of truth
+    across reports, whitepapers, and every future anchor.
     """
     from app.reports.trust_view import compact_trust_state
+    spec = _ANCHOR_KINDS.get(art.type)
     body = art.body or {}
     content = body.get("content") or {}
     metadata = content.get("metadata") or {}
     ct = (content.get("content_type") or "").strip()
-    if ct in _REPORT_AUDIENCES:
-        asset_kind = "report"
-        # asset_type carries the audience slug (board / ceo_weekly /
-        # sales_leadership) — what the UI badges with.
+    if spec and ct in spec["content_types"]:
+        asset_kind = spec["kind"]
+        # asset_type carries the audience/content slug — what the UI
+        # badges with (e.g. report_board, whitepaper).
         asset_type = ct
+        default_title = spec["default_title"]
     else:
+        # Defensive §5: an anchor artifact whose content_type isn't in
+        # its spec surfaces as 'unknown' rather than silently bucketed.
         asset_kind = "unknown"
         asset_type = "unknown"
+        default_title = "Untitled anchor"
     return {
         "id": art.id,
         "asset_kind": asset_kind,
         "asset_type": asset_type,
-        "title": art.title or metadata.get("topic") or "Untitled report",
-        "product_id": art.product_id,
-        "product_name": products.get(art.product_id) if art.product_id else None,
-        "status": art.status,
-        "campaign": art.utm_campaign,
-        "created_at": art.created_at.isoformat() if art.created_at else None,
-        "updated_at": art.created_at.isoformat() if art.created_at else None,
-        "cost_usd": cost_by_run.get(art.run_id),
-        "grade": (art.grade or {}).get("overall") if art.grade else None,
-        "trust_state": compact_trust_state(body.get("trust_checks")),
-        "source_ref": {"table": "artifacts", "id": art.id,
-                       "run_id": art.run_id, "artifact_type": art.type},
-    }
-
-
-def _project_whitepaper(art: Artifact, products: dict,
-                        cost_by_run: dict) -> dict:
-    """Projection for whitepaper artifacts. Mirrors _project_report
-    field-for-field — the only deltas are asset_kind='whitepaper' and
-    asset_type='whitepaper' (no audience sub-slug today; if the
-    whitepaper anchor later grows audience cuts, the slug lives in
-    content.content_type and this lookup mirrors _project_report's
-    _REPORT_AUDIENCES check). The trust pill comes from the SAME
-    compact_trust_state(body.trust_checks) the report path uses —
-    single source across surfaces."""
-    from app.reports.trust_view import compact_trust_state
-    body = art.body or {}
-    content = body.get("content") or {}
-    metadata = content.get("metadata") or {}
-    ct = (content.get("content_type") or "").strip()
-    if ct in _WHITEPAPER_CONTENT_TYPES:
-        asset_kind = "whitepaper"
-        asset_type = ct
-    else:
-        # Defensive: same §5 unknown-vs-zero discipline as _project_report.
-        # An Artifact.type=whitepaper_draft with the wrong/missing
-        # content.content_type surfaces as unknown rather than silently
-        # bucketed.
-        asset_kind = "unknown"
-        asset_type = "unknown"
-    return {
-        "id": art.id,
-        "asset_kind": asset_kind,
-        "asset_type": asset_type,
-        "title": art.title or metadata.get("topic") or "Untitled whitepaper",
+        "title": art.title or metadata.get("topic") or default_title,
         "product_id": art.product_id,
         "product_name": products.get(art.product_id) if art.product_id else None,
         "status": art.status,
@@ -326,8 +333,9 @@ def list_assets(
 
     projected: list[dict] = []
     run_ids: set[str] = set()
-    # ---- Fetch artifacts (content + brief + report + whitepaper) -------
-    if asset_kind in (None, "content", "brief", "report", "whitepaper"):
+    # ---- Fetch artifacts (content + brief + every anchor kind) ---------
+    _fetch_kinds = ("content", "brief") + _ANCHOR_KIND_SET
+    if asset_kind in (None,) + _fetch_kinds:
         art_q = scoped(Artifact, user.org_id)
         # Filter artifact types up front so we don't drag every artifact
         # type into Python only to throw most away. The kind filter
@@ -340,10 +348,11 @@ def list_assets(
             types_wanted.extend(_CONTENT_TYPES)
         if asset_kind in (None, "brief"):
             types_wanted.append(_BRIEF_TYPE)
-        if asset_kind in (None, "report"):
-            types_wanted.append(_REPORT_TYPE)
-        if asset_kind in (None, "whitepaper"):
-            types_wanted.append(_WHITEPAPER_TYPE)
+        # Every anchor (report, whitepaper, buyer_guide, solution_guide,
+        # ...) is registered in _ANCHOR_KINDS — single source.
+        for anchor_type, spec in _ANCHOR_KINDS.items():
+            if asset_kind in (None, spec["kind"]):
+                types_wanted.append(anchor_type)
         art_q = art_q.where(Artifact.type.in_(types_wanted))
         if product_id:
             art_q = art_q.where(Artifact.product_id == product_id)
@@ -374,29 +383,20 @@ def list_assets(
                     continue
                 run_ids.add(a.run_id)
                 projected.append(("__brief__", a))
-            elif a.type == _REPORT_TYPE:
-                # asset_type, when supplied, narrows to a specific
-                # audience (e.g. ?asset_type=report_board).
+            elif a.type in _ANCHOR_TYPE_SET:
+                # Every anchor — report, whitepaper, buyer_guide,
+                # solution_guide — funnels through the same filter +
+                # projection. asset_type, when supplied, narrows to a
+                # specific content_type (e.g. report_board, whitepaper)
+                # OR matches the artifact_type itself.
                 ct = (a.body or {}).get("content", {}) \
                     .get("content_type", "") or ""
-                if asset_type and asset_type not in (ct, _REPORT_TYPE):
+                if asset_type and asset_type not in (ct, a.type):
                     continue
                 if asset_type_prefix and not ct.startswith(asset_type_prefix):
                     continue
                 run_ids.add(a.run_id)
-                projected.append(("__report__", a))
-            elif a.type == _WHITEPAPER_TYPE:
-                # asset_type narrows to a whitepaper content_type when
-                # supplied (whitepaper grows audience cuts in the
-                # future the same way report did — same filter shape).
-                ct = (a.body or {}).get("content", {}) \
-                    .get("content_type", "") or ""
-                if asset_type and asset_type not in (ct, _WHITEPAPER_TYPE):
-                    continue
-                if asset_type_prefix and not ct.startswith(asset_type_prefix):
-                    continue
-                run_ids.add(a.run_id)
-                projected.append(("__whitepaper__", a))
+                projected.append(("__anchor__", a))
 
     # ---- Fetch documents ---------------------------------------------
     if asset_kind in (None, "document"):
@@ -430,21 +430,16 @@ def list_assets(
             asset = _project_brief(obj, products, cost_by_run)
             if needle and needle not in _brief_text_blob(obj).lower():
                 continue
-        elif tag == "__report__":
-            asset = _project_report(obj, products, cost_by_run)
-            # Reports use the same body shape as content_drafts — reuse
+        elif tag == "__anchor__":
+            asset = _project_anchor(obj, products, cost_by_run)
+            # Every anchor shares the content_draft body shape — reuse
             # the content text blob for search.
             if needle and needle not in _content_text_blob(obj).lower():
                 continue
-            # Defensive: when asset_kind resolves to "unknown" the user
-            # asked for "report" but the artifact's content_type wasn't
-            # a known audience. We keep it in the result set (it's still
-            # an artifact of type=report_draft) but flagged.
-        elif tag == "__whitepaper__":
-            asset = _project_whitepaper(obj, products, cost_by_run)
-            # Same body shape as report/content — same text blob.
-            if needle and needle not in _content_text_blob(obj).lower():
-                continue
+            # Defensive: when asset_kind resolves to 'unknown' the user
+            # asked for an anchor kind but the artifact's content_type
+            # didn't match the registry. We keep it in the result set
+            # (it's still an artifact of an anchor type) but flagged.
         else:
             asset = _project_document(obj, products)
             if needle and needle not in _doc_text_blob(obj).lower():
@@ -460,14 +455,14 @@ def list_assets(
 
 # ---- Detail endpoints (native shape per kind) -----------------------------
 def _load_content(db: Session, org_id: str, artifact_id: str) -> Artifact:
-    # Reports and whitepapers share the content_draft body shape —
-    # same block-based structure, same grade attached, same .md
-    # download path. The URL is /api/assets/content/{id} for all of
-    # them so existing detail + download paths just work. The Library
-    # projection surfaces each as its own asset_kind (report /
-    # whitepaper) via the top-level Artifact.type field, so the badge
-    # + filter resolve correctly.
-    accepted_types = _CONTENT_TYPES + (_REPORT_TYPE, _WHITEPAPER_TYPE)
+    # Every anchor (report, whitepaper, buyer_guide, solution_guide,
+    # ...) shares the content_draft body shape — same block-based
+    # structure, same grade attached, same .md download path. The URL
+    # is /api/assets/content/{id} for all of them so existing detail
+    # + download paths just work. The Library projection surfaces
+    # each as its own asset_kind via the top-level Artifact.type
+    # field, so the badge + filter resolve correctly per kind.
+    accepted_types = _CONTENT_TYPES + _ANCHOR_TYPE_SET
     art = db.execute(
         scoped(Artifact, org_id).where(
             Artifact.id == artifact_id,
@@ -502,14 +497,13 @@ def detail_content(artifact_id: str,
                    user: User = Depends(current_user),
                    db: Session = Depends(get_db)) -> dict:
     art = _load_content(db, user.org_id, artifact_id)
-    # asset_kind here mirrors the list projection: report_draft and
-    # whitepaper_draft artifacts surface as their own anchor kinds so
-    # the detail view's badge + UI surfaces stay consistent with how
-    # the Library lists them.
-    if art.type == _REPORT_TYPE:
-        asset_kind_out = "report"
-    elif art.type == _WHITEPAPER_TYPE:
-        asset_kind_out = "whitepaper"
+    # asset_kind here mirrors the list projection: anchor artifacts
+    # surface as their own anchor kind (report / whitepaper /
+    # buyer_guide / solution_guide / ...) so the detail view's badge
+    # + UI surfaces stay consistent with how the Library lists them.
+    anchor_spec = _ANCHOR_KINDS.get(art.type)
+    if anchor_spec:
+        asset_kind_out = anchor_spec["kind"]
     else:
         asset_kind_out = "content"
     response = {
@@ -529,10 +523,11 @@ def detail_content(artifact_id: str,
     # — no new validation, no new decisions). The view-model is
     # deterministic over body.trust_checks + body.evidence_ledger +
     # body.content.blocks. We compute on read so legacy artifacts work
-    # without a backfill. Reports AND whitepapers share the trust
-    # surface — they go through the SAME validate_evidence_binding +
-    # severity layer, so the view-model is identical.
-    if art.type in (_REPORT_TYPE, _WHITEPAPER_TYPE):
+    # without a backfill. Every anchor (report, whitepaper,
+    # buyer_guide, solution_guide, ...) shares the trust surface —
+    # they go through the SAME validate_evidence_binding + severity
+    # layer, so the view-model is identical.
+    if art.type in _ANCHOR_TYPE_SET:
         from app.reports.trust_view import build_trust_view
         body = art.body or {}
         trust_checks = body.get("trust_checks") or {}

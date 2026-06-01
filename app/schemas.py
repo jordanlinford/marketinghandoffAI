@@ -151,16 +151,17 @@ class RunOut(BaseModel):
     # agents render their agent_key as before. Pulled from task (no
     # new data — just shaped for the UI).
     display_label: str | None = None
-    # report_trust_state — for report_composer runs that produced a
-    # report artifact, this carries the SAME trust state the library
-    # list pill and the detail banner show. Single source via
-    # `compact_trust_state(body.trust_checks)` — never recomputed.
-    # Populated by list_runs at projection time; None for non-report
-    # runs and for report runs whose artifact hasn't landed yet.
-    report_trust_state: str | None = None
+    # anchor_trust_state — for report_composer runs that produced any
+    # Level-3 anchor artifact (report / whitepaper / buyer_guide /
+    # solution_guide / ...), this carries the SAME trust state the
+    # library list pill and the detail banner show. Single source
+    # via `compact_trust_state(body.trust_checks)` — never recomputed.
+    # Populated by list_runs at projection time; None for non-anchor
+    # runs and for anchor runs whose artifact hasn't landed yet.
+    anchor_trust_state: str | None = None
 
     @classmethod
-    def of(cls, r, *, report_trust_state: str | None = None) -> "RunOut":
+    def of(cls, r, *, anchor_trust_state: str | None = None) -> "RunOut":
         task = r.task or {}
         display_label = None
         if r.agent_key == "report_composer":
@@ -175,11 +176,14 @@ class RunOut(BaseModel):
             else:
                 hint = ""
             audience_label = audience.title() if audience else "report"
-            # Anchor classes (whitepaper today; buyer_guide / solution_guide
-            # later) carry their own noun rather than reading as "Whitepaper
-            # report". Audience reports keep the "<audience> report" framing.
+            # Anchor classes carry their own noun rather than reading
+            # as "<noun> report". Audience reports keep the
+            # "<audience> report" framing. Extend this map as new
+            # anchors register.
             _ANCHOR_NOUN = {
-                "whitepaper": "Whitepaper",
+                "whitepaper":     "Whitepaper",
+                "buyer_guide":    "Buyer's guide",
+                "solution_guide": "Solution guide",
             }
             if audience_raw in _ANCHOR_NOUN:
                 display_label = _ANCHOR_NOUN[audience_raw] + (
@@ -193,7 +197,7 @@ class RunOut(BaseModel):
             product_id=r.product_id,
             created_at=r.created_at.isoformat(),
             display_label=display_label,
-            report_trust_state=report_trust_state,
+            anchor_trust_state=anchor_trust_state,
         )
 
 

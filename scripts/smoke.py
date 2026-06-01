@@ -5394,14 +5394,14 @@ def main() -> None:
         assert view17.get("state") == ground_truth, (
             "detail banner view.state MUST equal compact_trust_state(); "
             f"ground={ground_truth!r} view={view17.get('state')!r}")
-        # Surface C: RunOut.report_trust_state (HQ Recent Runs +
+        # Surface C: RunOut.anchor_trust_state (HQ Recent Runs +
         # Create run list both read this)
         runs17 = client.get("/api/runs", headers=H_ONIT).json()
         run_row = next((r for r in runs17 if r["id"] == rpt_run.id), None)
         assert run_row is not None, "RunOut MUST include rpt_run"
-        assert run_row.get("report_trust_state") == ground_truth, (
-            "RunOut.report_trust_state MUST equal compact_trust_state(); "
-            f"ground={ground_truth!r} run={run_row.get('report_trust_state')!r}")
+        assert run_row.get("anchor_trust_state") == ground_truth, (
+            "RunOut.anchor_trust_state MUST equal compact_trust_state(); "
+            f"ground={ground_truth!r} run={run_row.get('anchor_trust_state')!r}")
         print(f"[OK] Report (17a): same report ({rpt_art.id[:8]}) "
               f"resolves to state={ground_truth!r} on Library pill + "
               f"detail banner + RunOut — IDENTICALLY across surfaces.")
@@ -5450,9 +5450,9 @@ def main() -> None:
             + str(det_flip.get("trust_view")))
         runs_flip = client.get("/api/runs", headers=H_ONIT).json()
         run_row_flip = next((r for r in runs_flip if r["id"] == rpt_run.id), None)
-        assert run_row_flip["report_trust_state"] == "blocked", (
-            "RunOut.report_trust_state MUST flip with approval_blocked. "
-            "Got: " + str(run_row_flip["report_trust_state"]))
+        assert run_row_flip["anchor_trust_state"] == "blocked", (
+            "RunOut.anchor_trust_state MUST flip with approval_blocked. "
+            "Got: " + str(run_row_flip["anchor_trust_state"]))
 
         # Restore original state so subsequent assertions about
         # rpt_art remain stable across the full smoke run.
@@ -5476,7 +5476,7 @@ def main() -> None:
             "smoke restore failed — subsequent tests may be unstable")
         print(f"[OK] Report (17b): BEHAVIOR (load-bearing) — flipping "
               f"approval_blocked True → ALL surfaces (library pill, "
-              "detail banner, RunOut.report_trust_state) flipped to "
+              "detail banner, RunOut.anchor_trust_state) flipped to "
               "'blocked' together; flipping back restored. Single "
               "source, no per-surface caching diverged.")
 
@@ -5534,7 +5534,7 @@ def main() -> None:
         runs_2 = client.get("/api/runs", headers=H_ONIT).json()
         run_row_2 = next((r for r in runs_2 if r["id"] == rpt_run.id), None)
         assert lib_row_2["trust_state"] == lib_row["trust_state"]
-        assert run_row_2["report_trust_state"] == run_row["report_trust_state"]
+        assert run_row_2["anchor_trust_state"] == run_row["anchor_trust_state"]
         print(f"[OK] Report (17d): determinism — back-to-back reads on "
               f"each surface yield the same trust_state; no surface "
               "stores or caches a value that can drift from "
@@ -6000,6 +6000,293 @@ def main() -> None:
               f"across brand unset vs set; only body.brand_tokens differs. "
               f"Same load-bearing invariant as reports (#18c), proven on "
               f"the new anchor.")
+
+        # ================================================================
+        # Anchor (20) — Buyer's Guide + Solution Guide (Stage 2 of anchor
+        # expansion). Both ride the SAME machinery (renderer registry +
+        # report_composer dispatch + kind-promotion plumbing + ledger +
+        # validator + severity layer + trust view-model + brand chrome).
+        # Each gets the same presence + absence/behavior + brand-invariant
+        # checks as the whitepaper (#19). Looped here because the proof
+        # shape is identical — if a new anchor needed bespoke assertions,
+        # the abstraction would have leaked.
+        # ================================================================
+        print("---- Anchor (20) — Buyer's Guide + Solution Guide ----")
+        stage2_anchors = [
+            {
+                "audience":      "buyer_guide",
+                "artifact_type": "buyer_guide_draft",
+                "kind":          "buyer_guide",
+                "content_type":  "buyer_guide",
+                "title_label":   "Buyer's guide",
+            },
+            {
+                "audience":      "solution_guide",
+                "artifact_type": "solution_guide_draft",
+                "kind":          "solution_guide",
+                "content_type":  "solution_guide",
+                "title_label":   "Solution guide",
+            },
+        ]
+        # Same scope as #19 so the period_summary/highlights are known
+        # and the deterministic renderers produce a citable result.
+        stage2_scope = {"kind": "time_window",
+                        "start": "2026-04-01", "end": "2026-04-30"}
+
+        for spec in stage2_anchors:
+            audience = spec["audience"]
+            artifact_type = spec["artifact_type"]
+            kind = spec["kind"]
+            content_type = spec["content_type"]
+            label = spec["title_label"]
+
+            # ---- A. PRESENCE — end-to-end through the worker ---------
+            r = client.post("/api/reports/generate", headers=H_ONIT, json={
+                "audience": audience,
+                "scope": stage2_scope,
+                "product_id": sl_id,
+            })
+            assert r.status_code == 200, (
+                f"POST /api/reports/generate?audience={audience} failed: {r.text}")
+            gen = r.json()
+            assert gen["audience"] == audience
+            assert run_once() is True, (
+                f"worker did not pick up the {audience} job")
+            anchor_run = db.execute(
+                scoped(Run, onit.id).where(Run.id == gen["run_id"])
+            ).scalar_one()
+            assert anchor_run.status == "succeeded", (
+                f"{audience} run failed: {anchor_run.error}")
+            anchor_art = db.execute(
+                scoped(Artifact, onit.id).where(Artifact.run_id == anchor_run.id)
+            ).scalar_one()
+            assert anchor_art.type == artifact_type, (
+                f"{audience} artifact MUST persist as type={artifact_type!r}; "
+                f"got {anchor_art.type!r}. Kind-promotion dispatch missed it.")
+            body = anchor_art.body or {}
+            content = body.get("content") or {}
+            assert content.get("content_type") == content_type, (
+                f"body.content.content_type MUST be {content_type!r}; got "
+                f"{content.get('content_type')!r}")
+            trust_checks = body.get("trust_checks") or {}
+            assert "passed" in trust_checks, (
+                f"{audience} body.trust_checks missing 'passed' — "
+                "validate_evidence_binding did not run.")
+            assert "findings_by_severity" in trust_checks, (
+                f"{audience} body.trust_checks missing 'findings_by_severity' "
+                "— severity classifier did not run.")
+            assert body.get("evidence_ledger"), (
+                f"{audience} body.evidence_ledger empty — ledger build "
+                "did not fire.")
+            # Library projection: kind=<anchor>, same trust pill.
+            r = client.get(f"/api/assets?asset_kind={kind}",
+                           headers=H_ONIT).json()
+            rows = [a for a in r["assets"] if a["id"] == anchor_art.id]
+            assert rows, (f"{audience} artifact MUST appear in "
+                          f"/api/assets?asset_kind={kind}")
+            row = rows[0]
+            assert row["asset_kind"] == kind
+            assert row["asset_type"] == content_type
+            assert row["trust_state"] in (
+                "passed", "passed_with_warnings", "blocked"), (
+                f"{audience} projection trust_state MUST come from "
+                f"compact_trust_state; got {row['trust_state']!r}")
+            # Filter isolation: other anchor kinds + content MUST NOT
+            # include this artifact. Reading off the same registry the
+            # API uses (no per-kind hardcoding here either).
+            for other_kind in ("content", "report", "whitepaper",
+                                "buyer_guide", "solution_guide"):
+                if other_kind == kind:
+                    continue
+                others = client.get(
+                    f"/api/assets?asset_kind={other_kind}",
+                    headers=H_ONIT).json()["assets"]
+                assert not any(a["id"] == anchor_art.id for a in others), (
+                    f"kind={other_kind} MUST NOT include {audience} "
+                    "artifacts. Kind separation broke.")
+            # Detail surface: same /api/assets/content/{id} URL, returns
+            # asset_kind=<kind> + trust_view via SAME view-model.
+            d = client.get(f"/api/assets/content/{anchor_art.id}",
+                           headers=H_ONIT).json()
+            assert d["asset_kind"] == kind, (
+                f"detail asset_kind MUST be {kind!r}; got {d['asset_kind']!r}")
+            assert d.get("trust_view"), (
+                f"{audience} detail MUST carry trust_view (same view-model "
+                "as report).")
+            # RunOut.anchor_trust_state surfaces the SAME state.
+            runs_proj = client.get("/api/runs", headers=H_ONIT).json()
+            run_row = next((rr for rr in runs_proj if rr["id"] == anchor_run.id), None)
+            assert run_row is not None, f"{audience} run MUST appear in /api/runs"
+            assert run_row["anchor_trust_state"] in (
+                "passed", "passed_with_warnings", "blocked"), (
+                f"RunOut.anchor_trust_state MUST carry trust state for "
+                f"{audience} runs; got {run_row['anchor_trust_state']!r}.")
+            assert run_row["anchor_trust_state"] == row["trust_state"], (
+                f"RunOut.anchor_trust_state MUST equal library trust_state "
+                f"(single source); got run={run_row['anchor_trust_state']!r} "
+                f"lib={row['trust_state']!r}.")
+            print(f"[OK] Anchor (20-{audience} A): PRESENCE — end-to-end "
+                  f"via /api/reports/generate, artifact.type={artifact_type!r}, "
+                  f"Library kind={kind!r} (isolated from other anchor + "
+                  f"content kinds), detail carries trust_view, RunOut."
+                  f"anchor_trust_state matches Library trust_state.")
+
+            # ---- B. ABSENCE / BEHAVIOR (load-bearing) ----------------
+            # Same proof shape as #19b — bare unbound number trips the
+            # SAME validator into CRITICAL §6 with approval_blocked.
+            injected_blocks = list(content.get("blocks") or [])
+            for i, b in enumerate(injected_blocks):
+                if b.get("kind") == "body":
+                    injected_blocks[i] = {
+                        **b,
+                        "text": (b.get("text") or "")
+                                + "\nNote: 42 customers were impacted in this period.",
+                    }
+                    break
+            injected_content = {**content, "blocks": injected_blocks}
+            this_intel = build_report_intelligence(
+                db, onit.id, product_id=sl_id, scope=stage2_scope)
+            this_ledger = build_ledger_from_intelligence(this_intel)
+            tc_after = validate_evidence_binding(injected_content, this_ledger)
+            tc_after = trust_checks_with_findings(
+                tc_after, this_ledger.to_list(), injected_content,
+                scope=this_intel.get("scope") or {})
+            assert tc_after.get("passed") is False, (
+                f"{audience} ABSENCE invariant broken: bare '42' did NOT "
+                f"fail validation. {label} trust path has diverged.")
+            crit = tc_after["findings_by_severity"]["critical"]
+            assert crit >= 1, (
+                f"{audience} ABSENCE invariant broken: critical={crit}. "
+                f"Severity classifier not inherited.")
+            assert tc_after.get("approval_blocked") is True, (
+                f"{audience} ABSENCE invariant broken: approval_blocked "
+                f"not set. Gate weaker than report's.")
+            sixfind = [f for f in (tc_after.get("findings") or [])
+                       if f.get("discipline") == "§6"
+                       and f.get("severity") == "critical"]
+            assert sixfind, (
+                f"{audience} ABSENCE invariant broken: no §6 critical "
+                f"finding. {label} is NOT on the report validator path.")
+            print(f"[OK] Anchor (20-{audience} B): ABSENCE/BEHAVIOR — "
+                  f"bare unbound '42' in {label} output fires CRITICAL "
+                  f"§6 via the SAME validate_evidence_binding + severity "
+                  f"layer that gates reports. approval_blocked=True. "
+                  f"Trust path is shared, not parallel.")
+
+            # ---- C. BRAND INVARIANT ----------------------------------
+            # Same byte-identical proof as #18c/#19c, parameterized.
+            row_brand = db.execute(scoped(OrgBrand, onit.id)).scalar_one_or_none()
+            if row_brand:
+                db.delete(row_brand); db.commit()
+            unset_brand = brand_for_org(db, onit.id)
+            assert unset_brand["is_default"] is True
+            inv_intel = build_report_intelligence(
+                db, onit.id, product_id=sl_id, scope=stage2_scope)
+
+            class _NoLLMAnchor:
+                anthropic_api_key = ""
+
+            def _render_anchor_with_brand(brand_dict: dict, aud=audience) -> dict:
+                ctx = AgentContext(
+                    org_id=onit.id, org_name=onit.name,
+                    agent_key="report_composer", registration_id="x",
+                    run_id="x", trigger="manual",
+                    task={"audience": aud, "scope": stage2_scope},
+                    report_intelligence=inv_intel,
+                    profile={}, org_profile={},
+                    guardrail_rules={}, memory_patterns=[],
+                    brand=brand_dict, config={},
+                )
+                import app.config as _cfg
+                real = _cfg.get_settings
+                _cfg.get_settings = lambda: _NoLLMAnchor()
+                try:
+                    result = ReportComposerAgent().run(ctx)
+                finally:
+                    _cfg.get_settings = real
+                assert result.artifacts and result.artifacts[0].type == artifact_type, (
+                    f"{aud} agent run produced no {artifact_type} artifact")
+                return result.artifacts[0].body
+
+            body_unset = _render_anchor_with_brand(unset_brand)
+            custom_anchor = {
+                "color_primary":    "#7a3aff",
+                "color_secondary":  "#00b894",
+                "color_accent":     "#ffb86c",
+                "color_background": "#101418",
+                "color_text":       "#f5f7fa",
+                "font_heading":     "Space Grotesk",
+                "font_body":        "Inter",
+            }
+            client.put("/api/brand", json=custom_anchor, headers=H_ONIT)
+            set_brand = brand_for_org(db, onit.id)
+            assert set_brand["is_default"] is False
+            body_set = _render_anchor_with_brand(set_brand)
+
+            def _stable_anchor(x):
+                import json as _jm
+                return _jm.dumps(x, sort_keys=True, default=str)
+
+            assert _stable_anchor(body_unset["content"]) == _stable_anchor(body_set["content"]), (
+                f"INVARIANT VIOLATION ({audience}): body.content differs "
+                f"across brand-unset vs brand-set. Brand reached the "
+                f"claim layer in the {label} renderer.")
+            assert _stable_anchor(body_unset["trust_checks"]) == _stable_anchor(body_set["trust_checks"]), (
+                f"INVARIANT VIOLATION ({audience}): body.trust_checks "
+                f"differs across brand states.")
+            assert _stable_anchor(body_unset["evidence_ledger"]) == _stable_anchor(body_set["evidence_ledger"]), (
+                f"INVARIANT VIOLATION ({audience}): body.evidence_ledger "
+                f"differs across brand states.")
+            assert _stable_anchor(body_unset["brand_tokens"]) != _stable_anchor(body_set["brand_tokens"]), (
+                f"Brand tokens identical unset vs set for {audience} — "
+                f"brand pipe is dead.")
+            flat = _stable_anchor(body_set["content"])
+            for v in [custom_anchor["color_primary"],
+                      custom_anchor["color_secondary"],
+                      custom_anchor["font_heading"]]:
+                assert v not in flat and v.lower() not in flat, (
+                    f"INVARIANT VIOLATION ({audience}): brand token "
+                    f"{v!r} found in rendered content.")
+            print(f"[OK] Anchor (20-{audience} C): BRAND INVARIANT — "
+                  f"{label} renders byte-identical content/trust/ledger "
+                  f"across brand unset vs set. Only body.brand_tokens "
+                  f"differs. Same load-bearing invariant as #18c/#19c, "
+                  f"now proven across every Stage-2 anchor.")
+
+        # ---- 20-cross-check: kinds are mutually exclusive at the API -
+        # All four anchor kinds in the registry MUST be reachable AND
+        # mutually exclusive. A regression that double-bucketed an
+        # artifact would surface here as a row appearing under two
+        # kinds. Read off /api/assets four times and assert disjoint
+        # id sets.
+        kind_sets = {}
+        for kind in ("report", "whitepaper", "buyer_guide", "solution_guide"):
+            kind_sets[kind] = {
+                a["id"] for a in client.get(
+                    f"/api/assets?asset_kind={kind}&limit=500",
+                    headers=H_ONIT).json()["assets"]
+            }
+        for k1, s1 in kind_sets.items():
+            for k2, s2 in kind_sets.items():
+                if k1 >= k2:
+                    continue
+                overlap = s1 & s2
+                assert not overlap, (
+                    f"Anchor kinds {k1!r} and {k2!r} share artifact ids "
+                    f"{overlap!r}. Registry leaking — a single artifact "
+                    "must surface under exactly one anchor kind.")
+        # And all four kinds are reachable (smoke generates ≥1 of each
+        # over its lifetime — report from earlier sections, whitepaper
+        # from #19, buyer_guide + solution_guide from #20).
+        for kind, ids in kind_sets.items():
+            assert ids, (
+                f"asset_kind={kind!r} returned zero artifacts. The "
+                "kind is registered but no artifact is reaching it — "
+                "kind-promotion plumbing broke for that anchor.")
+        print(f"[OK] Anchor (20-cross): registry separation — every "
+              f"registered anchor kind reaches ≥1 artifact "
+              f"(counts={ {k: len(v) for k, v in kind_sets.items()} }), "
+              f"and kinds are mutually disjoint (no double-bucketing).")
 
         print("[OK] Smoke test passed.")
     finally:

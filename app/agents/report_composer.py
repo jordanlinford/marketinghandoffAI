@@ -256,19 +256,23 @@ class ReportComposerAgent(Agent):
             "ceo_weekly": "CEO weekly digest",
             "sales_leadership": "Sales leadership update",
             "whitepaper": "White paper",
+            "buyer_guide": "Buyer's guide",
+            "solution_guide": "Solution guide",
         }
         title = (f"{audience_titles.get(audience, audience.title())} — "
                  f"{scope_label}")
 
         # Anchor-vs-report kind promotion — same mechanism we used to
         # promote reports out of content_draft. Artifact.type drives
-        # the Library kind filter (see app/api/assets.py). Whitepaper
-        # is its own anchor kind alongside report; selection logic at
-        # the agent layer is by audience name, NOT by content_type
-        # string inspection downstream. New anchor classes
-        # (buyer_guide, solution_guide) extend this map.
+        # the Library kind filter (see app/api/assets.py). Each new
+        # anchor class registers ONE entry here: audience name (the
+        # RENDERERS key) → Artifact.type. The agent never branches on
+        # content_type string inspection — that lives in the
+        # downstream projection layer and reads off Artifact.type.
         _ANCHOR_TYPES = {
-            "whitepaper": "whitepaper_draft",
+            "whitepaper":     "whitepaper_draft",
+            "buyer_guide":    "buyer_guide_draft",
+            "solution_guide": "solution_guide_draft",
         }
         artifact_type = _ANCHOR_TYPES.get(audience, "report_draft")
         art = ArtifactDraft(

@@ -126,6 +126,10 @@
   /* Whitepaper — Level-3 anchor alongside report. Its own teal so the
      two anchor kinds don't blur. */
   .badge.kind-whitepaper { background: #103a3a; color: #9be3d6; }
+  /* Buyer's Guide — Level-3 anchor. Slate-blue. */
+  .badge.kind-buyer_guide { background: #1a2a3a; color: #a7c3e3; }
+  /* Solution Guide — Level-3 anchor. Olive. */
+  .badge.kind-solution_guide { background: #2e3a14; color: #d2e3a7; }
   /* Trust visibility surfaces — distinct, non-debug treatment per spec.
      Passed, passed-with-warnings, and blocked each get their own color
      so a quick glance at the banner says "approval permitted by the
@@ -612,6 +616,8 @@
           <option value="content">content</option>
           <option value="report">report</option>
           <option value="whitepaper">whitepaper</option>
+          <option value="buyer_guide">buyer guide</option>
+          <option value="solution_guide">solution guide</option>
           <option value="document">document</option>
           <option value="brief">brief</option>
         </select></div>
@@ -1130,11 +1136,11 @@ function renderRuns() {
   for (const r of state.runs) {
     // Trust pill — same source + class as the HQ Recent Runs row
     // and the library list pill. Single state, identical surfaces.
-    const trustPill = r.report_trust_state
-      ? el('span', { class: 'badge trust-' + r.report_trust_state,
+    const trustPill = r.anchor_trust_state
+      ? el('span', { class: 'badge trust-' + r.anchor_trust_state,
                       style: 'margin-left:6px;',
                       title: 'Trust layer state — not human approval' },
-          r.report_trust_state.replace(/_/g, ' '))
+          r.anchor_trust_state.replace(/_/g, ' '))
       : null;
     const topRow = el('div', { class: 'top' },
       el('span', {}, r.display_label || r.agent_key),
@@ -2782,28 +2788,48 @@ function _reportAudienceLabel(asset_type) {
   return map[k] || k;
 }
 
+// Every Level-3 anchor surfaces under the same projection (Library
+// pill + detail banner + RunOut). _ANCHOR_KIND_LABELS is the SINGLE
+// JS-side source for human-readable names; extend it as new anchors
+// register. The CSS badge class is mechanically `.kind-<asset_kind>`.
+const _ANCHOR_KIND_LABELS = {
+  report:         null,  // sentinel — use _reportAudienceLabel(asset_type)
+  whitepaper:     'White paper',
+  buyer_guide:    "Buyer's guide",
+  solution_guide: 'Solution guide',
+};
+const _isAnchorKind = (k) => k in _ANCHOR_KIND_LABELS;
+
+function _anchorTitle(asset) {
+  if (asset.asset_kind === 'report') {
+    return _reportAudienceLabel(asset.asset_type);
+  }
+  return _ANCHOR_KIND_LABELS[asset.asset_kind] || asset.asset_kind;
+}
+
 function _renderAssetCard(a) {
-  // Kind badge resolves directly from asset_kind — which the API now
-  // sets to "report" (top-level) for report artifacts. The audience
-  // (board / ceo_weekly / sales_leadership) is the asset_type, surfaced
-  // in the tooltip + sub line.
+  // Kind badge resolves directly from asset_kind. The API sets it to
+  // each anchor's own top-level kind via the registry in
+  // app/api/assets.py. The audience/sub-slug is the asset_type,
+  // surfaced in the tooltip + sub line.
   const kindBadge = el('span',
     { class: `badge kind-${a.asset_kind}`,
       title: a.asset_kind === 'report'
         ? `Audience: ${_reportAudienceLabel(a.asset_type)}`
-        : (a.asset_kind === 'whitepaper'
-            ? 'Anchor: White paper'
+        : (_isAnchorKind(a.asset_kind)
+            ? `Anchor: ${_ANCHOR_KIND_LABELS[a.asset_kind]}`
             : a.asset_kind) },
     a.asset_kind);
   const statusBadge = a.status
     ? el('span', { class: `badge ${a.status}` }, a.status)
     : null;
-  // Library trust pill — on anchors (report + whitepaper), and only
-  // when the projection surfaced a trust_state (legacy rows without
-  // trust_checks omit it rather than inventing one — same §6 Principle
-  // as everywhere else). Reads the SAME state the detail view banner
-  // shows — single source of truth.
-  const isAnchor = (a.asset_kind === 'report' || a.asset_kind === 'whitepaper');
+  // Library trust pill — on every Level-3 anchor (report, whitepaper,
+  // buyer_guide, solution_guide, ...), and only when the projection
+  // surfaced a trust_state (legacy rows without trust_checks omit it
+  // rather than inventing one — same §6 Principle as everywhere else).
+  // Reads the SAME state the detail view banner shows — single source
+  // of truth.
+  const isAnchor = _isAnchorKind(a.asset_kind);
   const trustPill = (isAnchor && a.trust_state)
     ? el('span', { class: 'badge trust-' + a.trust_state,
                     style: 'margin-left:6px;',
@@ -2815,11 +2841,9 @@ function _renderAssetCard(a) {
   const cost = (a.cost_usd != null && a.cost_usd > 0)
     ? ` · ${fmtCost(a.cost_usd)}` : '';
   const camp = a.campaign ? ` · campaign=${a.campaign}` : '';
-  const typeStr = a.asset_kind === 'report'
-    ? _reportAudienceLabel(a.asset_type)
-    : (a.asset_kind === 'whitepaper'
-        ? 'White paper'
-        : (a.asset_type || '—'));
+  const typeStr = _isAnchorKind(a.asset_kind)
+    ? _anchorTitle(a)
+    : (a.asset_type || '—');
   const fullTitle = a.title || '(untitled)';
   const card = el('div',
     { class: 'proposal', style: 'cursor:pointer;',
@@ -2843,14 +2867,13 @@ async function openAssetDetail(asset) {
   _libState.selectedAssetKind = asset.asset_kind;
   const root = document.getElementById('lib-detail');
   root.innerHTML = '<div class="setup-status">Loading…</div>';
-  // Anchors (report + whitepaper) share the block-based body shape
-  // with content; the existing /api/assets/content/{id} detail +
-  // download path accepts report_draft AND whitepaper_draft too.
-  // Route the URL through /content/ to avoid a parallel set of anchor
-  // endpoints — same projection, same body, just a different top-level
-  // kind for filtering + badging.
-  const urlKind = (asset.asset_kind === 'report'
-                   || asset.asset_kind === 'whitepaper')
+  // Every Level-3 anchor shares the block-based body shape with
+  // content; the existing /api/assets/content/{id} detail + download
+  // path accepts every anchor type. Route the URL through /content/
+  // to avoid a parallel set of anchor endpoints — same projection,
+  // same body, just a different top-level kind for filtering +
+  // badging.
+  const urlKind = _isAnchorKind(asset.asset_kind)
     ? 'content' : asset.asset_kind;
   const url = `/api/assets/${urlKind}/${asset.id}`;
   let detail;
@@ -2886,8 +2909,8 @@ function _renderAssetDetail(asset, detail) {
         style: 'margin-left:8px;',
         title: asset.asset_kind === 'report'
           ? `Audience: ${_reportAudienceLabel(asset.asset_type)}`
-          : (asset.asset_kind === 'whitepaper'
-              ? 'Anchor: White paper'
+          : (_isAnchorKind(asset.asset_kind)
+              ? `Anchor: ${_ANCHOR_KIND_LABELS[asset.asset_kind]}`
               : asset.asset_kind) },
       asset.asset_kind),
   ];
@@ -2919,10 +2942,10 @@ function _renderAssetDetail(asset, detail) {
     _renderDocumentDetailInto(wrap, asset, detail);
   } else if (asset.asset_kind === 'brief') {
     _renderBriefDetailInto(wrap, asset, detail);
-  } else if (asset.asset_kind === 'report' ||
-             asset.asset_kind === 'whitepaper') {
-    // Anchors (report + whitepaper) share the same body shape and the
-    // same trust view-model — same renderer with the same brand chrome
+  } else if (_isAnchorKind(asset.asset_kind)) {
+    // Every Level-3 anchor (report / whitepaper / buyer_guide /
+    // solution_guide / ...) shares the same body shape and the same
+    // trust view-model — same renderer with the same brand chrome
     // path. The badge above already distinguishes them by kind.
     _renderReportDetailInto(wrap, asset, detail);
   }
@@ -5105,14 +5128,15 @@ async function loadCommandCenter() {
     for (const r of recentRuns) {
       // Trust pill mirrors the library list pill EXACTLY — same
       // .badge.trust-{state} class, same value source (RunOut.
-      // report_trust_state, computed via compact_trust_state on the
-      // produced report's body.trust_checks). Single source, no
-      // recomputation in the UI.
-      const trustPill = r.report_trust_state
-        ? el('span', { class: 'badge trust-' + r.report_trust_state,
+      // anchor_trust_state, computed via compact_trust_state on the
+      // produced anchor's body.trust_checks). Single source, no
+      // recomputation in the UI. Carries trust for every Level-3
+      // anchor (report / whitepaper / buyer_guide / solution_guide).
+      const trustPill = r.anchor_trust_state
+        ? el('span', { class: 'badge trust-' + r.anchor_trust_state,
                         style: 'margin-left:6px;',
                         title: 'Trust layer state — not human approval' },
-            r.report_trust_state.replace(/_/g, ' '))
+            r.anchor_trust_state.replace(/_/g, ' '))
         : null;
       runsCard.appendChild(el('div', { style: 'margin:6px 0; cursor:pointer;',
         onclick: () => { switchView('create'); selectRun(r.id); } },

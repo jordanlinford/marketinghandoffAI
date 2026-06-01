@@ -123,6 +123,9 @@
      it's recognizable at a glance. */
   .badge.kind-report     { background: #4a1230; color: #ffb3d1; }
   .badge.report          { background: #4a1230; color: #ffb3d1; }
+  /* Whitepaper — Level-3 anchor alongside report. Its own teal so the
+     two anchor kinds don't blur. */
+  .badge.kind-whitepaper { background: #103a3a; color: #9be3d6; }
   /* Trust visibility surfaces — distinct, non-debug treatment per spec.
      Passed, passed-with-warnings, and blocked each get their own color
      so a quick glance at the banner says "approval permitted by the
@@ -608,6 +611,7 @@
           <option value="">(any)</option>
           <option value="content">content</option>
           <option value="report">report</option>
+          <option value="whitepaper">whitepaper</option>
           <option value="document">document</option>
           <option value="brief">brief</option>
         </select></div>
@@ -2787,17 +2791,20 @@ function _renderAssetCard(a) {
     { class: `badge kind-${a.asset_kind}`,
       title: a.asset_kind === 'report'
         ? `Audience: ${_reportAudienceLabel(a.asset_type)}`
-        : a.asset_kind },
+        : (a.asset_kind === 'whitepaper'
+            ? 'Anchor: White paper'
+            : a.asset_kind) },
     a.asset_kind);
   const statusBadge = a.status
     ? el('span', { class: `badge ${a.status}` }, a.status)
     : null;
-  // Library trust pill — only on reports, and only when the projection
-  // surfaced a trust_state (legacy reports without trust_checks omit it
-  // rather than inventing one — same §6 Principle as everywhere else).
-  // Reads the SAME state the detail view banner shows — single source
-  // of truth.
-  const trustPill = (a.asset_kind === 'report' && a.trust_state)
+  // Library trust pill — on anchors (report + whitepaper), and only
+  // when the projection surfaced a trust_state (legacy rows without
+  // trust_checks omit it rather than inventing one — same §6 Principle
+  // as everywhere else). Reads the SAME state the detail view banner
+  // shows — single source of truth.
+  const isAnchor = (a.asset_kind === 'report' || a.asset_kind === 'whitepaper');
+  const trustPill = (isAnchor && a.trust_state)
     ? el('span', { class: 'badge trust-' + a.trust_state,
                     style: 'margin-left:6px;',
                     title: 'Trust layer state — not a human approval' },
@@ -2809,7 +2816,10 @@ function _renderAssetCard(a) {
     ? ` · ${fmtCost(a.cost_usd)}` : '';
   const camp = a.campaign ? ` · campaign=${a.campaign}` : '';
   const typeStr = a.asset_kind === 'report'
-    ? _reportAudienceLabel(a.asset_type) : (a.asset_type || '—');
+    ? _reportAudienceLabel(a.asset_type)
+    : (a.asset_kind === 'whitepaper'
+        ? 'White paper'
+        : (a.asset_type || '—'));
   const fullTitle = a.title || '(untitled)';
   const card = el('div',
     { class: 'proposal', style: 'cursor:pointer;',
@@ -2833,12 +2843,15 @@ async function openAssetDetail(asset) {
   _libState.selectedAssetKind = asset.asset_kind;
   const root = document.getElementById('lib-detail');
   root.innerHTML = '<div class="setup-status">Loading…</div>';
-  // Reports share the block-based body shape with content; the existing
-  // /api/assets/content/{id} detail + download path accepts report_draft
-  // too. Route the URL through content to avoid a parallel set of
-  // /report endpoints — same projection, same body, just a different
-  // top-level kind for filtering + badging.
-  const urlKind = asset.asset_kind === 'report' ? 'content' : asset.asset_kind;
+  // Anchors (report + whitepaper) share the block-based body shape
+  // with content; the existing /api/assets/content/{id} detail +
+  // download path accepts report_draft AND whitepaper_draft too.
+  // Route the URL through /content/ to avoid a parallel set of anchor
+  // endpoints — same projection, same body, just a different top-level
+  // kind for filtering + badging.
+  const urlKind = (asset.asset_kind === 'report'
+                   || asset.asset_kind === 'whitepaper')
+    ? 'content' : asset.asset_kind;
   const url = `/api/assets/${urlKind}/${asset.id}`;
   let detail;
   try {
@@ -2873,7 +2886,9 @@ function _renderAssetDetail(asset, detail) {
         style: 'margin-left:8px;',
         title: asset.asset_kind === 'report'
           ? `Audience: ${_reportAudienceLabel(asset.asset_type)}`
-          : asset.asset_kind },
+          : (asset.asset_kind === 'whitepaper'
+              ? 'Anchor: White paper'
+              : asset.asset_kind) },
       asset.asset_kind),
   ];
   // Grade pill in the header for content assets — surfaces "78/100" or
@@ -2904,7 +2919,11 @@ function _renderAssetDetail(asset, detail) {
     _renderDocumentDetailInto(wrap, asset, detail);
   } else if (asset.asset_kind === 'brief') {
     _renderBriefDetailInto(wrap, asset, detail);
-  } else if (asset.asset_kind === 'report') {
+  } else if (asset.asset_kind === 'report' ||
+             asset.asset_kind === 'whitepaper') {
+    // Anchors (report + whitepaper) share the same body shape and the
+    // same trust view-model — same renderer with the same brand chrome
+    // path. The badge above already distinguishes them by kind.
     _renderReportDetailInto(wrap, asset, detail);
   }
   return wrap;

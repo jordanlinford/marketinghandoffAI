@@ -248,24 +248,31 @@ class ReportComposerAgent(Agent):
                         "data gaps and untagged volume."))
 
         # Title is human-readable for the Library list. The Library badge
-        # comes from content.content_type (report_<audience>).
+        # comes from content.content_type (report_<audience>) for
+        # audience reports, or content.content_type='whitepaper' for
+        # anchor-class outputs.
         audience_titles = {
             "board": "Board update",
             "ceo_weekly": "CEO weekly digest",
             "sales_leadership": "Sales leadership update",
+            "whitepaper": "White paper",
         }
         title = (f"{audience_titles.get(audience, audience.title())} — "
                  f"{scope_label}")
 
-        # Reports are first-class assets: top-level Artifact.type is
-        # "report_draft" so the Library kind filter resolves off the
-        # same field every other kind uses (content/document/brief).
-        # The block-based body shape is reused — reports inherit the
-        # .md download, grade pill, and approval gate that content has,
-        # for free. Audience (board / ceo_weekly / sales_leadership)
-        # still lives in body.content.content_type for badge text.
+        # Anchor-vs-report kind promotion — same mechanism we used to
+        # promote reports out of content_draft. Artifact.type drives
+        # the Library kind filter (see app/api/assets.py). Whitepaper
+        # is its own anchor kind alongside report; selection logic at
+        # the agent layer is by audience name, NOT by content_type
+        # string inspection downstream. New anchor classes
+        # (buyer_guide, solution_guide) extend this map.
+        _ANCHOR_TYPES = {
+            "whitepaper": "whitepaper_draft",
+        }
+        artifact_type = _ANCHOR_TYPES.get(audience, "report_draft")
         art = ArtifactDraft(
-            type="report_draft",
+            type=artifact_type,
             title=title, body=body, citations=cites,
             status=artifact_status,
             parent_id=task.get("parent_artifact_id"),

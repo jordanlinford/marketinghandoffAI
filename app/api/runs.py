@@ -77,7 +77,10 @@ def list_runs(user: User = Depends(current_user), db: Session = Depends(get_db))
         arts = db.execute(
             scoped(Artifact, user.org_id).where(
                 Artifact.run_id.in_(report_run_ids),
-                Artifact.type == "report_draft",
+                # Whitepaper anchor goes through the SAME report_composer
+                # path and the SAME trust validation; pull both anchor
+                # artifact types into the trust_state map.
+                Artifact.type.in_(("report_draft", "whitepaper_draft")),
             )
         ).scalars().all()
         for a in arts:

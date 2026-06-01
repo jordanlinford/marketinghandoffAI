@@ -57,8 +57,14 @@ class IntelligenceIn(BaseModel):
 
 
 class GenerateIn(BaseModel):
+    # Audience drives the renderer dispatch. Reports
+    # (board / ceo_weekly / sales_leadership) and anchor classes
+    # (whitepaper today; buyer_guide / solution_guide later) all
+    # co-register in app.reports.renderers.RENDERERS, and the agent
+    # promotes anchors to their own Artifact.type — same kind-
+    # promotion mechanism as the original report kind.
     audience: str = Field(...,
-        description="'board' | 'ceo_weekly' | 'sales_leadership'")
+        description="'board' | 'ceo_weekly' | 'sales_leadership' | 'whitepaper'")
     scope: ScopeIn
     product_id: str | None = None
     lookback_days: int = 30

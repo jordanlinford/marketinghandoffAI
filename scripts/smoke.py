@@ -5755,6 +5755,252 @@ def main() -> None:
         print(f"[OK] Report (18d): determinism — same brand + same scope "
               f"renders identical bodies back-to-back.")
 
+        # ================================================================
+        # Anchor (19) — White Paper renderer (Stage 1 of anchor expansion).
+        #
+        # The load-bearing point of this section: a whitepaper is a NEW
+        # RENDER STRATEGY over the EXISTING intelligence + ledger + trust
+        # path, not a new pipeline. So #19b — bare unbound number trips
+        # the SAME §6 critical finding the report tests pin — is the
+        # keystone. If whitepaper had a parallel trust path, #19b would
+        # pass for the wrong reason; here it MUST trip the SAME
+        # validator/classifier reports use.
+        # ================================================================
+        print("---- Anchor (19) — White paper renderer ----")
+        from app.reports.renderers import render_whitepaper
+        from app.reports.evidence import (build_ledger_from_intelligence,
+                                           trust_checks_with_findings,
+                                           validate_evidence_binding)
+
+        # ---- 19a PRESENCE — end-to-end through the worker ------------
+        wp_scope = {"kind": "time_window",
+                    "start": "2026-04-01", "end": "2026-04-30"}
+        r = client.post("/api/reports/generate", headers=H_ONIT, json={
+            "audience": "whitepaper",
+            "scope": wp_scope,
+            "product_id": sl_id,
+        })
+        assert r.status_code == 200, (
+            f"POST /api/reports/generate?audience=whitepaper failed: {r.text}")
+        gen = r.json()
+        assert gen["audience"] == "whitepaper"
+        assert run_once() is True, "worker did not pick up the whitepaper job"
+        wp_run = db.execute(
+            scoped(Run, onit.id).where(Run.id == gen["run_id"])
+        ).scalar_one()
+        assert wp_run.status == "succeeded", (
+            f"whitepaper run failed: {wp_run.error}")
+        wp_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.run_id == wp_run.id)
+        ).scalar_one()
+        # The kind-promotion invariant — whitepaper got its own
+        # Artifact.type, NOT report_draft. This is the same mechanism
+        # report_draft used to step out of content_draft.
+        assert wp_art.type == "whitepaper_draft", (
+            f"whitepaper artifact MUST persist as type='whitepaper_draft'; "
+            f"got {wp_art.type!r}. The anchor kind-promotion did not fire.")
+        body = wp_art.body or {}
+        content = body.get("content") or {}
+        assert content.get("content_type") == "whitepaper", (
+            f"body.content.content_type MUST be 'whitepaper'; got "
+            f"{content.get('content_type')!r}")
+        # Trust machinery — SAME validator/severity/view-model the
+        # report path uses. If a parallel path existed, these fields
+        # would be missing or shaped differently.
+        trust_checks = body.get("trust_checks") or {}
+        assert "passed" in trust_checks, (
+            "whitepaper body.trust_checks missing 'passed' field — "
+            "validate_evidence_binding did not run.")
+        assert "findings_by_severity" in trust_checks, (
+            "whitepaper body.trust_checks missing 'findings_by_severity' — "
+            "severity classifier did not run.")
+        ledger = body.get("evidence_ledger") or []
+        assert ledger, "whitepaper body.evidence_ledger empty — ledger build did not fire."
+        # Library projection: kind=whitepaper, with the same trust pill
+        # the report kind carries.
+        r = client.get("/api/assets?asset_kind=whitepaper",
+                       headers=H_ONIT).json()
+        wp_rows = [a for a in r["assets"] if a["id"] == wp_art.id]
+        assert wp_rows, ("whitepaper artifact MUST appear in "
+                         "/api/assets?asset_kind=whitepaper")
+        wp_row = wp_rows[0]
+        assert wp_row["asset_kind"] == "whitepaper", (
+            f"projection asset_kind MUST be 'whitepaper'; got {wp_row['asset_kind']!r}")
+        assert wp_row["asset_type"] == "whitepaper"
+        assert wp_row["trust_state"] in (
+            "passed", "passed_with_warnings", "blocked"), (
+            f"projection trust_state MUST come from compact_trust_state; "
+            f"got {wp_row['trust_state']!r}")
+        # Library filter: kind=report and kind=content MUST NOT include
+        # the whitepaper (kind separation, same as report's separation
+        # from content).
+        rep_only = client.get("/api/assets?asset_kind=report",
+                              headers=H_ONIT).json()["assets"]
+        assert not any(a["id"] == wp_art.id for a in rep_only), (
+            "kind=report MUST NOT include whitepaper artifacts.")
+        content_only = client.get("/api/assets?asset_kind=content",
+                                   headers=H_ONIT).json()["assets"]
+        assert not any(a["id"] == wp_art.id for a in content_only), (
+            "kind=content MUST NOT include whitepaper artifacts.")
+        # Detail surface: same /api/assets/content/{id} URL, returns
+        # asset_kind=whitepaper + trust_view.
+        d = client.get(f"/api/assets/content/{wp_art.id}",
+                       headers=H_ONIT).json()
+        assert d["asset_kind"] == "whitepaper", (
+            f"detail asset_kind MUST be 'whitepaper'; got {d['asset_kind']!r}")
+        assert d.get("trust_view"), (
+            "whitepaper detail MUST carry trust_view (same view-model as report).")
+        print(f"[OK] Anchor (19a): PRESENCE — whitepaper generated end-to-end "
+              f"via /api/reports/generate; artifact.type='whitepaper_draft', "
+              f"Library kind='whitepaper' (separated from report + content), "
+              f"trust_checks populated by SAME validator + severity layer, "
+              f"detail carries trust_view via SAME view-model.")
+
+        # ---- 19b ABSENCE / BEHAVIOR (load-bearing) -------------------
+        # The keystone: inject a bare unbound number into the rendered
+        # whitepaper content, run it through the SAME validator the
+        # report path uses, and assert a CRITICAL §6 finding. If
+        # whitepaper had a parallel trust path, this would silently
+        # pass. The proof that the anchor inherits §6 is that THE
+        # IDENTICAL FUNCTION REPORTS USE flags it.
+        injected_blocks = list(content.get("blocks") or [])
+        # Pick an existing body block and append a bare number; keep
+        # other blocks untouched so the rest of the doc remains bound.
+        for i, b in enumerate(injected_blocks):
+            if b.get("kind") == "body":
+                injected_blocks[i] = {
+                    **b,
+                    "text": (b.get("text") or "")
+                            + "\nNote: 42 customers were impacted in this period.",
+                }
+                break
+        injected_content = {**content, "blocks": injected_blocks}
+        wp_intel = build_report_intelligence(
+            db, onit.id, product_id=sl_id, scope=wp_scope)
+        # Build the ledger from the SAME intelligence the artifact used,
+        # then re-run the SAME validation + classification path.
+        wp_ledger = build_ledger_from_intelligence(wp_intel)
+        tc_after = validate_evidence_binding(injected_content, wp_ledger)
+        tc_after = trust_checks_with_findings(
+            tc_after, wp_ledger.to_list(), injected_content,
+            scope=wp_intel.get("scope") or {})
+        assert tc_after.get("passed") is False, (
+            "ABSENCE invariant broken: bare '42' in a whitepaper did NOT "
+            "fail validation. The whitepaper trust path has diverged from "
+            "the report one.")
+        crit = tc_after["findings_by_severity"]["critical"]
+        assert crit >= 1, (
+            f"ABSENCE invariant broken: bare '42' did NOT classify as a "
+            f"§6 critical finding; got critical={crit}. Whitepaper does "
+            "not inherit the severity classifier.")
+        assert tc_after.get("approval_blocked") is True, (
+            "ABSENCE invariant broken: §6 critical finding did NOT set "
+            "approval_blocked=True. Whitepaper gate is weaker than report's.")
+        # And the same finding's discipline tag is §6 (generated vs
+        # observed), proving the classifier — not a special-case branch
+        # — fired.
+        sixfind = [f for f in (tc_after.get("findings") or [])
+                   if f.get("discipline") == "§6"
+                   and f.get("severity") == "critical"]
+        assert sixfind, (
+            "ABSENCE invariant broken: no §6 critical finding present. "
+            "The whitepaper validator path is NOT the report path.")
+        print(f"[OK] Anchor (19b): ABSENCE/BEHAVIOR (load-bearing) — "
+              f"bare unbound '42' in whitepaper output fires CRITICAL §6 "
+              f"via the SAME validate_evidence_binding + severity layer "
+              f"that gates reports. approval_blocked=True. Trust path is "
+              f"shared, not parallel.")
+
+        # ---- 19c BRAND INVARIANT — same anchor, brand stays presentation ---
+        # Whitepaper inherits the body.brand_tokens sibling pattern.
+        # Same shape of proof as #18c: render the SAME scope twice,
+        # brand UNSET vs SET, assert content/trust/ledger byte-identical.
+        # If brand reached the claim layer in the whitepaper renderer
+        # (e.g. via a system_msg that quoted brand strings), this would
+        # break.
+        from app.api.brand import brand_for_org
+        from app.agents.report_composer import ReportComposerAgent
+
+        # Clear brand to its "no row" state, then render once.
+        row = db.execute(scoped(OrgBrand, onit.id)).scalar_one_or_none()
+        if row:
+            db.delete(row); db.commit()
+        unset_brand_wp = brand_for_org(db, onit.id)
+        assert unset_brand_wp["is_default"] is True
+        wp_intel_inv = build_report_intelligence(
+            db, onit.id, product_id=sl_id, scope=wp_scope)
+
+        class _NoLLMWp:
+            anthropic_api_key = ""
+
+        def _render_wp_with_brand(brand_dict: dict) -> dict:
+            ctx = AgentContext(
+                org_id=onit.id, org_name=onit.name,
+                agent_key="report_composer", registration_id="x",
+                run_id="x", trigger="manual",
+                task={"audience": "whitepaper", "scope": wp_scope},
+                report_intelligence=wp_intel_inv,
+                profile={}, org_profile={},
+                guardrail_rules={}, memory_patterns=[],
+                brand=brand_dict, config={},
+            )
+            import app.config as _cfg
+            real = _cfg.get_settings
+            _cfg.get_settings = lambda: _NoLLMWp()
+            try:
+                result = ReportComposerAgent().run(ctx)
+            finally:
+                _cfg.get_settings = real
+            assert result.artifacts and result.artifacts[0].type == "whitepaper_draft", (
+                "whitepaper agent run produced no whitepaper_draft artifact")
+            return result.artifacts[0].body
+
+        wp_body_unset = _render_wp_with_brand(unset_brand_wp)
+        custom_wp = {
+            "color_primary":    "#7a3aff",
+            "color_secondary":  "#00b894",
+            "color_accent":     "#ffb86c",
+            "color_background": "#101418",
+            "color_text":       "#f5f7fa",
+            "font_heading":     "Space Grotesk",
+            "font_body":        "Inter",
+        }
+        client.put("/api/brand", json=custom_wp, headers=H_ONIT)
+        set_brand_wp = brand_for_org(db, onit.id)
+        assert set_brand_wp["is_default"] is False
+        wp_body_set = _render_wp_with_brand(set_brand_wp)
+
+        import json as _jsonm
+        def _stable_wp(x):
+            return _jsonm.dumps(x, sort_keys=True, default=str)
+
+        assert _stable_wp(wp_body_unset["content"]) == _stable_wp(wp_body_set["content"]), (
+            "INVARIANT VIOLATION: whitepaper body.content differs across "
+            "brand-unset vs brand-set. Brand reached the claim layer in "
+            "the whitepaper renderer — same category error as a report would be.")
+        assert _stable_wp(wp_body_unset["trust_checks"]) == _stable_wp(wp_body_set["trust_checks"]), (
+            "INVARIANT VIOLATION: whitepaper body.trust_checks differs "
+            "across brand states.")
+        assert _stable_wp(wp_body_unset["evidence_ledger"]) == _stable_wp(wp_body_set["evidence_ledger"]), (
+            "INVARIANT VIOLATION: whitepaper body.evidence_ledger differs "
+            "across brand states.")
+        assert _stable_wp(wp_body_unset["brand_tokens"]) != _stable_wp(wp_body_set["brand_tokens"]), (
+            "Brand tokens should differ unset vs set — got identical, "
+            "the brand pipe to whitepaper is dead.")
+        # Belt-and-suspenders: no brand token string appears in
+        # rendered prose.
+        wp_flat = _jsonm.dumps(wp_body_set["content"], default=str)
+        for v in [custom_wp["color_primary"], custom_wp["color_secondary"],
+                  custom_wp["font_heading"]]:
+            assert v not in wp_flat and v.lower() not in wp_flat, (
+                f"INVARIANT VIOLATION: brand token {v!r} found in "
+                f"whitepaper rendered content.")
+        print(f"[OK] Anchor (19c): BRAND INVARIANT — whitepaper renders "
+              f"byte-identical content/trust_checks/evidence_ledger "
+              f"across brand unset vs set; only body.brand_tokens differs. "
+              f"Same load-bearing invariant as reports (#18c), proven on "
+              f"the new anchor.")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

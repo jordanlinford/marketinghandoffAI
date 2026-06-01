@@ -164,7 +164,8 @@ class RunOut(BaseModel):
         task = r.task or {}
         display_label = None
         if r.agent_key == "report_composer":
-            audience = (task.get("audience") or "").replace("_", " ")
+            audience_raw = (task.get("audience") or "").strip().lower()
+            audience = audience_raw.replace("_", " ")
             scope = task.get("scope") or {}
             kind = scope.get("kind")
             if kind == "time_window":
@@ -174,8 +175,18 @@ class RunOut(BaseModel):
             else:
                 hint = ""
             audience_label = audience.title() if audience else "report"
-            display_label = (f"{audience_label} report"
-                              + (f" — {hint}" if hint else ""))
+            # Anchor classes (whitepaper today; buyer_guide / solution_guide
+            # later) carry their own noun rather than reading as "Whitepaper
+            # report". Audience reports keep the "<audience> report" framing.
+            _ANCHOR_NOUN = {
+                "whitepaper": "Whitepaper",
+            }
+            if audience_raw in _ANCHOR_NOUN:
+                display_label = _ANCHOR_NOUN[audience_raw] + (
+                    f" — {hint}" if hint else "")
+            else:
+                display_label = (f"{audience_label} report"
+                                  + (f" — {hint}" if hint else ""))
         return cls(
             id=r.id, agent_key=r.agent_key, status=r.status, trigger=r.trigger,
             cost_usd=r.cost_usd, error=r.error, upload_id=r.upload_id,

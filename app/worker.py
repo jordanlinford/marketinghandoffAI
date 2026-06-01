@@ -195,6 +195,14 @@ def process_run(db: Session, run: Run) -> None:
             # see the empty intelligence and raise a meaningful error.
             logs.append(f"report intelligence engine raised: {exc!r}")
             report_intelligence = None
+    # Tenant brand identity — PRESENTATION ONLY. Pre-load so the agent
+    # never touches the DB. Defaults apply when no row exists; unset is
+    # not an error. Brand tokens MUST stay on the chrome path inside
+    # the agent (verbatim pass-through to renderers) and never enter
+    # the intelligence object, evidence ledger, prompt selection, or
+    # any §6/§7 validator input.
+    from app.api.brand import brand_for_org  # local: keeps cold paths cheap
+    brand = brand_for_org(db, run.org_id)
     ctx = AgentContext(
         org_id=run.org_id,
         org_name=org_name,
@@ -221,6 +229,7 @@ def process_run(db: Session, run: Run) -> None:
         guardrail_rules=rules_by_scope,
         memory_patterns=memory_patterns,
         report_intelligence=report_intelligence,
+        brand=brand,
         get_market_data=lambda: _resolve_market_data(db, run.org_id, run.upload_id),
         log=logs.append,
     )

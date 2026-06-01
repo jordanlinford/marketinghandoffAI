@@ -284,6 +284,40 @@ class OrgProfile(Base, TimestampMixin):
 # Cross-tenant safety: scoped() on org_id. The (org_id, slug) unique
 # constraint keeps URLs / UTM prefixes unambiguous per org.
 # ---------------------------------------------------------------------------
+# OrgBrand — tenant identity for the presentation layer. Strictly
+# PRESENTATION: this row never feeds the intelligence object, the
+# evidence ledger, or any input a §6/§7 validator reads. Brand tokens
+# drive chrome (logo, color roles, fonts) ONLY. If brand can reach
+# the claim layer, that's a category error. One row per org via the
+# unique org_id constraint — no multi-brand / sub-brand this build.
+# Unset is a valid render state (defaults apply; not an error).
+class OrgBrand(Base, TimestampMixin):
+    __tablename__ = "org_brands"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    org_id: Mapped[str] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"),
+        unique=True, index=True)
+    # Five named color roles — renderers reference role ("primary"),
+    # not hex, so a rebrand is one value change. Stored as hex strings
+    # (e.g. "#1f3b6b"). Defaults are sensible neutrals so the unset
+    # case still renders cleanly without a special-case path.
+    color_primary: Mapped[str] = mapped_column(String(16), default="#1f3b6b")
+    color_secondary: Mapped[str] = mapped_column(String(16), default="#2d8c5a")
+    color_accent: Mapped[str] = mapped_column(String(16), default="#c89a3a")
+    color_background: Mapped[str] = mapped_column(String(16), default="#0e1218")
+    color_text: Mapped[str] = mapped_column(String(16), default="#e6e9f0")
+    # Two fonts — a name the render layer maps to (system fonts /
+    # @font-face), not font-file hosting this build.
+    font_heading: Mapped[str] = mapped_column(String(120), default="Inter")
+    font_body: Mapped[str] = mapped_column(String(120), default="Inter")
+    # Logo — file path RELATIVE to settings.storage_root + mime type.
+    # Reuses the existing tenant-scoped storage layout
+    # ({storage_root}/{org_id}/_brand/logo.<ext>) so no new storage
+    # mechanism is introduced.
+    logo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    logo_mime: Mapped[str | None] = mapped_column(String(60), nullable=True)
+
+
 class ProductProfile(Base, TimestampMixin):
     __tablename__ = "product_profiles"
     __table_args__ = (

@@ -840,6 +840,55 @@
       </div>
     </div>
 
+    <!-- ====== Brand / Identity ====================================
+         Presentation tokens (logo, color roles, fonts) that the
+         report renderer applies as chrome ONLY. Brand never enters
+         the intelligence object, evidence ledger, or any §6/§7
+         validator input — that invariant is pinned by smoke test
+         18c. This section is the org-level brand; products can
+         inherit later if needed (one brand per org for now). -->
+    <div class="section" id="brand-section">
+      <h3>Brand &amp; Identity</h3>
+      <div class="setup-status" id="brand-status"
+           style="margin-bottom:10px;">
+        Used as PRESENTATION ONLY on reports — colors, fonts, and
+        the logo. Brand tokens never enter the intelligence object,
+        evidence ledger, or any claim text.
+      </div>
+      <div class="row" style="gap:18px; align-items:flex-start;
+                                flex-wrap:wrap;">
+        <div style="flex:1; min-width:360px;">
+          <div class="form-grid" id="brand-form"></div>
+          <div class="setup-actions" style="margin-top:8px;">
+            <div class="setup-status" id="brand-save-status"></div>
+            <button id="brand-save-btn">Save brand</button>
+          </div>
+        </div>
+        <div style="flex:0 0 220px;">
+          <h4 style="margin:0 0 6px;">Logo</h4>
+          <div id="brand-logo-preview"
+               style="border:1px solid var(--border);
+                       border-radius:6px; padding:10px; height:120px;
+                       display:flex; align-items:center;
+                       justify-content:center;
+                       background:var(--bg-elev);">
+            <span class="setup-status">no logo</span>
+          </div>
+          <div class="row" style="gap:6px; margin-top:6px;">
+            <input type="file" id="brand-logo-file"
+                   accept="image/png,image/jpeg,image/svg+xml,image/webp,image/gif" />
+            <button id="brand-logo-upload-btn">Upload</button>
+          </div>
+          <div class="row" style="gap:6px; margin-top:4px;">
+            <button id="brand-logo-delete-btn" class="ghost">
+              Remove logo
+            </button>
+            <div class="setup-status" id="brand-logo-status"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </section>
 </main>
 
@@ -2861,6 +2910,52 @@ function _renderAssetDetail(asset, detail) {
   return wrap;
 }
 
+// Apply the org's brand tokens as chrome on a report detail panel.
+// PRESENTATION ONLY: this sets CSS custom properties + a logo bar at
+// the top of the report container. The block-rendering pass below
+// reads body.content.blocks unchanged — brand cannot influence the
+// rendered claims/numbers/findings (smoke test 18c pins the
+// invariant). If brand_tokens are empty/default, no chrome is
+// applied beyond the platform defaults already on `wrap`.
+function _applyReportBrandChrome(wrap, brand, asset) {
+  if (!brand || typeof brand !== 'object') return;
+  const set = (k, v) => { if (v) wrap.style.setProperty(k, v); };
+  set('--brand-primary',    brand.color_primary);
+  set('--brand-secondary',  brand.color_secondary);
+  set('--brand-accent',     brand.color_accent);
+  set('--brand-bg',         brand.color_background);
+  set('--brand-text',       brand.color_text);
+  if (brand.font_heading) {
+    wrap.style.setProperty('--brand-font-heading', brand.font_heading);
+  }
+  if (brand.font_body) {
+    wrap.style.setProperty('--brand-font-body', brand.font_body);
+  }
+  if (brand.logo_path) {
+    // Cache-bust on each render so a freshly-uploaded logo shows up
+    // without a hard reload.
+    const bar = el('div', {
+      class: 'report-brand-bar',
+      style: 'display:flex; align-items:center; gap:10px; '
+            + 'padding:8px 10px; margin:-12px -12px 12px -12px; '
+            + 'border-bottom:2px solid var(--brand-accent, var(--accent)); '
+            + 'background:var(--brand-bg, transparent);',
+    },
+      el('img', {
+        src: `/api/brand/logo?_t=${Date.now()}`,
+        alt: 'Brand',
+        style: 'max-height:32px; max-width:120px; object-fit:contain;',
+      }),
+      el('div', {
+        style: 'font-family:var(--brand-font-heading, inherit); '
+              + 'font-weight:600; '
+              + 'color:var(--brand-text, var(--text));' },
+        asset && asset.title ? _cleanTitle(asset.title) : 'Report'),
+    );
+    wrap.appendChild(bar);
+  }
+}
+
 // Report detail — surfaces the trust banner, approval state, body
 // blocks with per-block indicators, the findings panel, and the
 // evidence ledger panel. All rendered from detail.trust_view +
@@ -2869,6 +2964,13 @@ function _renderReportDetailInto(wrap, asset, detail) {
   const view = detail.trust_view || null;
   const content = (detail.body || {}).content || {};
   const blocks = content.blocks || [];
+  // Brand tokens — PRESENTATION ONLY. Reads off body.brand_tokens
+  // (sibling of body.content). The chrome wrapper applies tokens as
+  // inline styles on a dedicated container; we never mutate the
+  // block render below. If brand is absent or default, the wrapper
+  // still renders — just with platform defaults.
+  const brand = (detail.body || {}).brand_tokens || {};
+  _applyReportBrandChrome(wrap, brand, asset);
 
   // ---- Trust Summary Banner ------------------------------------------
   if (view) {
@@ -4625,6 +4727,131 @@ async function saveProfile() {
   }
 }
 
+// ---- Brand / Identity ---------------------------------------------------
+// state.brand mirrors what /api/brand returns. NEVER passed to anything
+// that builds intelligence, ledger, claims, or LLM prompts — pure UI
+// chrome. The Save endpoint round-trips the same shape we render.
+state.brand = null;
+
+const _BRAND_FIELDS = [
+  { key: 'color_primary',    label: 'Primary color',    type: 'color' },
+  { key: 'color_secondary',  label: 'Secondary color',  type: 'color' },
+  { key: 'color_accent',     label: 'Accent color',     type: 'color' },
+  { key: 'color_background', label: 'Background color', type: 'color' },
+  { key: 'color_text',       label: 'Text color',       type: 'color' },
+  { key: 'font_heading',     label: 'Heading font',     type: 'text'  },
+  { key: 'font_body',        label: 'Body font',        type: 'text'  },
+];
+
+function renderBrandForm() {
+  const root = document.getElementById('brand-form');
+  if (!root) return;
+  root.innerHTML = '';
+  const b = state.brand || {};
+  for (const f of _BRAND_FIELDS) {
+    const id = `brand-field-${f.key}`;
+    root.appendChild(el('label', { for: id }, f.label));
+    const input = el('input', {
+      id, type: f.type, value: b[f.key] || '',
+      style: f.type === 'color' ? 'height:36px; width:60px;' : '',
+    });
+    root.appendChild(input);
+  }
+  const status = document.getElementById('brand-status');
+  if (status) {
+    status.textContent = b.is_default
+      ? 'No brand set yet — defaults in place. Saving will create an org brand row.'
+      : 'Used as PRESENTATION ONLY on reports — colors, fonts, and the logo. '
+        + 'Brand tokens never enter the intelligence object, evidence ledger, '
+        + 'or any claim text.';
+  }
+  // Logo preview
+  const preview = document.getElementById('brand-logo-preview');
+  if (preview) {
+    preview.innerHTML = '';
+    if (b.logo_path) {
+      const img = el('img', {
+        src: `/api/brand/logo?_t=${Date.now()}`,
+        style: 'max-width:100%; max-height:100%; object-fit:contain;',
+        alt: 'Brand logo',
+      });
+      preview.appendChild(img);
+    } else {
+      preview.appendChild(el('span', { class: 'setup-status' }, 'no logo'));
+    }
+  }
+}
+
+async function loadBrand() {
+  try {
+    state.brand = await api('/api/brand');
+  } catch (e) {
+    state.brand = null;
+    const s = document.getElementById('brand-status');
+    if (s) s.textContent = `Failed to load brand: ${e.message}`;
+    return;
+  }
+  renderBrandForm();
+}
+
+async function saveBrand() {
+  const btn = document.getElementById('brand-save-btn');
+  const status = document.getElementById('brand-save-status');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  status.textContent = '';
+  const payload = {};
+  for (const f of _BRAND_FIELDS) {
+    const inp = document.getElementById(`brand-field-${f.key}`);
+    if (inp && inp.value) payload[f.key] = inp.value;
+  }
+  try {
+    state.brand = await api('/api/brand', {
+      method: 'PUT', body: JSON.stringify(payload),
+    });
+    renderBrandForm();
+    status.textContent = 'Brand saved.';
+  } catch (e) {
+    status.textContent = `Save failed: ${e.message}`;
+  } finally {
+    btn.disabled = false; btn.textContent = 'Save brand';
+  }
+}
+
+async function uploadBrandLogo() {
+  const inp = document.getElementById('brand-logo-file');
+  const status = document.getElementById('brand-logo-status');
+  if (!inp || !inp.files || !inp.files[0]) {
+    status.textContent = 'Pick a file first.'; return;
+  }
+  const fd = new FormData();
+  fd.append('file', inp.files[0]);
+  status.textContent = 'Uploading…';
+  try {
+    const res = await fetch('/api/brand/logo', {
+      method: 'POST', body: fd,
+      headers: { 'X-Dev-User-Email': state.email },
+    });
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    state.brand = await res.json();
+    renderBrandForm();
+    status.textContent = 'Uploaded.';
+  } catch (e) {
+    status.textContent = `Upload failed: ${e.message}`;
+  }
+}
+
+async function deleteBrandLogo() {
+  if (!confirm('Remove the org logo?')) return;
+  const status = document.getElementById('brand-logo-status');
+  try {
+    state.brand = await api('/api/brand/logo', { method: 'DELETE' });
+    renderBrandForm();
+    status.textContent = 'Removed.';
+  } catch (e) {
+    status.textContent = `Remove failed: ${e.message}`;
+  }
+}
+
 // ---- Router for the 6-step IA + Home (Command Center) -------------------
 // All views are toggled by display. CSS holds the per-view layout (Create
 // keeps the 3-grid; everything else is .setup-main block flow). Each view
@@ -4632,7 +4859,7 @@ async function saveProfile() {
 // global polling loop.
 const _VIEWS = {
   home:         { panel: 'home-view',         tab: null,                onEnter: loadCommandCenter },
-  organization: { panel: 'organization-view', tab: 'tab-organization',  onEnter: () => { if (!state.profile) loadProfile(); } },
+  organization: { panel: 'organization-view', tab: 'tab-organization',  onEnter: () => { if (!state.profile) loadProfile(); loadBrand(); } },
   products:     { panel: 'products-view',     tab: 'tab-products',      onEnter: () => { loadProducts(); loadProductDocs(); renderProductsBreadcrumb(); } },
   create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); } },
   campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: loadCampaigns },
@@ -5072,6 +5299,9 @@ document.getElementById('path-manual').addEventListener('click', () => {
 document.getElementById('crawl-btn').addEventListener('click', crawlAndDraft);
 document.getElementById('sample-btn').addEventListener('click', sampleAndDraft);
 document.getElementById('save-profile-btn').addEventListener('click', saveProfile);
+document.getElementById('brand-save-btn').addEventListener('click', saveBrand);
+document.getElementById('brand-logo-upload-btn').addEventListener('click', uploadBrandLogo);
+document.getElementById('brand-logo-delete-btn').addEventListener('click', deleteBrandLogo);
 
 // Default landing = the Command Center.
 state.currentView = 'home';

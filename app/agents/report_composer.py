@@ -44,6 +44,29 @@ _GUARDRAIL = "guardrail"
 _ALL_THROUGH = "all_through"
 
 
+# Brand-token shape on body.brand_tokens. Keep this in lock-step with
+# app/api/brand.py's _DEFAULT_BRAND — the keys are what the UI chrome
+# layer reads. The agent picks tokens off ctx.brand by NAME (not by
+# blind copy) so a future field on OrgBrand can't accidentally leak
+# into the body without an explicit decision here.
+_BRAND_BODY_KEYS = (
+    "color_primary", "color_secondary", "color_accent",
+    "color_background", "color_text",
+    "font_heading", "font_body",
+    "logo_path", "logo_mime",
+)
+
+
+def _brand_tokens_for_body(brand: dict) -> dict:
+    """Verbatim pass-through of presentation tokens from ctx.brand.
+    Returns a fresh dict with only the explicit chrome keys (no
+    `is_default`/`org_id`/timestamps). The renderer never sees this —
+    it's attached AFTER rendering, alongside content/trust_checks/etc.
+    PRESENTATION ONLY: callers must not feed these into prompts,
+    selection logic, ledger entries, or any §6/§7 validator input."""
+    return {k: brand.get(k) for k in _BRAND_BODY_KEYS}
+
+
 @register
 class ReportComposerAgent(Agent):
     key = "report_composer"
@@ -188,6 +211,15 @@ class ReportComposerAgent(Agent):
             # build. Trust pill in the UI reads off body.trust_checks.
             "evidence_ledger": ledger.to_list(),
             "trust_checks": trust_checks,
+            # Tenant brand tokens — PRESENTATION ONLY. The renderer was
+            # never handed brand (it's not in scope), so this is a pure
+            # post-render attachment that wraps the rendered content for
+            # the UI chrome layer. Smoke test #18c pins the invariant:
+            # body.content.blocks and body.trust_checks are byte-
+            # identical regardless of brand state. Don't move this key
+            # under body["content"] — that's the trust-tested object,
+            # and brand is presentation, not content.
+            "brand_tokens": _brand_tokens_for_body(ctx.brand or {}),
         }
 
         cites: list[Citation] = []

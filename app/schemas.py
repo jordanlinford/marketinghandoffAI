@@ -110,6 +110,14 @@ class AgentContext:
     # db session) and handed to the agent — agents never touch the DB.
     # None for non-report runs.
     report_intelligence: dict[str, Any] | None = None
+    # Tenant brand identity — PRESENTATION ONLY. Brand tokens feed
+    # chrome (logo, colors, fonts). They MUST NOT enter the
+    # intelligence object, the evidence ledger, or any input a §6/§7
+    # validator reads. Renderers treat this field as a verbatim
+    # pass-through; never as a signal that shapes selection,
+    # prompt content, or claim wording. Always present (defaults
+    # apply when no row exists) — unset is not an error.
+    brand: dict[str, Any] = field(default_factory=dict)
     get_market_data: Callable[[], Any] | None = None
     log: Callable[[str], None] = lambda msg: None
 

@@ -94,6 +94,29 @@ CREATE TABLE org_profiles (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Tenant identity — strictly PRESENTATION. Brand tokens feed the
+-- chrome (logo, color roles, fonts); they NEVER enter the
+-- intelligence object, the evidence ledger, or any input a §6/§7
+-- validator reads. One row per org via UNIQUE org_id.
+CREATE TABLE org_brands (
+    id                TEXT PRIMARY KEY,
+    org_id            TEXT NOT NULL UNIQUE REFERENCES orgs(id) ON DELETE CASCADE,
+    color_primary     TEXT NOT NULL DEFAULT '#1f3b6b',
+    color_secondary   TEXT NOT NULL DEFAULT '#2d8c5a',
+    color_accent      TEXT NOT NULL DEFAULT '#c89a3a',
+    color_background  TEXT NOT NULL DEFAULT '#0e1218',
+    color_text        TEXT NOT NULL DEFAULT '#e6e9f0',
+    font_heading      TEXT NOT NULL DEFAULT 'Inter',
+    font_body         TEXT NOT NULL DEFAULT 'Inter',
+    -- Logo file ref is RELATIVE to settings.storage_root; the layout
+    -- is {storage_root}/{org_id}/_brand/logo.<ext> so a scoped()
+    -- lookup error can't lead to serving the wrong tenant's logo.
+    logo_path         TEXT,
+    logo_mime         TEXT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE runs (
     id                    TEXT PRIMARY KEY,
     org_id                TEXT NOT NULL REFERENCES orgs(id),
@@ -452,7 +475,7 @@ DECLARE t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY['users','connections','agents','runs','artifacts',
                            'proposals','guardrails','audit_log','jobs','uploads',
-                           'org_profiles','report_uploads','metric_points',
+                           'org_profiles','org_brands','report_uploads','metric_points',
                            'suggestions','product_profiles','product_documents',
                            'extracted_insights','campaigns']
   LOOP

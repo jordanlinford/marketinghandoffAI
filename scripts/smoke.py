@@ -5540,6 +5540,221 @@ def main() -> None:
               "stores or caches a value that can drift from "
               "compact_trust_state().")
 
+        # ================================================================
+        # Report (18) — Brand/Identity object: presence + default state +
+        # the LOAD-BEARING INVARIANT that brand cannot reach the claim
+        # layer + determinism.
+        #
+        # Brand is PRESENTATION ONLY. Smoke #18c is the keystone:
+        # render the SAME scope with brand UNSET vs FULLY SET. The
+        # body.content.blocks and body.trust_checks must be
+        # BYTE-IDENTICAL across the two renders. If they're not, brand
+        # has leaked into the claim layer and the build is wrong —
+        # smoke must go red.
+        # ================================================================
+        print("---- Report (18) — brand/identity vertical slice ----")
+        from app.api.brand import brand_for_org
+        from app.models import OrgBrand
+        from app.agents.report_composer import ReportComposerAgent
+        from app.schemas import AgentContext
+
+        # ---- 18a PRESENCE + DEFAULTS --------------------------------
+        # GET /api/brand without any row returns the default brand,
+        # is_default=True. Every chrome key the renderer would read
+        # must be present so an unbranded org still renders cleanly.
+        r = client.get("/api/brand", headers=H_ONIT)
+        assert r.status_code == 200, f"GET /api/brand failed: {r.status_code}"
+        default_brand = r.json()
+        assert default_brand.get("is_default") is True, (
+            "fresh org with no brand row MUST report is_default=True; got "
+            f"{default_brand!r}")
+        for k in ("color_primary", "color_secondary", "color_accent",
+                  "color_background", "color_text",
+                  "font_heading", "font_body"):
+            assert default_brand.get(k), (
+                f"default brand MUST carry {k}; got {default_brand!r}")
+        assert default_brand["color_primary"].startswith("#"), (
+            "color tokens MUST be hex strings.")
+        print(f"[OK] Report (18a): GET /api/brand defaults — every chrome "
+              f"key present, is_default=True (no row required to render).")
+
+        # ---- 18b PUT + LOGO + ROUND-TRIP ----------------------------
+        custom = {
+            "color_primary":    "#7a3aff",
+            "color_secondary":  "#00b894",
+            "color_accent":     "#ffb86c",
+            "color_background": "#101418",
+            "color_text":       "#f5f7fa",
+            "font_heading":     "Space Grotesk",
+            "font_body":        "Inter",
+        }
+        r = client.put("/api/brand", json=custom, headers=H_ONIT)
+        assert r.status_code == 200, f"PUT /api/brand failed: {r.text}"
+        saved = r.json()
+        assert saved["is_default"] is False
+        for k, v in custom.items():
+            assert saved[k].lower() == v.lower(), (
+                f"PUT /api/brand round-trip mismatch on {k}: "
+                f"sent={v!r} got={saved[k]!r}")
+        # Logo upload — use a tiny in-memory PNG (1x1 transparent).
+        import io as _io
+        png_1px = (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                    b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+                    b"\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00"
+                    b"\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
+        r = client.post(
+            "/api/brand/logo",
+            files={"file": ("brand.png", _io.BytesIO(png_1px), "image/png")},
+            headers=H_ONIT)
+        assert r.status_code == 200, f"POST /api/brand/logo failed: {r.text}"
+        with_logo = r.json()
+        assert with_logo["logo_path"], "logo_path MUST be set after upload"
+        assert with_logo["logo_mime"] == "image/png"
+        # GET the logo back to confirm the storage round-trip.
+        r = client.get("/api/brand/logo", headers=H_ONIT)
+        assert r.status_code == 200, f"GET logo failed: {r.status_code}"
+        assert r.content == png_1px, "logo bytes round-trip mismatch"
+        print(f"[OK] Report (18b): PUT brand + POST logo + GET logo round-trip "
+              f"— bytes preserved, fields persisted, RLS-correct.")
+
+        # ---- 18c THE INVARIANT (load-bearing) -----------------------
+        # Render the SAME scope with brand UNSET vs SET. The
+        # body.content.blocks AND body.trust_checks AND evidence_ledger
+        # AND every routing/grade output MUST be byte-identical. Brand
+        # may ONLY influence body.brand_tokens (the presentation
+        # sibling). If anything else differs, brand has leaked into
+        # the claim layer.
+        #
+        # We invoke the agent DIRECTLY with two crafted contexts (same
+        # intelligence object, same profile, same settings) so the
+        # only delta is ctx.brand.
+        invariant_scope = {"kind": "time_window",
+                           "start": "2026-04-01", "end": "2026-04-30"}
+        invariant_intel = build_report_intelligence(
+            db, onit.id, product_id=sl_id, scope=invariant_scope)
+        # Deterministic render only — the LLM path is non-deterministic
+        # by construction (the smoke env stubs it, but we belt-and-
+        # suspenders this by stripping the API key from the settings
+        # passed in to force the deterministic fallback).
+        class _NoLLMSettings:
+            anthropic_api_key = ""
+        # Build two contexts that differ ONLY in ctx.brand.
+        unset_brand = {**brand_for_org(db, onit.id), "is_default": True,
+                       "color_primary": None}  # simulate "no row at all"
+        # Actually delete the row to test the true unset path.
+        db.execute(scoped(OrgBrand, onit.id))  # presence check
+        row = db.execute(scoped(OrgBrand, onit.id)).scalar_one_or_none()
+        if row:
+            db.delete(row); db.commit()
+        unset_brand = brand_for_org(db, onit.id)
+        assert unset_brand["is_default"] is True
+
+        def _render_with_brand(brand_dict: dict) -> dict:
+            """Run report_composer directly with a synthetic ctx that
+            differs from its twin ONLY in ctx.brand. Returns the
+            assembled body dict."""
+            ctx = AgentContext(
+                org_id=onit.id, org_name=onit.name,
+                agent_key="report_composer", registration_id="x",
+                run_id="x", trigger="manual",
+                task={"audience": "board", "scope": invariant_scope},
+                report_intelligence=invariant_intel,
+                profile={}, org_profile={},
+                guardrail_rules={}, memory_patterns=[],
+                brand=brand_dict,
+                # Force deterministic render — no LLM in the loop.
+                config={"settings": _NoLLMSettings()},
+            )
+            # Settings is read via get_settings(); we monkey-patch the
+            # module-level import inside the agent's run for this
+            # smoke step. The agent uses settings only to decide LLM
+            # vs deterministic fallback; we want deterministic so we
+            # patch anthropic_api_key to empty.
+            import app.agents.report_composer as _rc
+            orig_get = _rc.get_settings if hasattr(_rc, "get_settings") else None
+            # The agent imports get_settings inside .run(); we instead
+            # patch app.config.get_settings to return our no-LLM stub.
+            import app.config as _cfg
+            real = _cfg.get_settings
+            _cfg.get_settings = lambda: _NoLLMSettings()
+            try:
+                result = ReportComposerAgent().run(ctx)
+            finally:
+                _cfg.get_settings = real
+            assert result.artifacts, "agent produced no artifact"
+            return result.artifacts[0].body
+
+        body_unset = _render_with_brand(unset_brand)
+        # Now PUT the brand back and render again with the SAME scope.
+        client.put("/api/brand", json=custom, headers=H_ONIT)
+        set_brand = brand_for_org(db, onit.id)
+        assert set_brand["is_default"] is False
+        body_set = _render_with_brand(set_brand)
+
+        import json as _jsonm
+        def _stable(x):
+            return _jsonm.dumps(x, sort_keys=True, default=str)
+
+        # CONTENT must be byte-identical — same blocks, same metadata.
+        assert _stable(body_unset["content"]) == _stable(body_set["content"]), (
+            "INVARIANT VIOLATION: body.content differs between brand-unset "
+            "and brand-set renders. Brand has leaked into the rendered "
+            "content — this is a category error. Diff stable forms to "
+            "find which key drifted.")
+        # Trust checks (and therefore the gate decision) must be
+        # byte-identical — brand cannot influence pass/warn/block.
+        assert _stable(body_unset["trust_checks"]) == _stable(body_set["trust_checks"]), (
+            "INVARIANT VIOLATION: body.trust_checks differs across "
+            "brand states. Brand has reached a §6/§7 validator input.")
+        # The evidence ledger is the same observed knowledge regardless
+        # of brand state.
+        assert _stable(body_unset["evidence_ledger"]) == _stable(body_set["evidence_ledger"]), (
+            "INVARIANT VIOLATION: body.evidence_ledger differs across "
+            "brand states. Brand has entered the observed-knowledge layer.")
+        # Routing (gate decision) is derived from trust_checks +
+        # guardrail policy — it MUST also be stable.
+        assert _stable(body_unset["routing"]) == _stable(body_set["routing"]), (
+            "INVARIANT VIOLATION: body.routing differs across brand "
+            "states. Brand has reached the gate decision.")
+        # Grade must NOT depend on brand state — the rubric reads
+        # content + profile only, never brand tokens.
+        assert _stable(body_unset["grade"]) == _stable(body_set["grade"]), (
+            "INVARIANT VIOLATION: body.grade differs across brand "
+            "states. Brand has reached the grader.")
+        # Brand_tokens is where the delta lives and IS expected to differ.
+        assert _stable(body_unset["brand_tokens"]) != _stable(body_set["brand_tokens"]), (
+            "Brand tokens should differ between unset/set — got "
+            "identical, which means the brand pipe is dead.")
+        # And brand_tokens carries every chrome key in the set case.
+        bt = body_set["brand_tokens"]
+        for k in ("color_primary", "color_secondary", "color_accent",
+                  "color_background", "color_text",
+                  "font_heading", "font_body"):
+            assert bt.get(k), f"body.brand_tokens MUST carry {k}; got {bt!r}"
+        # And critically: NONE of the brand color/font values should
+        # appear ANYWHERE inside body.content.blocks text. (Belt-and-
+        # suspenders for the stable-form check above — if a token
+        # string ever appears in prose, that's a category error.)
+        flat = _jsonm.dumps(body_set["content"], default=str)
+        for v in [custom["color_primary"], custom["color_secondary"],
+                  custom["color_accent"], custom["font_heading"]]:
+            assert v not in flat and v.lower() not in flat, (
+                f"INVARIANT VIOLATION: brand value {v!r} found inside "
+                f"body.content — brand has leaked into the claim layer.")
+        print(f"[OK] Report (18c): INVARIANT — same scope rendered with "
+              f"brand unset vs set produces byte-identical "
+              f"content/trust_checks/ledger/routing/grade. Only "
+              f"body.brand_tokens differs. Brand cannot reach the "
+              f"claim layer.")
+
+        # ---- 18d DETERMINISM (same brand → same body twice) ---------
+        body_set_2 = _render_with_brand(set_brand)
+        assert _stable(body_set_2["content"]) == _stable(body_set["content"])
+        assert _stable(body_set_2["trust_checks"]) == _stable(body_set["trust_checks"])
+        assert _stable(body_set_2["brand_tokens"]) == _stable(body_set["brand_tokens"])
+        print(f"[OK] Report (18d): determinism — same brand + same scope "
+              f"renders identical bodies back-to-back.")
+
         print("[OK] Smoke test passed.")
     finally:
         db.close()

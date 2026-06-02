@@ -318,6 +318,55 @@ class OrgBrand(Base, TimestampMixin):
     logo_mime: Mapped[str | None] = mapped_column(String(60), nullable=True)
 
 
+class FanoutSet(Base, TimestampMixin):
+    """One source anchor → N derivative children sharing a lead claim.
+    The LEAD IS A SELECTION (ev:id pointer into the anchor's ledger),
+    NEVER a synthesis — see app/reports/derivatives/leads.py. If a
+    field on this model ever holds a generated unifying string, the
+    build has violated the governing discipline of the fan-out
+    architecture.
+
+    The set is a lightweight orchestration record — it carries NO
+    content, NO trust_checks, NO ledger. Trust lives on each child
+    artifact (independent §7 gate). The set just records: which
+    anchor, which claim was foregrounded, and which children were
+    spawned.
+    """
+    __tablename__ = "fanout_sets"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True,
+                                     default=_uuid)
+    org_id: Mapped[str] = mapped_column(
+        ForeignKey("orgs.id", ondelete="CASCADE"), index=True)
+    # The source anchor whose claims the set fans out from. Not a FK
+    # to artifacts so the set survives if the anchor is deleted (the
+    # lineage still records what it WAS); scoped() at lookup time
+    # enforces tenant isolation.
+    source_anchor_id: Mapped[str] = mapped_column(String(32),
+                                                    index=True)
+    source_anchor_type: Mapped[str | None] = mapped_column(String(80),
+                                                            nullable=True)
+    source_anchor_title: Mapped[str | None] = mapped_column(Text,
+                                                              nullable=True)
+    # The selected lead: a pointer into the anchor's ledger + the
+    # ledger entry's contents captured at selection time. lead_ev_id
+    # is what every child renderer foregrounds; lead_payload is the
+    # ledger entry (label/value/confidence/baseline_vs_attributed) so
+    # the UI can name the lead without re-fetching the anchor. NEVER
+    # populated with newly-authored prose — only ledger contents.
+    lead_ev_id: Mapped[str] = mapped_column(String(32))
+    lead_payload: Mapped[dict] = mapped_column(JSON,
+                                                 default=dict)
+    # children = [{"derivative_type": "...", "run_id": "..."}, ...]
+    # Each child is a derivative_composer run; its task carries
+    # fanout_set_id (this row's id) + lead_ev_id so the renderer
+    # knows the lead to foreground. The set never stores artifact
+    # ids — those are joined at read time, because the parent's
+    # claim is the SET, and the runs are the bridge.
+    children: Mapped[list] = mapped_column(JSON, default=list)
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+
 class ProductProfile(Base, TimestampMixin):
     __tablename__ = "product_profiles"
     __table_args__ = (

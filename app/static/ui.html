@@ -819,6 +819,68 @@
       <div id="rpt-list"></div>
     </div>
 
+    <!-- ====== Fan-out — one anchor → N trust-bound siblings ========
+         A fan-out spawns N derivative_composer runs sharing a
+         SELECTED lead claim (an existing ledger ev:id from the anchor).
+         No unifying message is authored at this layer — the lead is
+         a pointer, not prose. Each sibling rides the existing §7
+         containment gate independently. -->
+    <div class="section" id="fanout-section">
+      <h3>Fan-out — one anchor, many siblings</h3>
+      <div class="setup-status" style="margin-bottom:6px;">
+        Pick a passing anchor + which derivative kinds to spawn. The
+        fan-out auto-selects a lead claim from the anchor's existing
+        ledger (or specify one) and foregrounds it across every
+        sibling. The lead is a SELECTION (ev:id pointer), never a
+        synthesized headline. Each sibling passes §7 independently.
+      </div>
+      <div class="setup-paths" style="margin-bottom:10px;">
+        <div class="setup-path">
+          <h4>Spawn</h4>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Source anchor</label>
+            <select id="fanout-source">
+              <option value="">— loading anchors —</option>
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Sibling kinds</label>
+            <div class="row" style="gap:14px;">
+              <label style="display:flex; gap:4px; align-items:center;">
+                <input type="checkbox" id="fanout-type-exec_summary" checked />
+                Executive summary (text)
+              </label>
+              <label style="display:flex; gap:4px; align-items:center;">
+                <input type="checkbox" id="fanout-type-carousel" checked />
+                Carousel (slides)
+              </label>
+            </div>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Lead claim (optional)</label>
+            <input type="text" id="fanout-lead" placeholder="ev:id from anchor (blank = auto-select)" />
+            <div class="setup-status" style="font-size:11px; margin-top:4px;">
+              Leave blank to auto-select the highest-confidence attributed claim the anchor already cites.
+            </div>
+          </div>
+          <div class="row" style="gap:6px; margin-top:10px;">
+            <button id="fanout-spawn-btn">Spawn fan-out</button>
+          </div>
+          <div id="fanout-status" class="setup-status"
+               style="margin-top:6px;"></div>
+        </div>
+        <div class="setup-path">
+          <h4>What this is</h4>
+          <p>The lead is selected from the anchor's existing ledger
+             entries — never composed. Each sibling foregrounds the
+             same lead while independently passing §7 containment.
+             A blocked sibling does not block the others; the set
+             honestly shows mixed trust state.</p>
+        </div>
+      </div>
+      <div id="fanout-result"></div>
+    </div>
+
     <!-- ====== Derivatives — Level-4 §7-bound re-expressions =========
          A derivative reads a source anchor (above) and re-expresses
          its validated claims in a shorter / channel-shaped form.
@@ -2120,7 +2182,123 @@ document.addEventListener('click', (ev) => {
   if (ev.target.id === 'rpt-quick-90') _setQuickPick('last90');
   if (ev.target.id === 'rpt-quick-quarter') _setQuickPick('quarter');
   if (ev.target.id === 'deriv-generate-btn') generateDerivative();
+  if (ev.target.id === 'fanout-spawn-btn') spawnFanout();
 });
+
+// ---- Fan-out ------------------------------------------------------------
+// SELECTION discipline: the UI sends source_anchor_id + types +
+// optional lead_ev_id to /api/fanouts/generate. The lead is either
+// auto-selected on the server (deterministic heuristic) or the user
+// pasted a specific ev:id. We NEVER compose a unifying headline at
+// this layer — that's the §6 violation the build is meant to prevent.
+
+async function _populateFanoutSourcePicker() {
+  const sel = document.getElementById('fanout-source');
+  if (!sel) return;
+  const anchorKinds = Object.keys(_ANCHOR_KIND_LABELS);
+  const productQs = state.selectedProductId
+    ? `&product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+  let bundles;
+  try {
+    bundles = await Promise.all(anchorKinds.map((kind) =>
+      api(`/api/assets?asset_kind=${kind}&limit=50${productQs}`)));
+  } catch (e) {
+    sel.innerHTML = '<option value="">(error loading)</option>';
+    return;
+  }
+  const rows = [];
+  for (const b of bundles) for (const a of (b.assets || [])) rows.push(a);
+  const passing = rows.filter(a => a.trust_state === 'passed')
+    .sort((x, y) => (y.created_at || '').localeCompare(x.created_at || ''));
+  sel.innerHTML = '';
+  if (!passing.length) {
+    sel.innerHTML = '<option value="">(no passing anchors yet)</option>';
+    return;
+  }
+  for (const a of passing.slice(0, 50)) {
+    const kindLabel = _ANCHOR_KIND_LABELS[a.asset_kind] || a.asset_kind;
+    const label = `[${kindLabel}] ${_cleanTitle(a.title || a.id)}`;
+    const opt = document.createElement('option');
+    opt.value = a.id;
+    opt.textContent = label.length > 90 ? label.slice(0, 90) + '…' : label;
+    sel.appendChild(opt);
+  }
+}
+
+async function spawnFanout() {
+  const status = document.getElementById('fanout-status');
+  const resultEl = document.getElementById('fanout-result');
+  resultEl.innerHTML = '';
+  const sourceId = document.getElementById('fanout-source').value;
+  const lead = (document.getElementById('fanout-lead').value || '').trim();
+  const types = [];
+  if (document.getElementById('fanout-type-exec_summary').checked) types.push('exec_summary');
+  if (document.getElementById('fanout-type-carousel').checked) types.push('carousel');
+  if (!sourceId) { status.innerHTML = '<span class="err">Pick a source anchor.</span>'; return; }
+  if (!types.length) { status.innerHTML = '<span class="err">Pick at least one sibling kind.</span>'; return; }
+  status.textContent = 'Spawning fan-out…';
+  const payload = { source_anchor_id: sourceId, derivative_types: types };
+  if (lead) payload.lead_ev_id = lead;
+  let resp;
+  try {
+    resp = await api('/api/fanouts/generate', {
+      method: 'POST', body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    status.innerHTML = `<span class="err">Spawn failed: ${e.message}</span>`;
+    return;
+  }
+  status.textContent = `Fan-out ${resp.fanout_set_id.slice(0,8)}… spawned. Lead = ev:${resp.lead_ev_id} (${(resp.lead_payload||{}).label||'?'}). Polling siblings…`;
+  // Poll the set until all children are terminal.
+  for (let i = 0; i < 90; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    let setView;
+    try {
+      setView = await api(`/api/fanouts/${resp.fanout_set_id}`);
+    } catch (e) { continue; }
+    _renderFanoutResult(resultEl, setView);
+    if (setView.set_status === 'complete') {
+      status.textContent = `Fan-out ${resp.fanout_set_id.slice(0,8)}… complete (${setView.children.length} siblings; trust states present: ${setView.trust_states_present.join(', ') || 'none'}).`;
+      return;
+    }
+  }
+  status.textContent = 'Fan-out did not complete within 135s — siblings may still land. Refresh the result.';
+}
+
+function _renderFanoutResult(root, setView) {
+  root.innerHTML = '';
+  const lead = setView.lead_payload || {};
+  const wrap = el('div', { class: 'panel', style: 'margin-top:14px;' },
+    el('h4', {}, 'Fan-out set'),
+    el('div', { class: 'sub', style: 'font-size:13px; margin-bottom:6px;' },
+      el('strong', {}, 'Lead: '),
+      el('code', { style: 'background:var(--bg-elev); padding:2px 4px; border-radius:3px;' }, `ev:${setView.lead_ev_id}`),
+      ' — ', el('em', {}, lead.label || '(no label)'),
+      lead.value != null ? ` = ${lead.value}` : '',
+      ` · `, el('span', { class: 'badge', title: 'lead confidence tier' }, lead.confidence || 'n_a'),
+    ),
+    el('div', { class: 'sub', style: 'font-size:12px; color:var(--muted); margin-bottom:10px;' },
+      `From: ${setView.source_anchor_title || setView.source_anchor_id} · set status: ${setView.set_status}`));
+  for (const c of setView.children) {
+    const trust = c.trust_state || '—';
+    const trustBadge = c.trust_state
+      ? el('span', { class: 'badge trust-' + c.trust_state, style: 'margin-left:6px;' }, trust.replace(/_/g,' '))
+      : el('span', { class: 'badge pending', style: 'margin-left:6px;' }, c.run_status || 'queued');
+    const card = el('div', { class: 'proposal',
+        style: 'cursor:' + (c.artifact_id ? 'pointer' : 'default') + ';',
+        onclick: () => c.artifact_id && openAssetDetail({ id: c.artifact_id, asset_kind: c.derivative_type }) },
+      el('div', { class: 'row' },
+        el('strong', {}, c.derivative_type),
+        trustBadge,
+        c.approval_blocked ? el('span', { class: 'badge blocked', style: 'margin-left:6px;' }, '§7 blocked') : null,
+      ),
+      el('div', { class: 'sub', style: 'color:var(--muted); font-size:12px;' },
+        c.artifact_title || (c.run_status === 'failed' ? `failed: ${c.run_error || '?'}` : '(awaiting artifact)')),
+    );
+    wrap.appendChild(card);
+  }
+  root.appendChild(wrap);
+}
 
 // ---- Derivatives compose pane ------------------------------------------
 // Routes derivative generation through /api/derivatives/generate (which
@@ -5239,7 +5417,7 @@ const _VIEWS = {
   home:         { panel: 'home-view',         tab: null,                onEnter: loadCommandCenter },
   organization: { panel: 'organization-view', tab: 'tab-organization',  onEnter: () => { if (!state.profile) loadProfile(); loadBrand(); } },
   products:     { panel: 'products-view',     tab: 'tab-products',      onEnter: () => { loadProducts(); loadProductDocs(); renderProductsBreadcrumb(); } },
-  create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); _populateDerivativeSourcePicker(); } },
+  create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); _populateDerivativeSourcePicker(); _populateFanoutSourcePicker(); } },
   campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: loadCampaigns },
   library:      { panel: 'library-view',      tab: 'tab-library',       onEnter: loadLibrary },
   insights:     { panel: 'insights-view',     tab: 'tab-insights',      onEnter: () => { renderInsightsBreadcrumb(); loadDashboard(); } },

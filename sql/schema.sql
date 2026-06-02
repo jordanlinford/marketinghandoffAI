@@ -117,6 +117,28 @@ CREATE TABLE org_brands (
     updated_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Fan-out orchestration record. One row per "spawn N derivatives from
+-- one anchor" request. Carries the SELECTED LEAD (an ev:id pointer
+-- into the anchor's ledger — NEVER newly-authored prose) and the
+-- list of spawned child runs. Trust lives on each child artifact
+-- (independent §7 gate); the set has no trust_checks of its own.
+-- See app/reports/derivatives/leads.py + the fan-out brief.
+CREATE TABLE fanout_sets (
+    id                  TEXT PRIMARY KEY,
+    org_id              TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    source_anchor_id    TEXT NOT NULL,
+    source_anchor_type  TEXT,
+    source_anchor_title TEXT,
+    lead_ev_id          TEXT NOT NULL,
+    lead_payload        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    children            JSONB NOT NULL DEFAULT '[]'::jsonb,
+    created_by          TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_fanout_sets_org ON fanout_sets(org_id);
+CREATE INDEX idx_fanout_sets_source ON fanout_sets(source_anchor_id);
+
 CREATE TABLE runs (
     id                    TEXT PRIMARY KEY,
     org_id                TEXT NOT NULL REFERENCES orgs(id),
@@ -475,7 +497,8 @@ DECLARE t TEXT;
 BEGIN
   FOREACH t IN ARRAY ARRAY['users','connections','agents','runs','artifacts',
                            'proposals','guardrails','audit_log','jobs','uploads',
-                           'org_profiles','org_brands','report_uploads','metric_points',
+                           'org_profiles','org_brands','fanout_sets',
+                           'report_uploads','metric_points',
                            'suggestions','product_profiles','product_documents',
                            'extracted_insights','campaigns']
   LOOP

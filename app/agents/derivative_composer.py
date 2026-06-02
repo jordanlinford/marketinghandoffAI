@@ -95,7 +95,17 @@ class DerivativeComposerAgent(Agent):
         from app.config import get_settings
         settings = get_settings()
         renderer = DERIVATIVE_RENDERERS[deriv_type]
-        content, gen_cost = renderer(anchor, settings=settings)
+        # Lead foregrounding — when the fan-out coordinator sets
+        # task.lead_ev_id, pass it to the renderer so the lead claim
+        # is the first lifted (selection-only; the renderer never
+        # composes a new headline around it). Single-derivative runs
+        # without a lead simply pass None and behave exactly as
+        # before. The coordinator already validated the lead exists
+        # in the anchor's ledger + is cited in prose; the renderer
+        # treats None / missing-from-pairs gracefully.
+        lead_ev_id = task.get("lead_ev_id") if isinstance(task, dict) else None
+        content, gen_cost = renderer(anchor, settings=settings,
+                                      lead_ev_id=lead_ev_id)
 
         # ---- Containment validation (the §7 enforcement site) ---------
         anchor_ledger_entries = (anchor.get("body") or {}).get(
@@ -181,6 +191,13 @@ class DerivativeComposerAgent(Agent):
             "source_anchor_id": anchor.get("id"),
             "source_anchor_type": anchor.get("type"),
             "source_anchor_title": anchor.get("title"),
+            # Fan-out attribution (None for single-derivative runs).
+            # lead_ev_id records WHICH anchor claim this derivative
+            # was instructed to foreground; fanout_set_id records the
+            # parent set. Both are pointers — no prose authored here.
+            "lead_ev_id": lead_ev_id,
+            "fanout_set_id": (task.get("fanout_set_id")
+                               if isinstance(task, dict) else None),
             "provenance": {
                 "org_profile": bool(ctx.org_profile),
                 "derivative_type": deriv_type,

@@ -34,7 +34,8 @@ _AUDIENCE_LABEL = "Executive summary"
 
 def _select_claims(anchor_content: dict,
                    anchor_ledger_entries: list[dict],
-                   max_claims: int = 5) -> list[dict]:
+                   max_claims: int = 5,
+                   lead_ev_id: str | None = None) -> list[dict]:
     """Walk the anchor's blocks, pair each number with its nearest
     following marker (the renderer's own emission convention), and
     return up to `max_claims` claim dicts the derivative can re-express.
@@ -42,6 +43,14 @@ def _select_claims(anchor_content: dict,
     Each claim is grounded — it points at a real ledger entry — so the
     deterministic renderer below can quote it with confidence the
     containment validator will accept it.
+
+    lead_ev_id (optional): when supplied, the claim whose marker_id
+    matches the lead is REORDERED to claims[0]. Pure selection — no
+    new claim is added, no claim is removed. If the lead isn't found
+    among the lifted (number, marker) pairs, ordering is unchanged;
+    the fan-out coordinator already validated lead presence in the
+    anchor, so this branch fires only on a §6 binding mismatch on
+    the source — handled upstream.
     """
     blocks = (anchor_content or {}).get("blocks") or []
     by_id = {e["id"]: e for e in (anchor_ledger_entries or [])
@@ -76,6 +85,19 @@ def _select_claims(anchor_content: dict,
                 break
         if len(out) >= max_claims:
             break
+    # Lead foregrounding (selection only — never invents). If a lead
+    # is requested AND it appears among the lifted pairs, move it to
+    # position 0; the rest preserve their relative order. The lifted
+    # list is the SAME set of claims either way — only the order
+    # changes. This is the contract the smoke pins: emphasis is
+    # reordering of existing claims, never the addition of a new one.
+    if lead_ev_id:
+        lead_idx = next(
+            (i for i, c in enumerate(out) if c["marker_id"] == lead_ev_id),
+            -1)
+        if lead_idx > 0:
+            lead = out.pop(lead_idx)
+            out.insert(0, lead)
     return out[:max_claims]
 
 
@@ -205,7 +227,9 @@ def _schema_example(fallback_blocks: list[dict]) -> dict:
 
 
 def render_exec_summary(source_anchor: dict, *,
-                        settings: Any = None) -> tuple[dict, float]:
+                        settings: Any = None,
+                        lead_ev_id: str | None = None
+                        ) -> tuple[dict, float]:
     """Render an executive-summary derivative from a source anchor.
 
     Args:
@@ -233,7 +257,8 @@ def render_exec_summary(source_anchor: dict, *,
     body = source_anchor.get("body") or {}
     anchor_content = body.get("content") or {}
     anchor_ledger_entries = body.get("evidence_ledger") or []
-    claims = _select_claims(anchor_content, anchor_ledger_entries)
+    claims = _select_claims(anchor_content, anchor_ledger_entries,
+                              lead_ev_id=lead_ev_id)
     fallback_blocks = _deterministic_blocks(source_anchor, claims)
     metadata = {
         "audience": _AUDIENCE_LABEL,
@@ -245,6 +270,11 @@ def render_exec_summary(source_anchor: dict, *,
         "source_anchor_id": source_anchor.get("id"),
         "source_anchor_title": source_anchor.get("title"),
         "source_anchor_type": source_anchor.get("type"),
+        # Lead foregrounding — when present, the smoke + UI can
+        # confirm WHICH anchor claim the derivative was instructed
+        # to lead with. Pure metadata; renderer behavior already
+        # baked the reorder into claims[0].
+        "lead_ev_id": lead_ev_id,
     }
     if not (settings and getattr(settings, "anthropic_api_key", "")):
         return ({"content_type": _CONTENT_TYPE,
@@ -257,9 +287,23 @@ def render_exec_summary(source_anchor: dict, *,
     # The LLM payload mirrors the anchor renderers' shape: the source
     # claims + a ledger payload the model can cite from. Critical
     # difference: the ledger is the SOURCE ANCHOR's, NOT a fresh one.
+    # Lead emphasis directive — SELECTION not synthesis. The LLM is
+    # told which existing ledger id to foreground in the headline; it
+    # is NOT given a new headline to assert. claims[0] is already the
+    # lead (post-reorder), so even an LLM that ignores this directive
+    # gets a sensible default ordering.
+    lead_directive = ""
+    if lead_ev_id:
+        lead_directive = (
+            f"\nLEAD CLAIM TO FOREGROUND: ⟦ev:{lead_ev_id}⟧. The "
+            "headline of this summary must lead with the existing "
+            "anchor claim cited at this ledger id. Do NOT author a "
+            "new headline or unifying message that doesn't already "
+            "exist in the anchor. Select; never synthesize.\n")
     user_msg = (
         f"Source anchor type: {source_anchor.get('type','')}\n"
         f"Source anchor title: {source_anchor.get('title','')}\n\n"
+        + lead_directive +
         "Claims selected from the source anchor (use these — do "
         "not invent additional claims):\n"
         f"{json.dumps(claims, indent=2, default=str)}\n\n"

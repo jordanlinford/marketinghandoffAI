@@ -21,6 +21,10 @@ from app.reports.derivatives.containment import (  # noqa: F401
     validate_containment,
 )
 from app.reports.derivatives.exec_summary import render_exec_summary  # noqa: F401
+from app.reports.derivatives.leads import (  # noqa: F401
+    select_lead,
+    validate_lead,
+)
 
 
 DERIVATIVE_RENDERERS = {

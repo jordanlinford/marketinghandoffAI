@@ -55,11 +55,16 @@ _MAX_CLAIM_SLIDES = 4
 
 def _select_claims(anchor_content: dict,
                    anchor_ledger_entries: list[dict],
-                   max_claims: int = _MAX_CLAIM_SLIDES) -> list[dict]:
+                   max_claims: int = _MAX_CLAIM_SLIDES,
+                   lead_ev_id: str | None = None) -> list[dict]:
     """Walk the anchor's blocks, pair each number with its nearest
     following marker, return up to max_claims grounded claim dicts.
     Same selection shape exec_summary uses — both derivatives lift
-    from the SAME validated layer."""
+    from the SAME validated layer.
+
+    lead_ev_id: when supplied AND present among lifted pairs, that
+    pair is reordered to position 0 so the carousel's `finding` slide
+    foregrounds it. Pure selection — no claim is added or removed."""
     blocks = (anchor_content or {}).get("blocks") or []
     by_id = {e["id"]: e for e in (anchor_ledger_entries or [])
              if isinstance(e, dict) and "id" in e}
@@ -88,6 +93,18 @@ def _select_claims(anchor_content: dict,
                 break
         if len(out) >= max_claims:
             break
+    # Lead foregrounding — same SELECTION-not-synthesis contract
+    # exec_summary holds (see leads.py). The fan-out coordinator
+    # validated the lead exists in the anchor's ledger AND is cited
+    # in prose; here we just reorder so the carousel's `finding` slide
+    # presents it first.
+    if lead_ev_id:
+        lead_idx = next(
+            (i for i, c in enumerate(out) if c["marker_id"] == lead_ev_id),
+            -1)
+        if lead_idx > 0:
+            lead = out.pop(lead_idx)
+            out.insert(0, lead)
     return out[:max_claims]
 
 
@@ -229,19 +246,24 @@ def _schema_example(fallback_blocks: list[dict]) -> dict:
 
 
 def render_carousel(source_anchor: dict, *,
-                    settings: Any = None) -> tuple[dict, float]:
+                    settings: Any = None,
+                    lead_ev_id: str | None = None
+                    ) -> tuple[dict, float]:
     """Render a carousel derivative from a source anchor.
 
     Same input contract as render_exec_summary; same return shape
-    (content_dict, cost_usd). Containment validation is the agent's
-    responsibility — this renderer's job is the safe-by-construction
-    emission of slides whose every marker resolves in the source
-    anchor's ledger.
+    (content_dict, cost_usd). lead_ev_id (optional, used by the fan-
+    out coordinator) reorders claim selection so the foregrounded
+    claim becomes the `finding` slide. Containment validation is the
+    agent's responsibility — this renderer's job is the safe-by-
+    construction emission of slides whose every marker resolves in
+    the source anchor's ledger.
     """
     body = source_anchor.get("body") or {}
     anchor_content = body.get("content") or {}
     anchor_ledger_entries = body.get("evidence_ledger") or []
-    claims = _select_claims(anchor_content, anchor_ledger_entries)
+    claims = _select_claims(anchor_content, anchor_ledger_entries,
+                              lead_ev_id=lead_ev_id)
     fallback_blocks = _deterministic_blocks(source_anchor, claims)
     metadata = {
         "audience": _AUDIENCE_LABEL,
@@ -249,6 +271,7 @@ def render_carousel(source_anchor: dict, *,
         "source_anchor_id": source_anchor.get("id"),
         "source_anchor_title": source_anchor.get("title"),
         "source_anchor_type": source_anchor.get("type"),
+        "lead_ev_id": lead_ev_id,
     }
     if not (settings and getattr(settings, "anthropic_api_key", "")):
         return ({"content_type": _CONTENT_TYPE,
@@ -258,9 +281,18 @@ def render_carousel(source_anchor: dict, *,
                 0.0)
     system_msg = _llm_system_msg()
     schema = _schema_example(fallback_blocks)
+    lead_directive = ""
+    if lead_ev_id:
+        lead_directive = (
+            f"\nLEAD CLAIM TO FOREGROUND: ⟦ev:{lead_ev_id}⟧. The "
+            "`finding` slide must lead with the existing anchor "
+            "claim cited at this ledger id — select that claim, do "
+            "NOT compose a new headline around it. Other slides "
+            "support it from the anchor's existing claims.\n")
     user_msg = (
         f"Source anchor type: {source_anchor.get('type','')}\n"
         f"Source anchor title: {source_anchor.get('title','')}\n\n"
+        + lead_directive +
         "Claims selected from the source anchor (use these — do "
         "not invent additional claims):\n"
         f"{json.dumps(claims, indent=2, default=str)}\n\n"

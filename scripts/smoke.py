@@ -7160,6 +7160,338 @@ def main() -> None:
               f"§6/§7 unchanged — claims still bound, only the "
               f"presentation whitespace cleaned.")
 
+        # ================================================================
+        # Fan-out (25) — one anchor → N trust-bound siblings with a
+        # SELECTED lead claim. This section enforces the architectural
+        # spine the brief calls out:
+        #
+        # THE LEAD IS A SELECTION (an ev:id pointer into the anchor's
+        # ledger), NEVER A SYNTHESIS. If the fan-out ever composed a
+        # new unifying message and propagated it to siblings, that
+        # would pass §7 trivially (siblings "contain" it because they
+        # all repeat it) while being exactly the §6 fabrication §6
+        # exists to stop. The proofs below pin that distinction.
+        # ================================================================
+        print("---- Fan-out (25) — one anchor → N siblings, "
+              "selected lead ----")
+        from app.reports.derivatives import (select_lead, validate_lead,
+                                               trust_checks_with_containment_findings,
+                                               validate_containment)
+        from app.reports.evidence import Ledger as _SmokeLedger
+        from app.models import FanoutSet as _FanoutSet
+
+        # ---- 25-setup — pick a passing anchor (same selector style as #21).
+        fanout_source = None
+        for kind in ("whitepaper", "buyer_guide", "solution_guide",
+                      "report"):
+            assets = client.get(
+                f"/api/assets?asset_kind={kind}&limit=50",
+                headers=H_ONIT).json()["assets"]
+            passing = [a for a in assets if a.get("trust_state") == "passed"]
+            if passing:
+                fanout_source = passing[0]["id"]
+                break
+        assert fanout_source, ("smoke setup: no passing anchor for "
+                                "the fan-out proofs")
+        # Read the anchor body once — used by the lead-validation +
+        # absence checks below.
+        src_detail = client.get(
+            f"/api/assets/content/{fanout_source}",
+            headers=H_ONIT).json()
+        anchor_body = src_detail["body"]
+
+        # ---- 25a PRESENCE — POST + poll + N children produced ------
+        r = client.post("/api/fanouts/generate", headers=H_ONIT, json={
+            "source_anchor_id": fanout_source,
+            "derivative_types": ["exec_summary", "carousel"],
+        })
+        assert r.status_code == 200, (
+            f"POST /api/fanouts/generate failed: {r.text}")
+        spawn = r.json()
+        fanout_set_id = spawn["fanout_set_id"]
+        assert spawn["source_anchor_id"] == fanout_source
+        assert spawn["lead_ev_id"], "API must return the selected lead_ev_id"
+        assert len(spawn["children"]) == 2
+        for c in spawn["children"]:
+            assert c["derivative_type"] in ("exec_summary", "carousel")
+            assert c["run_id"]
+        # Drain the worker queue until both children land.
+        for _ in range(8):
+            done = sum(1 for _ in [1] if run_once() is True)
+            if not done:
+                break
+        # The fan-out set's GET projection should now report
+        # set_status='complete' with both children carrying trust.
+        set_view = client.get(f"/api/fanouts/{fanout_set_id}",
+                               headers=H_ONIT).json()
+        assert set_view["set_status"] == "complete", (
+            f"fan-out set should be complete after worker drain; "
+            f"got {set_view['set_status']!r}. children={set_view['children']!r}")
+        assert len(set_view["children"]) == 2
+        assert set_view["lead_ev_id"] == spawn["lead_ev_id"]
+        # Every child must have an artifact + a trust state.
+        for c in set_view["children"]:
+            assert c["run_status"] == "succeeded", (
+                f"child run failed: {c!r}")
+            assert c["artifact_id"], (
+                f"child run produced no artifact: {c!r}")
+            assert c["trust_state"] in (
+                "passed", "passed_with_warnings", "blocked"), (
+                f"child trust_state must be a known compact state; "
+                f"got {c['trust_state']!r}")
+        print(f"[OK] Fan-out (25a): PRESENCE — POST /api/fanouts/"
+              f"generate spawned 2 children from anchor "
+              f"{fanout_source[:8]}; both children landed via the "
+              f"existing derivative_composer chassis; set_status="
+              f"'complete'; trust states present: "
+              f"{set_view['trust_states_present']!r}.")
+
+        # ---- 25b LEAD INTEGRITY (load-bearing) ---------------------
+        # The lead resolves to a REAL anchor ledger entry that is
+        # CITED in the anchor's prose. Two assertions:
+        #   1. The auto-selected lead exists in the ledger AND is
+        #      cited.
+        #   2. A user-supplied lead that is NOT in the anchor (random
+        #      id) is rejected by the API. Same for a ledger entry
+        #      uncited in prose (we synthesize one if we can).
+        ledger_entries = anchor_body.get("evidence_ledger") or []
+        ledger_ids = {e["id"] for e in ledger_entries}
+        assert spawn["lead_ev_id"] in ledger_ids, (
+            "FAIL: the auto-selected lead does not exist in the "
+            f"source anchor's ledger. lead={spawn['lead_ev_id']!r} "
+            f"ledger_ids={sorted(ledger_ids)!r}. The lead must be a "
+            "real anchor claim, never an invented id.")
+        # Confirm validate_lead agrees (selection-side check).
+        from app.reports.derivatives.leads import (
+            _cited_ev_ids_in_order)
+        cited_in_prose = set(_cited_ev_ids_in_order(
+            anchor_body.get("content") or {}))
+        assert spawn["lead_ev_id"] in cited_in_prose, (
+            "FAIL: the selected lead is in the ledger but not cited "
+            "in anchor prose — that's a number the ledger has, NOT a "
+            "claim the anchor made. Foregrounding it would be "
+            "inventing a claim.")
+        # Reject an obviously-invalid lead via the API.
+        bogus_lead = "lead_bogus_99999"
+        assert bogus_lead not in ledger_ids
+        r_bad = client.post("/api/fanouts/generate", headers=H_ONIT, json={
+            "source_anchor_id": fanout_source,
+            "derivative_types": ["exec_summary"],
+            "lead_ev_id": bogus_lead,
+        })
+        assert r_bad.status_code == 400, (
+            f"API must REJECT a lead_ev_id absent from anchor; got "
+            f"{r_bad.status_code} {r_bad.text}")
+        # Reject a real ledger id that is NOT cited in prose (find
+        # one if any exist; if every ledger id is cited, skip this
+        # sub-check honestly).
+        uncited_ledger_ids = list(ledger_ids - cited_in_prose)
+        if uncited_ledger_ids:
+            r_uncited = client.post("/api/fanouts/generate", headers=H_ONIT, json={
+                "source_anchor_id": fanout_source,
+                "derivative_types": ["exec_summary"],
+                "lead_ev_id": uncited_ledger_ids[0],
+            })
+            assert r_uncited.status_code == 400, (
+                f"API must REJECT an uncited ledger id as lead; got "
+                f"{r_uncited.status_code}. id={uncited_ledger_ids[0]!r}")
+            uncited_proven = True
+        else:
+            uncited_proven = False
+        print(f"[OK] Fan-out (25b): LEAD INTEGRITY — auto-selected "
+              f"lead ev:{spawn['lead_ev_id']} resolves to a real "
+              f"ledger entry AND is cited in anchor prose. API "
+              f"rejects bogus_lead with 400; "
+              f"{'rejects uncited ledger ids with 400 too' if uncited_proven else '(every ledger id is cited in this anchor — uncited-rejection path not exercised here, validate_lead unit-tested separately)'}.")
+
+        # ---- 25c NO-NEW-CLAIM in children (load-bearing) -----------
+        # Each child still passes §7 independently. The lead emphasis
+        # is reordering of selected claims, never the introduction of
+        # a new one. We assert this two ways:
+        #   1. The children produced in 25a all pass §7 against the
+        #      anchor's ledger (existing single-derivative invariant
+        #      — confirms emphasis didn't smuggle in a new number).
+        #   2. SYNTHETICALLY corrupt a child's content with a fake
+        #      number (no marker) and re-run containment — it MUST
+        #      §7-fail. Proves lead emphasis ≠ unrestricted prose.
+        anchor_ledger_obj = _SmokeLedger.from_entries(ledger_entries)
+        for c in set_view["children"]:
+            art = db.execute(
+                scoped(Artifact, onit.id).where(Artifact.id == c["artifact_id"])
+            ).scalar_one()
+            tc = (art.body or {}).get("trust_checks") or {}
+            assert tc.get("validator") == "containment"
+            assert tc.get("passed") is True, (
+                f"child {c['derivative_type']!r} did NOT pass §7 — "
+                "lead emphasis must not weaken the per-child gate. "
+                f"trust_checks={tc!r}")
+        # Synthetic corruption — pick the first child, inject a bare
+        # unsourced number into its content, re-run containment.
+        first_child = set_view["children"][0]
+        first_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.id == first_child["artifact_id"])
+        ).scalar_one()
+        clean = first_art.body["content"]
+        corrupted_blocks = list(clean.get("blocks") or [])
+        # Pick a block we can append to (any block with text content).
+        injected = False
+        for i, b in enumerate(corrupted_blocks):
+            if b.get("text"):
+                corrupted_blocks[i] = {
+                    **b,
+                    "text": (b["text"] + "\nNote: 117 readers liked it."),
+                }
+                injected = True
+                break
+        assert injected
+        corrupted = {**clean, "blocks": corrupted_blocks}
+        tc_corr = validate_containment(corrupted, anchor_ledger_obj)
+        tc_corr = trust_checks_with_containment_findings(
+            tc_corr, ledger_entries, corrupted)
+        assert tc_corr["passed"] is False, (
+            "NO-NEW-CLAIM violation: a child carrying a bare '117' "
+            "did NOT §7-fail. The lead-emphasis path is allowing "
+            "fabrication.")
+        assert tc_corr["approval_blocked"] is True
+        seven = [f for f in tc_corr.get("findings", [])
+                  if f.get("discipline") == "§7"
+                  and f.get("severity") == "critical"]
+        assert seven, "expected §7 critical finding on corrupted child"
+        print(f"[OK] Fan-out (25c): NO-NEW-CLAIM — every child in the "
+              f"spawned set independently passed §7 containment "
+              f"(lead emphasis is reorder-only, never injection). "
+              f"Synthetic corruption (bare '117' on a child) trips "
+              f"CRITICAL §7 + approval_blocked, proving the gate "
+              f"isn't softened by the fan-out path.")
+
+        # ---- 25d SIBLING INDEPENDENCE ------------------------------
+        # A blocked sibling MUST NOT block its siblings. We simulate
+        # by flipping one child's approval_blocked True (post-hoc DB
+        # mutation — same trick #17b uses to test surface flip) and
+        # confirm the SET projection honestly reports mixed state
+        # while the other siblings stay passed.
+        target = set_view["children"][0]
+        target_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.id == target["artifact_id"])
+        ).scalar_one()
+        original_body = dict(target_art.body or {})
+        flipped_body = dict(original_body)
+        flipped_tc = dict(flipped_body.get("trust_checks") or {})
+        flipped_tc["approval_blocked"] = True
+        flipped_tc["findings"] = list(flipped_tc.get("findings") or []) + [{
+            "severity": "critical", "discipline": "§7",
+            "claim": "synthetic-sibling-block",
+            "location": "Test",
+            "issue": "Synthetic — for sibling-independence test",
+            "recommended_action": "Revert",
+            "block_idx": 0,
+        }]
+        flipped_tc["findings_by_severity"] = {
+            **flipped_tc.get("findings_by_severity", {}),
+            "critical": flipped_tc.get("findings_by_severity", {}).get("critical", 0) + 1,
+        }
+        flipped_body["trust_checks"] = flipped_tc
+        target_art.body = flipped_body
+        db.commit()
+        db.refresh(target_art)
+        set_view_flipped = client.get(f"/api/fanouts/{fanout_set_id}",
+                                       headers=H_ONIT).json()
+        target_in_view = next(c for c in set_view_flipped["children"]
+                                if c["artifact_id"] == target_art.id)
+        other_in_view = next(c for c in set_view_flipped["children"]
+                              if c["artifact_id"] != target_art.id)
+        assert target_in_view["trust_state"] == "blocked"
+        assert target_in_view["approval_blocked"] is True
+        assert other_in_view["trust_state"] == "passed", (
+            "Sibling independence broken: a §7 fail on one child "
+            f"corrupted the projection of its sibling. other="
+            f"{other_in_view!r}")
+        assert "blocked" in set_view_flipped["trust_states_present"]
+        assert "passed" in set_view_flipped["trust_states_present"]
+        print(f"[OK] Fan-out (25d): SIBLING INDEPENDENCE — flipping "
+              f"one child to blocked left the other at 'passed'. The "
+              f"set's trust_states_present={set_view_flipped['trust_states_present']!r} "
+              f"honestly reports mixed state — no sibling silently "
+              f"suppressed.")
+        # Restore the corrupted child so subsequent runs of the smoke
+        # don't inherit a poisoned artifact.
+        target_art.body = original_body
+        db.commit()
+        db.refresh(target_art)
+
+        # ---- 25e CONSISTENCY — all children share one lead ---------
+        for c in set_view["children"]:
+            art = db.execute(
+                scoped(Artifact, onit.id).where(Artifact.id == c["artifact_id"])
+            ).scalar_one()
+            assert (art.body or {}).get("lead_ev_id") == spawn["lead_ev_id"], (
+                f"child {c['derivative_type']!r} body.lead_ev_id "
+                f"({(art.body or {}).get('lead_ev_id')!r}) does not "
+                f"match the set's lead ({spawn['lead_ev_id']!r}). "
+                "Lead consistency broken.")
+            assert (art.body or {}).get("fanout_set_id") == fanout_set_id, (
+                "child body.fanout_set_id must record set membership")
+        print(f"[OK] Fan-out (25e): CONSISTENCY — every spawned child "
+              f"records body.lead_ev_id={spawn['lead_ev_id']!r} + "
+              f"body.fanout_set_id={fanout_set_id[:8]}…. One "
+              f"foregrounded claim across the set, not N divergent.")
+
+        # ---- 25f DETERMINISM — same inputs → same outputs ----------
+        # The deterministic lead-selection heuristic + the
+        # deterministic claim-reordering both produce stable output.
+        # We assert select_lead(anchor) and validate_lead are
+        # idempotent / pure.
+        lead_again = select_lead(anchor_body)
+        assert lead_again == {
+            "ev_id":                  spawn["lead_ev_id"],
+            "label":                  spawn["lead_payload"]["label"],
+            "value":                  spawn["lead_payload"]["value"],
+            "confidence":             spawn["lead_payload"]["confidence"],
+            "baseline_vs_attributed": spawn["lead_payload"]["baseline_vs_attributed"],
+        }, (f"select_lead is not deterministic; got "
+            f"{lead_again!r} vs {spawn['lead_payload']!r}")
+        # And the containment trust_checks on the kept children are
+        # byte-identical when re-validated against the anchor ledger
+        # (same proof shape #21e holds for single derivatives, now
+        # exercised on fan-out children).
+        for c in set_view["children"]:
+            if c["artifact_id"] == target_art.id:
+                continue  # we mutated this one; skip
+            art = db.execute(
+                scoped(Artifact, onit.id).where(Artifact.id == c["artifact_id"])
+            ).scalar_one()
+            content_d = (art.body or {}).get("content") or {}
+            tc1 = validate_containment(content_d, anchor_ledger_obj)
+            tc1 = trust_checks_with_containment_findings(
+                tc1, ledger_entries, content_d)
+            tc2 = validate_containment(content_d, anchor_ledger_obj)
+            tc2 = trust_checks_with_containment_findings(
+                tc2, ledger_entries, content_d)
+            import json as _jm
+            assert (_jm.dumps(tc1, sort_keys=True, default=str)
+                    == _jm.dumps(tc2, sort_keys=True, default=str)), (
+                f"containment is not deterministic on child "
+                f"{c['derivative_type']!r}")
+        print(f"[OK] Fan-out (25f): DETERMINISM — select_lead is pure "
+              f"(same anchor → same lead); per-child containment "
+              f"re-validates byte-identical across calls.")
+
+        # ---- 25g TENANT ISOLATION — Acme can't fan-out from Onit ---
+        r_iso = client.post("/api/fanouts/generate", headers=H_ACME, json={
+            "source_anchor_id": fanout_source,
+            "derivative_types": ["exec_summary"],
+        })
+        assert r_iso.status_code in (403, 404), (
+            f"Acme spawning from Onit's anchor MUST be denied; got "
+            f"{r_iso.status_code} {r_iso.text}")
+        # And reading Onit's set as Acme is denied too.
+        r_iso_get = client.get(f"/api/fanouts/{fanout_set_id}",
+                                headers=H_ACME)
+        assert r_iso_get.status_code in (403, 404)
+        print(f"[OK] Fan-out (25g): TENANT ISOLATION — Acme cannot "
+              f"spawn from Onit's anchor ({r_iso.status_code}) nor "
+              f"read Onit's fan-out set ({r_iso_get.status_code}).")
+
         # Cleanup tmp dirs from #24b so they don't accumulate in dev.
         for org_tmp in (org_tmp_1, org_tmp_2):
             tmp_path = _sroot() / org_tmp

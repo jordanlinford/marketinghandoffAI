@@ -2268,8 +2268,19 @@ async function spawnFanout() {
 function _renderFanoutResult(root, setView) {
   root.innerHTML = '';
   const lead = setView.lead_payload || {};
+  const weakLead = !!setView.weak_lead;
+  const weakLeadAdvisory = weakLead
+    ? el('div', { class: 'setup-status',
+        style: 'margin-bottom:8px; font-size:12px; color:#f0c97a; '
+              + 'background:#3a2c14; padding:6px 8px; border-radius:4px;'
+              + ' border-left:3px solid #c89a3a;' },
+        '⚠ Weak lead: the source anchor has no non-zero findings — '
+        + 'the spine fell back to an absence claim. Siblings still '
+        + 'pass §7; the set is honest but probably not postable.')
+    : null;
   const wrap = el('div', { class: 'panel', style: 'margin-top:14px;' },
     el('h4', {}, 'Fan-out set'),
+    weakLeadAdvisory,
     el('div', { class: 'sub', style: 'font-size:13px; margin-bottom:6px;' },
       el('strong', {}, 'Lead: '),
       el('code', { style: 'background:var(--bg-elev); padding:2px 4px; border-radius:3px;' }, `ev:${setView.lead_ev_id}`),

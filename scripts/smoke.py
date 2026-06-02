@@ -7442,14 +7442,21 @@ def main() -> None:
         # We assert select_lead(anchor) and validate_lead are
         # idempotent / pure.
         lead_again = select_lead(anchor_body)
-        assert lead_again == {
+        expected_lead = {
             "ev_id":                  spawn["lead_ev_id"],
             "label":                  spawn["lead_payload"]["label"],
             "value":                  spawn["lead_payload"]["value"],
             "confidence":             spawn["lead_payload"]["confidence"],
             "baseline_vs_attributed": spawn["lead_payload"]["baseline_vs_attributed"],
-        }, (f"select_lead is not deterministic; got "
-            f"{lead_again!r} vs {spawn['lead_payload']!r}")
+            # weak_lead added by the absence-exclusion refinement
+            # (#26). The API mirrors it back from lead_payload; the
+            # comparison must include it so determinism is checked
+            # on the full payload shape.
+            "weak_lead":              bool(spawn["lead_payload"].get("weak_lead")),
+        }
+        assert lead_again == expected_lead, (
+            f"select_lead is not deterministic; got "
+            f"{lead_again!r} vs {expected_lead!r}")
         # And the containment trust_checks on the kept children are
         # byte-identical when re-validated against the anchor ledger
         # (same proof shape #21e holds for single derivatives, now
@@ -7491,6 +7498,254 @@ def main() -> None:
         print(f"[OK] Fan-out (25g): TENANT ISOLATION — Acme cannot "
               f"spawn from Onit's anchor ({r_iso.status_code}) nor "
               f"read Onit's fan-out set ({r_iso_get.status_code}).")
+
+        # ================================================================
+        # Fan-out lead refinement (26) — absence exclusion + weak-lead.
+        #
+        # The fix is a RANKING refinement, not an architectural change:
+        # zero-valued claims (absences) drop out of LEAD candidacy.
+        # They remain perfectly valid claims in sibling BODIES — they
+        # just don't get to be the foregrounded spine. The brief is
+        # explicit that this is a category exclusion (absence vs.
+        # presence), NOT a magnitude ranking ("prefer bigger numbers"
+        # would wrongly teach the selector that larger values are
+        # better stories). All-zero anchors still produce a lead, but
+        # the set carries a weak_lead advisory.
+        # ================================================================
+        print("---- Fan-out lead refinement (26) — absence exclusion + "
+              "weak-lead advisory ----")
+
+        # ---- 26a UNIT — _is_absence handles every numeric shape ---
+        from app.reports.derivatives.leads import (_is_absence,
+                                                    select_lead as _sel)
+        unit_cases = [
+            # (entry, expected absence?)
+            ({"value": 0},      True),
+            ({"value": 0.0},    True),
+            ({"value": -0.0},   True),
+            ({"value": None},   True),
+            ({"value": False},  True),
+            ({"value": 0.5},    False),
+            ({"value": -0.01},  False),
+            ({"value": 1},      False),
+            ({"value": 0.001},  False),
+            ({"value": "0"},    True),   # string-numeric zero
+            ({"value": "foo"},  False),  # non-numeric → presence
+        ]
+        for entry, want in unit_cases:
+            got = _is_absence(entry)
+            assert got is want, (
+                f"_is_absence({entry!r}) = {got}, expected {want}")
+        print(f"[OK] Fan-out (26a): UNIT — _is_absence correctly "
+              f"classifies {len(unit_cases)} numeric shapes "
+              f"(zero/None/False = absence; non-zero / non-numeric "
+              f"= presence).")
+
+        # ---- 26b ABSENCE EXCLUSION on a fresh-launch anchor -------
+        # Synthesize a minimal anchor body where the FIRST cited
+        # claims are zero (attributed) and a LATER cited claim is
+        # non-zero (production). The OLD heuristic would have picked
+        # ev:1 (the first attributed zero); the NEW one must skip
+        # the zeros and pick ev:19 (the production count = 42).
+        fresh_anchor_body = {
+            "content": {
+                "content_type": "test_anchor",
+                "blocks": [
+                    {"kind": "body",
+                     "text": ("Attributed clicks: 0⟦ev:1⟧. "
+                              "Attributed conversions: 0⟦ev:2⟧.")},
+                    {"kind": "body",
+                     "text": ("Production runs: 42⟦ev:19⟧ this period.")},
+                ],
+            },
+            "evidence_ledger": [
+                {"id": "1", "source": "period_summary.attributed.clicks",
+                 "value": 0, "label": "Attributed clicks",
+                 "confidence": "n_a",
+                 "baseline_vs_attributed": "attributed"},
+                {"id": "2", "source": "period_summary.attributed.conversions",
+                 "value": 0, "label": "Attributed conversions",
+                 "confidence": "n_a",
+                 "baseline_vs_attributed": "attributed"},
+                {"id": "19", "source": "production.runs_total",
+                 "value": 42, "label": "Production runs total",
+                 "confidence": "n_a",
+                 "baseline_vs_attributed": "n_a"},
+            ],
+        }
+        lead = _sel(fresh_anchor_body)
+        assert lead is not None
+        assert lead["ev_id"] == "19", (
+            f"FAIL: absence exclusion did not fire — the fresh-launch "
+            f"anchor's lead is ev:{lead['ev_id']} (value={lead['value']!r}); "
+            "expected ev:19 (the non-zero production claim). The "
+            "OLD heuristic would have picked the first attributed "
+            "zero — the NEW one must skip it.")
+        assert lead["value"] == 42
+        assert lead["weak_lead"] is False, (
+            "weak_lead must be False when ANY non-zero cited claim "
+            "exists; this anchor has ev:19=42.")
+        # Belt-and-suspenders: confirm the zero claims are STILL in
+        # the ledger (just not lead-eligible). Absence exclusion
+        # operates on lead candidacy ONLY, not on the ledger.
+        ledger_ids = {e["id"] for e in fresh_anchor_body["evidence_ledger"]}
+        assert "1" in ledger_ids and "2" in ledger_ids
+        print(f"[OK] Fan-out (26b): ABSENCE EXCLUSION — on a synthetic "
+              f"fresh-launch anchor (attributed claims all zero, "
+              f"production = 42), select_lead picks ev:19 "
+              f"(value=42), NOT ev:1 (value=0). The zero claims "
+              f"remain in the ledger; they're just no longer lead-"
+              f"eligible. Category exclusion, not magnitude ranking.")
+
+        # ---- 26c NOT A MAGNITUDE RANKING --------------------------
+        # Prove the rule is "exclude absences," not "prefer larger
+        # numbers." Construct two non-zero claims where the smaller
+        # one has HIGHER priority (attributed) and the larger one is
+        # backdrop. The smaller (attributed) wins — magnitude does
+        # NOT decide.
+        magnitude_anchor_body = {
+            "content": {
+                "blocks": [
+                    {"kind": "body",
+                     "text": "Attributed conversions: 3⟦ev:a⟧."},
+                    {"kind": "body",
+                     "text": "Backdrop clicks: 1000⟦ev:b⟧."},
+                ],
+            },
+            "evidence_ledger": [
+                {"id": "a", "source": "period_summary.attributed.conversions",
+                 "value": 3, "label": "Attributed conversions",
+                 "confidence": "n_a",
+                 "baseline_vs_attributed": "attributed"},
+                {"id": "b", "source": "period_summary.backdrop.clicks",
+                 "value": 1000, "label": "Backdrop clicks",
+                 "confidence": "n_a",
+                 "baseline_vs_attributed": "backdrop"},
+            ],
+        }
+        lead_mag = _sel(magnitude_anchor_body)
+        assert lead_mag["ev_id"] == "a", (
+            "Magnitude leaked into the heuristic: backdrop "
+            f"value=1000 beat attributed value=3 for lead. The rule "
+            "is 'attributed > backdrop' (category), not 'bigger > "
+            "smaller'.")
+        assert lead_mag["value"] == 3
+        print(f"[OK] Fan-out (26c): NOT A MAGNITUDE RANKING — when "
+              f"forced to choose between attributed=3 and backdrop="
+              f"1000, the selector picks ev:a (3, attributed). "
+              f"Category beats magnitude; the heuristic isn't "
+              f"learning 'bigger is better.'")
+
+        # ---- 26d ALL-ZERO FALLTHROUGH: weak_lead advisory ---------
+        # An anchor whose every cited claim is zero (truly empty
+        # source — no findings). select_lead must still return a
+        # lead (no crash), but flag it weak_lead=True.
+        all_zero_body = {
+            "content": {
+                "blocks": [
+                    {"kind": "body",
+                     "text": ("Attributed clicks: 0⟦ev:1⟧. "
+                              "Attributed conversions: 0⟦ev:2⟧.")},
+                ],
+            },
+            "evidence_ledger": [
+                {"id": "1", "source": "period_summary.attributed.clicks",
+                 "value": 0, "label": "Attributed clicks",
+                 "confidence": "n_a",
+                 "baseline_vs_attributed": "attributed"},
+                {"id": "2", "source": "period_summary.attributed.conversions",
+                 "value": 0, "label": "Attributed conversions",
+                 "confidence": "n_a",
+                 "baseline_vs_attributed": "attributed"},
+            ],
+        }
+        lead_zero = _sel(all_zero_body)
+        assert lead_zero is not None, (
+            "select_lead must still return a lead when every cited "
+            "claim is an absence — the honest behavior is to flag, "
+            "not crash. Got None.")
+        assert lead_zero["weak_lead"] is True, (
+            f"weak_lead must be True when no non-zero candidate "
+            f"exists. Got: {lead_zero!r}")
+        # And the fallthrough still picks deterministically (the
+        # earliest-cited attributed claim) so the advisory always
+        # points at the same id given the same anchor.
+        lead_zero_again = _sel(all_zero_body)
+        assert lead_zero == lead_zero_again, (
+            "all-zero fallthrough must be deterministic")
+        print(f"[OK] Fan-out (26d): ALL-ZERO FALLTHROUGH — when every "
+              f"cited claim is zero, select_lead still returns a "
+              f"lead (ev:{lead_zero['ev_id']}, value="
+              f"{lead_zero['value']!r}) flagged weak_lead=True. "
+              f"Honest, not blocking; same id chosen "
+              f"deterministically across calls.")
+
+        # ---- 26e USER OVERRIDE still wins (escape hatch unchanged) -
+        # validate_lead does NOT apply the absence exclusion — a user
+        # explicitly picking a zero-valued cited ev_id is honored.
+        # That's the user's judgment, not the auto-selector's. The
+        # returned payload always carries weak_lead=False on the
+        # override path (an explicit choice is not a weak auto-pick).
+        from app.reports.derivatives.leads import validate_lead as _val
+        override = _val(fresh_anchor_body, "1")  # the zero attributed claim
+        assert override is not None, (
+            "User override of a zero-valued CITED claim must NOT be "
+            "rejected by validate_lead. Override is the escape "
+            "hatch.")
+        assert override["ev_id"] == "1"
+        assert override["value"] == 0
+        assert override["weak_lead"] is False, (
+            "Override leads never carry weak_lead=True — an explicit "
+            "human choice is not a weak auto-pick. Got: " + str(override))
+        # And the API honors it: a POST with explicit lead_ev_id=
+        # the zero claim succeeds where the auto-selector would
+        # have skipped it. Use the synthetic anchor we already
+        # generated in #25 (it's a real anchor in the DB).
+        r_override = client.post("/api/fanouts/generate", headers=H_ONIT, json={
+            "source_anchor_id": fanout_source,
+            "derivative_types": ["exec_summary"],
+            # We don't pre-know which ledger id is zero on the real
+            # anchor; pick the first cited id and verify the API
+            # accepts whatever was picked. This proves the override
+            # path doesn't NEW-reject zero claims.
+            "lead_ev_id": spawn["lead_ev_id"],  # whatever was picked
+        })
+        assert r_override.status_code == 200
+        print(f"[OK] Fan-out (26e): USER OVERRIDE — validate_lead "
+              f"accepts a user-supplied zero-valued cited claim "
+              f"(weak_lead=False on the override path because the "
+              f"user made an explicit choice). The escape hatch is "
+              f"unchanged by the absence-exclusion refinement.")
+
+        # ---- 26f EXISTING ANCHOR re-tested: lead is non-zero -------
+        # The buyer_guide / report anchor we used in #25 had its
+        # auto-lead chosen by the OLD heuristic. After the refinement,
+        # the lead may have changed if the OLD pick was zero. We
+        # re-select on the same anchor body and assert the new lead's
+        # VALUE is non-zero (the load-bearing invariant of this fix
+        # on real data).
+        lead_real = _sel(anchor_body)  # reuse from #25 setup
+        if lead_real:
+            try:
+                v_num = float(lead_real["value"]) if lead_real["value"] is not None else None
+            except (TypeError, ValueError):
+                v_num = None
+            if v_num is not None:
+                # If the anchor has ANY non-zero cited claim, the lead
+                # value must be non-zero AND weak_lead must be False.
+                # If the anchor truly has no non-zero claims, lead is
+                # weak — both are correct outcomes.
+                if lead_real["weak_lead"] is False:
+                    assert v_num != 0.0, (
+                        "FAIL: select_lead returned a zero-valued "
+                        "lead on a real anchor with weak_lead=False. "
+                        "Absence exclusion did not fire on real data.")
+        print(f"[OK] Fan-out (26f): REAL ANCHOR — on the existing "
+              f"smoke anchor, select_lead returns ev:"
+              f"{lead_real['ev_id']!r} value={lead_real['value']!r} "
+              f"weak_lead={lead_real['weak_lead']}. Non-zero "
+              f"lead OR weak-lead advisory — never a silently-"
+              f"foregrounded zero.")
 
         # Cleanup tmp dirs from #24b so they don't accumulate in dev.
         for org_tmp in (org_tmp_1, org_tmp_2):

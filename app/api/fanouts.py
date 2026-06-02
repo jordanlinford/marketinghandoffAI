@@ -193,6 +193,9 @@ def generate_fanout(body: GenerateFanoutIn,
         "source_anchor_id": fanout.source_anchor_id,
         "lead_ev_id": fanout.lead_ev_id,
         "lead_payload": fanout.lead_payload,
+        # Mirrored on POST so the UI can warn at spawn time, not just
+        # on the subsequent GET. False for user-override leads.
+        "weak_lead": bool((fanout.lead_payload or {}).get("weak_lead")),
         "children": children,
     }
 
@@ -268,6 +271,14 @@ def get_fanout(set_id: str,
         "source_anchor_title": fanout.source_anchor_title,
         "lead_ev_id": fanout.lead_ev_id,
         "lead_payload": fanout.lead_payload,
+        # Weak-lead advisory — True when select_lead had to fall back
+        # to a zero-valued / absence claim because the anchor has no
+        # non-zero findings to spine on. NOT a block; the fan-out
+        # still produces. Surfaces in the UI so the user can decide
+        # whether to post or wait for stronger source data. False on
+        # user-override leads (validate_lead path) — an explicit
+        # human choice is by definition not a weak auto-pick.
+        "weak_lead": bool((fanout.lead_payload or {}).get("weak_lead")),
         "set_status": set_status,
         "children": projected_children,
         # Honest per-child trust roll-up — the set has NO trust of

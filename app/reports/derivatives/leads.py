@@ -53,6 +53,39 @@ _CONFIDENCE_RANK = {
 }
 
 
+def _is_absence(entry: dict) -> bool:
+    """Is this entry a zero-valued 'absence' claim rather than a
+    finding? An attributed conversion count of 0 IS an honest claim
+    the anchor makes — but it's the ABSENCE of data, not a
+    finding worth foregrounding across an entire content set. The
+    fan-out spine deserves a real signal; the zeros stay perfectly
+    valid in sibling bodies, they just aren't lead-eligible.
+
+    LOAD-BEARING: this is a CATEGORY exclusion (absence vs. presence
+    of a measurement), NOT a magnitude ranking. The brief is
+    explicit: do not 'prefer bigger numbers,' which would wrongly
+    teach the selector that larger values are better stories. A
+    non-zero small claim still outranks nothing inappropriately.
+    """
+    v = entry.get("value")
+    if v is None:
+        # None should already be filtered at ledger build time
+        # (Ledger.add skips None), but defensive: a missing value is
+        # an absence of measurement, same category as 0.
+        return True
+    if isinstance(v, bool):
+        # Bool is a numeric subtype in Python; treat False as absence,
+        # True as presence — defensive on the rare bool-valued
+        # ledger entry.
+        return v is False
+    try:
+        return float(v) == 0.0
+    except (TypeError, ValueError):
+        # Non-numeric values (strings, lists, dicts) aren't numeric
+        # absences. They're presence-of-information by default.
+        return False
+
+
 def _cited_ev_ids_in_order(anchor_content: dict) -> list[str]:
     """Walk anchor blocks in document order, return the ev:id of
     every cited claim in the order they first appear. Used both as
@@ -87,12 +120,26 @@ def select_lead(anchor_body: dict) -> dict | None:
       1. Candidate pool = ev:ids cited in anchor prose (ledger
          entries not surfaced by the anchor don't count — see
          module docstring).
-      2. Prefer attributed entries over backdrop (backdrop is funnel
+      2. ABSENCE EXCLUSION — zero-valued claims (and missing-value
+         claims) are removed from LEAD candidacy. They remain
+         perfectly valid claims in sibling BODIES; they just aren't
+         eligible to be the foregrounded spine. The exclusion is a
+         CATEGORY rule (absence vs. measurement), not a magnitude
+         ranking: a non-zero small claim still outranks nothing
+         improperly. See _is_absence above.
+      3. Prefer attributed entries over backdrop (backdrop is funnel
          context, never marketing-driven — §3 discipline).
-      3. Within attributed, prefer the highest confidence tier per
+      4. Within attributed, prefer the highest confidence tier per
          _CONFIDENCE_RANK.
-      4. Tiebreaker: earliest cited in the anchor (signals the
+      5. Tiebreaker: earliest cited in the anchor (signals the
          anchor itself foregrounded it).
+
+    All-zero fallthrough: when EVERY cited claim is an absence, the
+    function still selects the highest-priority cited claim (same
+    sort, no exclusion) and flags the result with weak_lead=True.
+    The fan-out coordinator surfaces that advisory; it does NOT
+    block. This is honest: an anchor with no findings has no good
+    spine — we say so rather than fabricate one.
 
     Returns:
         {
@@ -101,6 +148,10 @@ def select_lead(anchor_body: dict) -> dict | None:
           "value":                  Any,    # from ledger entry
           "confidence":             str,    # from ledger entry
           "baseline_vs_attributed": str,    # from ledger entry
+          "weak_lead":              bool,   # True only when every
+                                            # cited claim is an
+                                            # absence (no non-zero
+                                            # findings to spine on)
         }
         or None if the anchor has no cited claims (a §6 honest
         outcome — never fabricate a lead).
@@ -111,33 +162,57 @@ def select_lead(anchor_body: dict) -> dict | None:
     cited = _cited_ev_ids_in_order(content)
     if not cited:
         return None
-    # Build (sort_key, entry) tuples. sort_key sorts ASCENDING; we
-    # want the LOWEST tuple first (best candidate).
-    candidates: list[tuple[tuple, dict]] = []
-    for order_idx, ev_id in enumerate(cited):
+
+    def _ranked(entries: list[tuple[int, dict]]) -> list[tuple[tuple, dict]]:
+        # Build (sort_key, entry) tuples. sort_key sorts ASCENDING;
+        # we want the LOWEST tuple first (best candidate). Order
+        # within: attributed (0) before backdrop (1), then highest
+        # confidence first (negate the rank), then earliest cited
+        # first (raw order_idx).
+        out: list[tuple[tuple, dict]] = []
+        for order_idx, entry in entries:
+            bvA = entry.get("baseline_vs_attributed") or "n_a"
+            conf = entry.get("confidence") or "n_a"
+            attr_key = 0 if bvA == "attributed" else 1
+            conf_key = -(_CONFIDENCE_RANK.get(conf, 0))
+            out.append(((attr_key, conf_key, order_idx), entry))
+        out.sort(key=lambda t: t[0])
+        return out
+
+    # Resolve cited ids to their ledger entries (preserving the
+    # cited order — used as the tiebreaker key). Drop ids that don't
+    # resolve in the ledger; that's a §6 binding failure on the
+    # source anchor itself, and we never lead with a broken marker.
+    enumerated: list[tuple[int, dict]] = []
+    for i, ev_id in enumerate(cited):
         entry = by_id.get(ev_id)
-        if entry is None:
-            # Marker cited in prose but missing from ledger — a §6
-            # binding failure on the source anchor itself. Skip;
-            # leads must point at REAL ledger entries.
-            continue
-        bvA = entry.get("baseline_vs_attributed") or "n_a"
-        conf = entry.get("confidence") or "n_a"
-        # Sort: attributed (0) before backdrop (1), highest
-        # confidence first (negate the rank), earliest cited first.
-        attr_key = 0 if bvA == "attributed" else 1
-        conf_key = -(_CONFIDENCE_RANK.get(conf, 0))
-        candidates.append(((attr_key, conf_key, order_idx), entry))
-    if not candidates:
+        if entry is not None:
+            enumerated.append((i, entry))
+    if not enumerated:
         return None
-    candidates.sort(key=lambda t: t[0])
-    chosen = candidates[0][1]
+
+    # ABSENCE EXCLUSION — primary pass excludes zero-valued claims.
+    # If at least one non-absence claim exists, the lead comes from
+    # that filtered pool; the zeros never become leads.
+    non_absence = [(i, e) for (i, e) in enumerated if not _is_absence(e)]
+    if non_absence:
+        chosen = _ranked(non_absence)[0][1]
+        weak_lead = False
+    else:
+        # Every cited claim is an absence — the anchor has no
+        # non-zero findings to spine on. Pick the highest-priority
+        # claim from the FULL cited pool (so a lead still exists)
+        # and flag it weak. Honest, not blocking.
+        chosen = _ranked(enumerated)[0][1]
+        weak_lead = True
+
     return {
         "ev_id":                  chosen["id"],
         "label":                  chosen.get("label") or "",
         "value":                  chosen.get("value"),
         "confidence":             chosen.get("confidence") or "n_a",
         "baseline_vs_attributed": chosen.get("baseline_vs_attributed") or "n_a",
+        "weak_lead":              weak_lead,
     }
 
 
@@ -150,7 +225,15 @@ def validate_lead(anchor_body: dict, ev_id: str) -> dict | None:
 
     Why both conditions: an ev:id in the ledger but uncited in prose
     is not a claim the anchor surfaced. Foregrounding it in a fan-out
-    would be inventing a claim the anchor didn't make."""
+    would be inventing a claim the anchor didn't make.
+
+    The absence exclusion that select_lead applies is INTENTIONALLY
+    NOT applied here: this is the user-override escape hatch. If a
+    user explicitly picks a zero-valued cited claim as the lead, we
+    honor it — that's their judgment, not the auto-selector's. The
+    returned payload always carries weak_lead=False, since an
+    override is by definition an explicit human choice, not a weak
+    auto-pick."""
     if not ev_id:
         return None
     content = (anchor_body or {}).get("content") or {}
@@ -168,4 +251,5 @@ def validate_lead(anchor_body: dict, ev_id: str) -> dict | None:
         "value":                  entry.get("value"),
         "confidence":             entry.get("confidence") or "n_a",
         "baseline_vs_attributed": entry.get("baseline_vs_attributed") or "n_a",
+        "weak_lead":              False,
     }

@@ -24,12 +24,14 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.assets import _ANCHOR_TYPE_SET
 from app.auth import current_user
 from app.db import get_db
+from app.documents.storage import storage_root
 from app.models import AgentRegistration, Artifact, Run, User
 from app.queue import enqueue
 from app.reports.derivatives import DERIVATIVE_RENDERERS
@@ -114,3 +116,32 @@ def generate_derivative(body: GenerateDerivativeIn,
             "derivative_type": deriv_type,
             "source_anchor_id": body.source_anchor_id,
             "status": run.status}
+
+
+@router.get("/{artifact_id}/slide/{idx}")
+def serve_slide(artifact_id: str, idx: int,
+                user: User = Depends(current_user),
+                db: Session = Depends(get_db)) -> FileResponse:
+    """Stream one carousel slide's rendered PNG. Tenant-scoped at
+    the artifact lookup; the file path comes from
+    body.rendered_assets[idx].path (RELATIVE to storage_root, so the
+    URL can't escape into another org's directory)."""
+    art = db.execute(
+        scoped(Artifact, user.org_id).where(Artifact.id == artifact_id)
+    ).scalar_one_or_none()
+    if art is None:
+        raise HTTPException(404, "Derivative artifact not found")
+    assets = ((art.body or {}).get("rendered_assets")) or []
+    record = next((a for a in assets
+                    if isinstance(a, dict) and a.get("idx") == idx), None)
+    if record is None:
+        raise HTTPException(404, f"Slide idx={idx} not rendered for "
+                                  "this artifact.")
+    rel_path = record.get("path")
+    if not rel_path:
+        raise HTTPException(404, "Slide record missing path.")
+    abs_path = storage_root() / rel_path
+    if not abs_path.is_file():
+        raise HTTPException(404, "Slide file missing on disk.")
+    return FileResponse(path=str(abs_path), media_type="image/png",
+                         filename=record.get("filename") or f"slide_{idx}.png")

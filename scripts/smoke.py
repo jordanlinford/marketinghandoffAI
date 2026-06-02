@@ -6685,7 +6685,8 @@ def main() -> None:
                                              sales_leadership as _slm,
                                              solution_guide as _sgm,
                                              whitepaper as _wpm)
-        from app.reports.derivatives import exec_summary as _esm
+        from app.reports.derivatives import (carousel as _csm,
+                                               exec_summary as _esm)
         renderer_msgs = {
             "board":          _bm._llm_system_msg({}),
             "ceo_weekly":     _cwm._llm_system_msg({}),
@@ -6694,6 +6695,7 @@ def main() -> None:
             "buyer_guide":    _bgm._llm_system_msg({}),
             "solution_guide": _sgm._llm_system_msg({}),
             "exec_summary":   _esm._llm_system_msg(),
+            "carousel":       _csm._llm_system_msg(),
         }
         missing = []
         for name, msg in renderer_msgs.items():
@@ -6718,13 +6720,401 @@ def main() -> None:
             "instruction must NEVER drift into 'add specifics' framing.")
         print(f"[OK] Anti-slop (22): structural — every renderer "
               f"system message ({len(renderer_msgs)} of them: anchors "
-              f"+ exec_summary derivative) carries the shared "
+              f"+ both derivatives) carries the shared "
               f"anti_slop_lines() block AND the §6/§7-restating "
               f"principle ('the fix for vagueness is to CUT, never to "
               f"manufacture concreteness'). Prompt-layer regression "
               f"guard only — no claim-layer behavior change asserted "
               f"here; the brand-invariant tests above are the "
               f"behavioral proof.")
+
+        # ================================================================
+        # Carousel (23) — Stage 1: §7 containment on a slide-shaped
+        # derivative. Same machinery as exec_summary (#21); the only
+        # thing changed is the OUTPUT SHAPE (slides instead of prose).
+        # If Stage 1 needed a new validator, a new ledger path, or any
+        # change to the §7 layer, the abstraction would have a seam —
+        # it doesn't. This section asserts that.
+        #
+        # The visual pipeline (Stage 2, #24) builds on this AFTER #23
+        # is green. Today we're proving content + trust; pixels come
+        # next.
+        # ================================================================
+        print("---- Carousel (23) — Stage 1: §7 content path ----")
+        from app.reports.derivatives import (render_carousel,
+                                               trust_checks_with_containment_findings,
+                                               validate_containment)
+
+        # Pick the same kind of passing anchor #21 used.
+        source_anchor_id_c = None
+        for kind in ("whitepaper", "buyer_guide", "solution_guide",
+                      "report"):
+            assets = client.get(
+                f"/api/assets?asset_kind={kind}&limit=50",
+                headers=H_ONIT).json()["assets"]
+            passing = [a for a in assets if a.get("trust_state") == "passed"]
+            if passing:
+                source_anchor_id_c = passing[0]["id"]
+                break
+        assert source_anchor_id_c, ("smoke setup: no passing anchor "
+                                     "for carousel containment proof")
+
+        # ---- 23a PRESENCE — end-to-end through the worker -----------
+        r = client.post("/api/derivatives/generate", headers=H_ONIT, json={
+            "derivative_type": "carousel",
+            "source_anchor_id": source_anchor_id_c,
+        })
+        assert r.status_code == 200, (
+            f"POST /api/derivatives/generate carousel failed: {r.text}")
+        gen = r.json()
+        assert gen["derivative_type"] == "carousel"
+        assert run_once() is True, ("worker did not pick up the "
+                                     "carousel job")
+        car_run = db.execute(
+            scoped(Run, onit.id).where(Run.id == gen["run_id"])
+        ).scalar_one()
+        assert car_run.status == "succeeded", (
+            f"carousel run failed: {car_run.error}")
+        car_art = db.execute(
+            scoped(Artifact, onit.id).where(Artifact.run_id == car_run.id)
+        ).scalar_one()
+        assert car_art.type == "carousel_draft", (
+            f"carousel artifact MUST persist as 'carousel_draft'; "
+            f"got {car_art.type!r}")
+        c_body = car_art.body or {}
+        c_content = c_body.get("content") or {}
+        assert c_content.get("content_type") == "carousel"
+        # Lineage — body.source_anchor_id is canonical, same as exec_summary.
+        assert c_body.get("source_anchor_id") == source_anchor_id_c
+        # Slides are blocks with kind='slide' and a `slot` value drawn
+        # from the carousel arc — proves the renderer emitted the
+        # expected shape rather than degenerating into prose.
+        c_blocks = c_content.get("blocks") or []
+        assert len(c_blocks) >= 5, (
+            f"carousel must emit at least 5 slides (hook + finding + "
+            f"insight + rec + cta); got {len(c_blocks)}")
+        assert all(b.get("kind") == "slide" for b in c_blocks), (
+            "every block in a carousel MUST be kind='slide'")
+        slots = {b.get("slot") for b in c_blocks}
+        # The arc skeleton must be present. Insights are optional
+        # (depends on how many ledger claims exist) — but the spine
+        # of hook + finding + rec + cta is mandatory.
+        for required_slot in ("hook", "finding", "rec", "cta"):
+            assert required_slot in slots, (
+                f"carousel missing required slot {required_slot!r}; "
+                f"slots present={slots!r}")
+        # Containment validator inherits the same shape — same trust
+        # path the anchor + exec_summary use.
+        c_tc = c_body.get("trust_checks") or {}
+        assert c_tc.get("validator") == "containment", (
+            "carousel trust_checks MUST be marked 'containment'")
+        assert c_tc.get("passed") is True, (
+            f"carousel containment MUST pass on a clean source. "
+            f"trust_checks={c_tc!r}")
+        assert c_tc.get("approval_blocked") is False
+        # Library projection picks it up as kind=carousel + carries
+        # the source-anchor lineage same way exec_summary does.
+        lib_c = client.get(
+            "/api/assets?asset_kind=carousel&limit=50",
+            headers=H_ONIT).json()["assets"]
+        crows = [a for a in lib_c if a["id"] == car_art.id]
+        assert crows, ("carousel MUST appear in "
+                       "/api/assets?asset_kind=carousel")
+        crow = crows[0]
+        assert crow["asset_kind"] == "carousel"
+        assert crow["source_anchor_id"] == source_anchor_id_c
+        assert crow["trust_state"] == "passed"
+        # Kind isolation — must not bleed into exec_summary or
+        # any anchor kind. Same registry-separation proof #20-cross +
+        # #21a use.
+        for other in ("exec_summary", "report", "whitepaper",
+                       "buyer_guide", "solution_guide", "content"):
+            others = client.get(
+                f"/api/assets?asset_kind={other}&limit=500",
+                headers=H_ONIT).json()["assets"]
+            assert not any(a["id"] == car_art.id for a in others), (
+                f"kind={other} MUST NOT include carousel.")
+        print(f"[OK] Carousel (23a): PRESENCE — carousel generated "
+              f"end-to-end via /api/derivatives/generate. "
+              f"artifact.type='carousel_draft', "
+              f"{len(c_blocks)} slides (slots present: "
+              f"{sorted(slots)}), lineage in body.source_anchor_id, "
+              f"trust_checks.validator='containment' + passed=True, "
+              f"Library kind='carousel' (isolated from exec_summary "
+              f"+ anchors).")
+
+        # ---- 23b ABSENCE (load-bearing) — inject a number absent
+        # from the source anchor and assert containment fires the
+        # SAME §7 critical. Carousels go OUTWARD; this gate is the
+        # most consequential firing of §7 in the system.
+        injected_blocks_c = list(c_blocks)
+        for i, b in enumerate(injected_blocks_c):
+            # Pick a slide whose template carries text we can append
+            # to (any non-hook works; the hook is intentionally
+            # number-free so injecting wouldn't surface as well).
+            if b.get("slot") in ("finding", "insight", "rec"):
+                injected_blocks_c[i] = {
+                    **b,
+                    "text": (b.get("text") or "")
+                            + "\nNote: 88% adopters renewed in pilot.",
+                }
+                break
+        injected_carousel_content = {**c_content,
+                                      "blocks": injected_blocks_c}
+        # The source anchor's ledger is what containment checks
+        # against — read it from the artifact stored in #19 / #21.
+        src_detail_c = client.get(
+            f"/api/assets/content/{source_anchor_id_c}",
+            headers=H_ONIT).json()
+        anchor_ledger_entries_c = (src_detail_c.get("body") or {}).get(
+            "evidence_ledger") or []
+        from app.reports.evidence import Ledger
+        anchor_ledger_c = Ledger.from_entries(anchor_ledger_entries_c)
+        tc_inj_c = validate_containment(injected_carousel_content,
+                                         anchor_ledger_c)
+        tc_inj_c = trust_checks_with_containment_findings(
+            tc_inj_c, anchor_ledger_entries_c,
+            injected_carousel_content)
+        assert tc_inj_c.get("passed") is False, (
+            "ABSENCE invariant broken: bare '88%' (not in source "
+            "anchor) did NOT fail carousel containment. A carousel "
+            "would have shipped an unsourced number to prospects.")
+        assert tc_inj_c.get("approval_blocked") is True
+        c_crit = tc_inj_c["findings_by_severity"]["critical"]
+        assert c_crit >= 1
+        c_seven = [f for f in (tc_inj_c.get("findings") or [])
+                    if f.get("discipline") == "§7"
+                    and f.get("severity") == "critical"]
+        assert c_seven, (
+            "Carousel containment did not classify the injected "
+            "number as §7 critical — the slide-shaped output is "
+            "not on the same trust path as exec_summary.")
+        print(f"[OK] Carousel (23b): ABSENCE (load-bearing) — "
+              f"bare '88%' (absent from source anchor's ledger) on "
+              f"a slide trips CRITICAL §7 containment breach with "
+              f"approval_blocked=True. Slides ride the SAME §7 path "
+              f"prose derivatives do — a carousel cannot ship an "
+              f"unsourced number.")
+
+        # ---- 23c TRANSITIVITY — clean carousel passes containment
+        # against ONLY the anchor's ledger. Mirrors #21d for the
+        # slide-shaped surface: §6 inherited via §7, no engine call,
+        # no raw-source re-validation.
+        tc_re_c = validate_containment(c_content, anchor_ledger_c)
+        tc_re_c = trust_checks_with_containment_findings(
+            tc_re_c, anchor_ledger_entries_c, c_content)
+        assert tc_re_c.get("passed") is True, (
+            "Carousel transitivity broken: clean carousel "
+            "re-validated against ONLY anchor's ledger did not "
+            "pass.")
+        assert tc_re_c["markers_found"] == tc_re_c["markers_resolved"]
+        assert tc_re_c["numbers_found"] == tc_re_c["numbers_bound"]
+        print(f"[OK] Carousel (23c): TRANSITIVITY — clean carousel "
+              f"passes containment against ONLY the source anchor's "
+              f"ledger. {tc_re_c['markers_found']} marker(s) all "
+              f"resolve; {tc_re_c['numbers_found']} number(s) all "
+              f"bind. §6 inherited via §7 on the visual derivative "
+              f"path — same proof exec_summary holds (#21d), now "
+              f"on slides.")
+
+        # ================================================================
+        # Carousel (24) — Stage 2: Pillow visual pipeline. Builds on
+        # Stage 1 (the validated slide content); the new work here is
+        # turning blocks into branded PNGs with NO new claim sneaking
+        # in at the visual layer. Three proofs:
+        #
+        #   24a render presence — every slide produces a real PNG
+        #        file on disk (not empty, valid Pillow-decodable).
+        #        body.rendered_assets carries the lineage; the serve
+        #        endpoint streams each slide via tenant-scoped
+        #        artifact lookup.
+        #   24b BRAND INVARIANT on slide CLAIMS — rendering the same
+        #        validated content twice with different brand tokens
+        #        produces files whose IMAGE BYTES differ (brand worked)
+        #        but whose DRAWN TEXT is byte-identical (claims didn't
+        #        move). The brand-invariant principle pulled forward
+        #        onto an outward-facing visual surface.
+        #   24c NO-FABRICATION-IN-RENDER — every line the renderer
+        #        drew into the image is a substring of the validated
+        #        slide.text (after ⟦ev:id⟧ marker stripping). The
+        #        visual layer added no copy. Same shape of absence-
+        #        check the rest of the trust path uses.
+        # ================================================================
+        print("---- Carousel (24) — Stage 2: visual pipeline ----")
+        from app.reports.derivatives.carousel_visual import (
+            render_carousel_images, strip_markers)
+
+        # car_art is the carousel artifact from #23. Reload its body
+        # so we have rendered_assets the agent persisted (the agent
+        # ran the visual step inline when containment passed).
+        db.refresh(car_art)
+        car_body = car_art.body or {}
+        rendered = car_body.get("rendered_assets") or []
+        # ---- 24a presence + serve endpoint ---------------------------
+        assert rendered, ("ASSERTION FAILED — body.rendered_assets "
+                          "empty. The agent did not run the visual "
+                          "step for a passing carousel.")
+        # One asset per slide block. Same count.
+        c_blocks_24 = (car_body.get("content") or {}).get("blocks") or []
+        assert len(rendered) == len(c_blocks_24), (
+            f"rendered_assets count ({len(rendered)}) MUST equal "
+            f"slide count ({len(c_blocks_24)}). The renderer either "
+            "skipped slides or rendered extras.")
+        # Each file is a real PNG on disk and decodes via Pillow.
+        from PIL import Image as _PILImage
+        from app.documents.storage import storage_root as _sroot
+        for rec in rendered:
+            assert rec.get("path"), f"rendered_assets row missing path: {rec!r}"
+            abs_path = _sroot() / rec["path"]
+            assert abs_path.is_file(), (
+                f"rendered slide file missing on disk: {abs_path}")
+            # Pillow open + verify — proves the bytes are a valid PNG.
+            with _PILImage.open(str(abs_path)) as im:
+                im.verify()
+            # File should be non-trivial — defensive against the
+            # "ran but wrote nothing" failure mode.
+            assert abs_path.stat().st_size > 1000, (
+                f"slide file suspiciously small ({abs_path.stat().st_size} "
+                f"bytes): {abs_path}")
+        # Serve endpoint round-trip. Carries tenant isolation via
+        # the artifact lookup; Acme MUST NOT be able to fetch Onit's
+        # slides even with the right URL.
+        slide_resp = client.get(
+            f"/api/derivatives/{car_art.id}/slide/0",
+            headers=H_ONIT)
+        assert slide_resp.status_code == 200
+        assert slide_resp.headers.get("content-type") == "image/png"
+        assert len(slide_resp.content) > 1000
+        slide_iso = client.get(
+            f"/api/derivatives/{car_art.id}/slide/0",
+            headers=H_ACME)
+        assert slide_iso.status_code in (403, 404), (
+            f"tenant isolation broken: Acme fetched Onit's slide "
+            f"(status={slide_iso.status_code})")
+        print(f"[OK] Carousel (24a): RENDER PRESENCE — "
+              f"{len(rendered)} slides written to disk as valid PNGs "
+              f"under {{storage_root}}/{{org}}/_carousels/. Serve "
+              f"endpoint streams PNGs; tenant isolation enforced "
+              f"(Acme → {slide_iso.status_code} on Onit's slide).")
+
+        # ---- 24b BRAND INVARIANT on CLAIMS (load-bearing) -----------
+        # Render the SAME validated slides twice with different brand
+        # dicts. The image BYTES differ (brand worked); the DRAWN
+        # TEXT is byte-identical (claims didn't move). This is the
+        # brand-invariant principle from #18c/#19c/#20-C/#21g pulled
+        # onto the outward-facing visual surface.
+        clean_carousel_content = car_body.get("content") or {}
+        brand_unset = {
+            "color_primary":    None, "color_secondary": None,
+            "color_accent":     None, "color_background": None,
+            "color_text":       None, "font_heading": None,
+            "font_body":        None, "logo_path": None,
+            "logo_mime":        None, "is_default": True,
+        }
+        brand_set = {
+            "color_primary":    "#7a3aff",
+            "color_secondary":  "#00b894",
+            "color_accent":     "#ffb86c",
+            "color_background": "#101418",
+            "color_text":       "#f5f7fa",
+            "font_heading":     "Space Grotesk",
+            "font_body":        "Inter",
+            "logo_path": None, "logo_mime": None, "is_default": False,
+        }
+        import tempfile, hashlib as _hl
+        from pathlib import Path as _Path
+        # Render to a temporary org+run namespace per call so neither
+        # render pollutes the other.
+        org_tmp_1 = "_brand_invariant_test_unset"
+        org_tmp_2 = "_brand_invariant_test_set"
+        run_tmp = "smoke24"
+        files_unset, manifests_unset = render_carousel_images(
+            clean_carousel_content, brand_unset,
+            org_id=org_tmp_1, run_id=run_tmp)
+        files_set, manifests_set = render_carousel_images(
+            clean_carousel_content, brand_set,
+            org_id=org_tmp_2, run_id=run_tmp)
+        # Same slide count, same slot order.
+        assert [r["slot"] for r in files_unset] == [r["slot"] for r in files_set]
+        # 1. CLAIMS — drawn_lines list MUST be byte-identical across
+        #    brand states. This is the load-bearing assertion.
+        import json as _jsonmod
+        def _stable(x):
+            return _jsonmod.dumps(x, sort_keys=True, default=str)
+        drawn_unset = [m["drawn_lines"] for m in manifests_unset]
+        drawn_set = [m["drawn_lines"] for m in manifests_set]
+        assert _stable(drawn_unset) == _stable(drawn_set), (
+            "INVARIANT VIOLATION (carousel visual): drawn text differs "
+            "across brand-unset vs brand-set. Brand has reached the "
+            "claim layer in the visual renderer.\n"
+            f"unset[0]: {drawn_unset[0] if drawn_unset else '∅'}\n"
+            f"set[0]:   {drawn_set[0] if drawn_set else '∅'}")
+        # 2. IMAGE BYTES — should differ (otherwise brand isn't doing
+        #    anything visually). We compare hashes of slide_00 of each
+        #    set; identical bytes here would mean brand has no effect
+        #    on the render, which contradicts the whole point.
+        h_unset = _hl.sha256(
+            (_sroot() / files_unset[0]["path"]).read_bytes()).hexdigest()
+        h_set = _hl.sha256(
+            (_sroot() / files_set[0]["path"]).read_bytes()).hexdigest()
+        assert h_unset != h_set, (
+            "Image bytes identical across brand states — brand "
+            "is not reaching the visual layer at all.")
+        print(f"[OK] Carousel (24b): BRAND INVARIANT on CLAIMS — "
+              f"same validated content + different brand tokens → "
+              f"DRAWN TEXT byte-identical across both renders "
+              f"(claims didn't move), IMAGE BYTES differ (brand did "
+              f"its job at the chrome layer). Outward-facing visual "
+              f"surface holds the §6/§7 frontier.")
+
+        # ---- 24c NO-FABRICATION-IN-RENDER (load-bearing) ----------
+        # Every line the renderer drew MUST appear as a substring of
+        # the matching validated slide.text (after ⟦ev:id⟧ marker
+        # stripping). If the visual layer added text — a label, a
+        # footnote, the slot name in chrome — this assertion catches
+        # it. Same shape as #6's absence-assertion discipline.
+        for idx, manifest in enumerate(manifests_set):
+            slide = c_blocks_24[idx]
+            stripped_source = strip_markers(slide.get("text") or "")
+            # Stripped text contains every line concatenated (the
+            # renderer wraps long lines, but each output line is a
+            # subsequence of the source). For the substring check,
+            # we collapse the source to a single string and assert
+            # each drawn token is contained.
+            #
+            # The renderer DOES word-wrap (long body line → multiple
+            # lines), so a drawn line might be a substring split out
+            # of the source. We check the loosest meaningful
+            # invariant: every WORD the renderer drew exists in the
+            # source. If a NEW word appears, the renderer fabricated.
+            source_words = set(stripped_source.split())
+            for drawn_line in manifest["drawn_lines"]:
+                for word in drawn_line.split():
+                    assert word in source_words, (
+                        f"NO-FABRICATION-IN-RENDER violation: word "
+                        f"{word!r} appears in rendered slide #{idx} "
+                        f"but not in the validated slide.text. The "
+                        f"visual layer introduced copy the trust "
+                        f"layer never approved.\n"
+                        f"  Drawn line: {drawn_line!r}\n"
+                        f"  Source:     {stripped_source!r}")
+        print(f"[OK] Carousel (24c): NO-FABRICATION-IN-RENDER — every "
+              f"word drawn into the {len(manifests_set)} slide images "
+              f"appears in the matching validated slide.text. The "
+              f"visual layer adds no copy outside the validated "
+              f"content. §6/§7 holds at the pixel boundary.")
+
+        # Cleanup tmp dirs from #24b so they don't accumulate in dev.
+        for org_tmp in (org_tmp_1, org_tmp_2):
+            tmp_path = _sroot() / org_tmp
+            if tmp_path.exists():
+                for f in tmp_path.rglob("*"):
+                    if f.is_file():
+                        f.unlink()
+                for d in sorted(tmp_path.rglob("*"), reverse=True):
+                    if d.is_dir():
+                        d.rmdir()
+                tmp_path.rmdir()
 
         print("[OK] Smoke test passed.")
     finally:

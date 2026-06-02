@@ -14,6 +14,7 @@ DERIVATIVE_RENDERERS is the dispatch table the derivative_composer
 agent reads, mirroring RENDERERS for anchors. New derivative types
 (linkedin_post, blog_excerpt, ...) register here.
 """
+from app.reports.derivatives.carousel import render_carousel  # noqa: F401
 from app.reports.derivatives.containment import (  # noqa: F401
     derive_containment_findings,
     trust_checks_with_containment_findings,
@@ -24,4 +25,5 @@ from app.reports.derivatives.exec_summary import render_exec_summary  # noqa: F4
 
 DERIVATIVE_RENDERERS = {
     "exec_summary": render_exec_summary,
+    "carousel":     render_carousel,
 }

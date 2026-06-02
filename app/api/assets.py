@@ -120,6 +120,12 @@ _DERIVATIVE_KINDS: dict[str, dict] = {
         "default_title":  "Untitled executive summary",
         "title_label":    "executive summary",
     },
+    "carousel_draft": {
+        "kind":           "carousel",
+        "content_types":  ("carousel",),
+        "default_title":  "Untitled carousel",
+        "title_label":    "carousel",
+    },
 }
 
 _DERIVATIVE_TYPE_SET: tuple[str, ...] = tuple(_DERIVATIVE_KINDS.keys())

@@ -47,6 +47,7 @@ _ALL_THROUGH = "all_through"
 # app/api/assets.py (_DERIVATIVE_KINDS).
 _DERIVATIVE_TYPES = {
     "exec_summary": "exec_summary_draft",
+    "carousel":     "carousel_draft",
 }
 
 
@@ -107,6 +108,33 @@ class DerivativeComposerAgent(Agent):
         trust_checks = trust_checks_with_containment_findings(
             trust_checks, anchor_ledger_entries, content)
         approval_blocked = bool(trust_checks.get("approval_blocked"))
+
+        # ---- Visual render (carousel only, AFTER containment passes) ----
+        # The visual pipeline reads ONLY the validated content. It
+        # cannot reach into the source anchor's ledger or the
+        # intelligence engine. By construction (see carousel_visual.py)
+        # it adds no text the validated slides didn't already contain
+        # — the slot template chooses font/color/layout, never copy.
+        # We skip rendering on a containment failure: a §7-blocked
+        # carousel must not produce shippable pixels.
+        rendered_assets: list[dict] = []
+        if deriv_type == "carousel" and not approval_blocked:
+            try:
+                from app.reports.derivatives.carousel_visual import (
+                    render_carousel_images)
+                file_records, _ = render_carousel_images(
+                    content, ctx.brand or {},
+                    org_id=ctx.org_id, run_id=ctx.run_id)
+                # body.rendered_assets is the canonical UI-side
+                # surface — paths are RELATIVE to storage_root so the
+                # agent doesn't bake absolute filesystem layout into
+                # the artifact body.
+                rendered_assets = file_records
+            except Exception as exc:
+                # Visual render failure does NOT block the artifact —
+                # the content is already validated and shippable.
+                # Surface the error in logs so an op can investigate.
+                log(f"carousel visual render failed: {exc!r}")
 
         # ---- Routing — same shape as report_composer ------------------
         flat_text = "\n".join((b.get("text") or "")
@@ -180,6 +208,12 @@ class DerivativeComposerAgent(Agent):
             # PRESENTATION ONLY (see report_composer for the load-
             # bearing invariant). Sibling of body.content, never inside.
             "brand_tokens": _brand_tokens_for_body(ctx.brand or {}),
+            # Visual carousel slides (PNG paths relative to
+            # storage_root). Empty list for non-carousel derivatives
+            # or for carousels whose containment failed. The UI reads
+            # this to show slide previews; the serve endpoint reads
+            # individual rows to stream the bytes.
+            "rendered_assets": rendered_assets,
         }
 
         # ---- Citations — point at the source anchor itself -----------
@@ -196,7 +230,13 @@ class DerivativeComposerAgent(Agent):
 
         # ---- Artifact assembly ---------------------------------------
         artifact_type = _DERIVATIVE_TYPES[deriv_type]
-        title = f"Exec summary — {anchor.get('title','(untitled anchor)')}"
+        # One human noun per derivative kind for the title prefix.
+        _TITLE_PREFIX = {
+            "exec_summary": "Exec summary",
+            "carousel":     "Carousel",
+        }
+        title = (f"{_TITLE_PREFIX.get(deriv_type, deriv_type.title())} "
+                 f"— {anchor.get('title','(untitled anchor)')}")
         art = ArtifactDraft(
             type=artifact_type,
             title=title, body=body, citations=cites,

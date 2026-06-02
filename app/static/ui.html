@@ -133,6 +133,9 @@
   /* Exec Summary — Level-4 derivative. Plum. Distinguishable from
      the anchor palette so derivatives don't read as a 5th anchor. */
   .badge.kind-exec_summary { background: #3a1a3a; color: #e3a7c3; }
+  /* Carousel — Level-4 derivative. Sand. Sister hue to plum so the
+     two derivative kinds read as a family without blurring. */
+  .badge.kind-carousel { background: #3a2a14; color: #e3c89c; }
   /* Trust visibility surfaces — distinct, non-debug treatment per spec.
      Passed, passed-with-warnings, and blocked each get their own color
      so a quick glance at the banner says "approval permitted by the
@@ -626,6 +629,7 @@
           <option value="buyer_guide">buyer guide</option>
           <option value="solution_guide">solution guide</option>
           <option value="exec_summary">exec summary</option>
+          <option value="carousel">carousel</option>
           <option value="document">document</option>
           <option value="brief">brief</option>
         </select></div>
@@ -813,6 +817,56 @@
       <div id="rpt-intelligence-preview" style="margin-bottom:10px;"></div>
       <h4 style="margin:8px 0;">Recent anchors</h4>
       <div id="rpt-list"></div>
+    </div>
+
+    <!-- ====== Derivatives — Level-4 §7-bound re-expressions =========
+         A derivative reads a source anchor (above) and re-expresses
+         its validated claims in a shorter / channel-shaped form.
+         Carousel adds a templated visual render on top of the same
+         §7 containment path exec_summary uses. Routing is through
+         derivative_composer (NOT content_engine — that distinction
+         was the routing bug yesterday). -->
+    <div class="section" id="derivatives-section">
+      <h3>Derivatives (from anchors)</h3>
+      <div class="setup-status" style="margin-bottom:6px;">
+        Pick a source anchor + derivative type. The derivative reads
+        the anchor's content + evidence ledger; every claim it carries
+        inherits an anchor ledger marker (§7 containment). Carousel
+        adds a templated visual render — slide images use the org
+        brand chrome, never the claim layer.
+      </div>
+      <div class="setup-paths" style="margin-bottom:10px;">
+        <div class="setup-path">
+          <h4>Compose</h4>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Source anchor</label>
+            <select id="deriv-source">
+              <option value="">— loading anchors —</option>
+            </select>
+          </div>
+          <div class="field" style="margin-bottom:8px;">
+            <label>Derivative type</label>
+            <select id="deriv-type">
+              <option value="exec_summary">Executive summary (text)</option>
+              <option value="carousel">Carousel (slides + visual render)</option>
+            </select>
+          </div>
+          <div class="row" style="gap:6px; margin-top:10px;">
+            <button id="deriv-generate-btn">Generate derivative</button>
+          </div>
+          <div id="deriv-compose-status" class="setup-status"
+               style="margin-top:6px;"></div>
+        </div>
+        <div class="setup-path">
+          <h4>What this is</h4>
+          <p>Derivatives never invent. Every claim must already exist
+             in the source anchor (§7 containment); the gate blocks
+             any derivative that smuggles in a number the anchor
+             doesn't say. Brand renders the slide / page chrome only
+             — it cannot reach the claim layer. Visual carousels are
+             populate-and-fill templates, not generative design.</p>
+        </div>
+      </div>
     </div>
   </section>
 </main>
@@ -2065,7 +2119,104 @@ document.addEventListener('click', (ev) => {
   if (ev.target.id === 'rpt-quick-30') _setQuickPick('last30');
   if (ev.target.id === 'rpt-quick-90') _setQuickPick('last90');
   if (ev.target.id === 'rpt-quick-quarter') _setQuickPick('quarter');
+  if (ev.target.id === 'deriv-generate-btn') generateDerivative();
 });
+
+// ---- Derivatives compose pane ------------------------------------------
+// Routes derivative generation through /api/derivatives/generate (which
+// dispatches to derivative_composer + DERIVATIVE_RENDERERS). The fix the
+// brief calls out: derivative types must NOT route through content_engine
+// — that's the routing bug the anchors hit yesterday, now closed for
+// derivatives too.
+
+async function _populateDerivativeSourcePicker() {
+  const sel = document.getElementById('deriv-source');
+  if (!sel) return;
+  // Pull every anchor kind in parallel — same approach as
+  // loadReports() — so the picker sees the org's full anchor pool
+  // regardless of kind.
+  const anchorKinds = Object.keys(_ANCHOR_KIND_LABELS);
+  const productQs = state.selectedProductId
+    ? `&product_id=${encodeURIComponent(state.selectedProductId)}` : '';
+  let bundles;
+  try {
+    bundles = await Promise.all(anchorKinds.map((kind) =>
+      api(`/api/assets?asset_kind=${kind}&limit=50${productQs}`)));
+  } catch (e) {
+    sel.innerHTML = '<option value="">(error loading anchors)</option>';
+    return;
+  }
+  const rows = [];
+  for (const b of bundles) for (const a of (b.assets || [])) rows.push(a);
+  // Derivatives only make sense from passing anchors — a derivative
+  // of a blocked anchor would inherit broken claims. Filter out
+  // anything not 'passed'.
+  const passing = rows.filter(a => a.trust_state === 'passed')
+    .sort((x, y) => (y.created_at || '').localeCompare(x.created_at || ''));
+  sel.innerHTML = '';
+  if (!passing.length) {
+    sel.innerHTML = '<option value="">(no passing anchors yet — '
+      + 'generate one above first)</option>';
+    return;
+  }
+  for (const a of passing.slice(0, 50)) {
+    const kindLabel = _ANCHOR_KIND_LABELS[a.asset_kind]
+      || a.asset_kind;
+    const label = `[${kindLabel}] ${_cleanTitle(a.title || a.id)}`;
+    const opt = document.createElement('option');
+    opt.value = a.id;
+    opt.textContent = label.length > 90 ? label.slice(0, 90) + '…' : label;
+    sel.appendChild(opt);
+  }
+}
+
+async function generateDerivative() {
+  const status = document.getElementById('deriv-compose-status');
+  const sourceId = document.getElementById('deriv-source').value;
+  const derivType = document.getElementById('deriv-type').value;
+  if (!sourceId) {
+    status.innerHTML = '<span class="err">Pick a source anchor.</span>';
+    return;
+  }
+  status.textContent = `Enqueueing ${derivType}…`;
+  try {
+    const r = await api('/api/derivatives/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        derivative_type: derivType,
+        source_anchor_id: sourceId,
+      }),
+    });
+    status.textContent = `Queued as run ${r.run_id.slice(0,8)}… — polling.`;
+    // Poll the run itself (same approach generateReport uses). The
+    // anchor pane's poll watched /api/reports, which doesn't see
+    // derivatives at all — going through /api/runs/{id} works for
+    // every agent.
+    for (let i = 0; i < 60; i++) {
+      await new Promise((res) => setTimeout(res, 1000));
+      try {
+        const detail = await api(`/api/runs/${r.run_id}`);
+        const runStatus = detail && detail.run && detail.run.status;
+        if (runStatus === 'failed') {
+          status.innerHTML = `<span class="err">Run failed: `
+            + `${(detail.run.error || 'unknown error')}</span>`;
+          return;
+        }
+        const arts = (detail && detail.artifacts) || [];
+        if (runStatus === 'succeeded' && arts.length) {
+          const art = arts[0];
+          status.textContent = `${derivType} ready: ${art.title}`;
+          openAssetDetail({ id: art.id, asset_kind: derivType });
+          return;
+        }
+      } catch (e) { /* keep polling */ }
+    }
+    status.textContent = 'Derivative did not land within 60s — '
+      + 'refresh the Library to find it.';
+  } catch (e) {
+    status.innerHTML = `<span class="err">Generate failed: ${e.message}</span>`;
+  }
+}
 
 // "What the system has learned" — calls GET /api/memory with the current
 // product scope. Renders each pattern as evidence-first prose (observation
@@ -2889,6 +3040,7 @@ const _ANCHOR_KIND_LABELS = {
 };
 const _DERIVATIVE_KIND_LABELS = {
   exec_summary: 'Executive summary',
+  carousel:     'Carousel',
 };
 const _isAnchorKind = (k) => k in _ANCHOR_KIND_LABELS;
 const _isDerivativeKind = (k) => k in _DERIVATIVE_KIND_LABELS;
@@ -3132,6 +3284,48 @@ function _renderReportDetailInto(wrap, asset, detail) {
   // still renders — just with platform defaults.
   const brand = body.brand_tokens || {};
   _applyReportBrandChrome(wrap, brand, asset);
+  // Rendered slide gallery — surfaces when the agent attached
+  // rendered_assets (carousel only). Each slide streams via the
+  // /api/derivatives/{id}/slide/{idx} endpoint. The gallery is
+  // ABOVE the body blocks so the carousel reads visually first;
+  // the validated slide text + trust banner still render below.
+  const renderedSlides = body.rendered_assets || [];
+  if (renderedSlides.length) {
+    const gallery = el('div', { class: 'carousel-gallery',
+      style: 'display:flex; gap:10px; overflow-x:auto; '
+             + 'padding:10px 0; margin-bottom:14px; '
+             + 'scroll-snap-type:x mandatory;' });
+    for (const slide of renderedSlides) {
+      const url = `/api/derivatives/${asset.id}/slide/${slide.idx}`;
+      // The fetch needs the X-Dev-User-Email header (FastAPI's
+      // current_user dep reads it). <img> tags can't set headers,
+      // so we pull the bytes via api() into a blob URL — same
+      // mechanism brand logo uses elsewhere.
+      const img = el('img', {
+        style: 'width:240px; height:240px; object-fit:cover; '
+              + 'border-radius:6px; '
+              + 'scroll-snap-align:start; '
+              + 'border:1px solid var(--border);',
+        alt: `Slide ${slide.idx}` });
+      // Imperatively fetch through api() so dev auth applies.
+      (async () => {
+        try {
+          const res = await fetch(url, {
+            headers: { 'X-Dev-User-Email': state.email } });
+          if (res.ok) {
+            const blob = await res.blob();
+            img.src = URL.createObjectURL(blob);
+          }
+        } catch (_) { /* leave broken-img placeholder */ }
+      })();
+      gallery.appendChild(img);
+    }
+    wrap.appendChild(el('div', {
+      class: 'setup-status',
+      style: 'margin:0 0 4px; font-size:13px; font-weight:600;' },
+      `Rendered slides (${renderedSlides.length})`));
+    wrap.appendChild(gallery);
+  }
   // Derivative lineage — when present, surface "derived from
   // <anchor>" near the top so the reader knows the trust-bound
   // basis. The detail link opens the source anchor in the same
@@ -5045,7 +5239,7 @@ const _VIEWS = {
   home:         { panel: 'home-view',         tab: null,                onEnter: loadCommandCenter },
   organization: { panel: 'organization-view', tab: 'tab-organization',  onEnter: () => { if (!state.profile) loadProfile(); loadBrand(); } },
   products:     { panel: 'products-view',     tab: 'tab-products',      onEnter: () => { loadProducts(); loadProductDocs(); renderProductsBreadcrumb(); } },
-  create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); } },
+  create:       { panel: 'create-view',       tab: 'tab-create',        onEnter: () => { if (!state.profile) loadProfile(); _populateDerivativeSourcePicker(); } },
   campaigns:    { panel: 'campaigns-view',    tab: 'tab-campaigns',     onEnter: loadCampaigns },
   library:      { panel: 'library-view',      tab: 'tab-library',       onEnter: loadLibrary },
   insights:     { panel: 'insights-view',     tab: 'tab-insights',      onEnter: () => { renderInsightsBreadcrumb(); loadDashboard(); } },

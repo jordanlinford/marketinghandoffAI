@@ -60,15 +60,42 @@ _INNER_W = _CANVAS[0] - 2 * _PAD  # 960
 # them before drawing. The numbers themselves stay; only the marker
 # annotation is removed. NEVER trim or substitute the number — that
 # would change the claim. This is a presentation-only transform.
+#
+# Whitespace normalization rules (presentation only — fixes the
+# marker-residue ghost-space bug AND the orphan-space-before-punct
+# bug an LLM-emitted "X⟦ev:7⟧ ; Y⟦ev:9⟧" can produce):
+#   1. Strip the marker token itself.
+#   2. Collapse internal runs of 2+ spaces/tabs to a single space —
+#      so "42 ⟦ev:19⟧ runs" → "42  runs" → "42 runs".
+#   3. Remove a single space immediately before sentence punctuation
+#      (",.;:!?") — so "ready ; 0 pending" → "ready; 0 pending".
+# Each rule preserves every word and every number verbatim — only
+# whitespace and the marker disappear. Bound numbers stay bound to
+# their (already-stripped) ⟦ev:id⟧ in the trust path; this function
+# operates on the text post-validation, so it CANNOT unbind anything.
 # --------------------------------------------------------------------------
 _MARKER_RE = re.compile(r"⟦ev:[A-Za-z0-9_\-]+⟧")
+_MULTI_WS_RE = re.compile(r"[ \t]{2,}")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r" +([,.;:!?])")
 
 
 def strip_markers(text: str) -> str:
-    """Remove ⟦ev:id⟧ markers from text; preserve everything else.
-    Idempotent. Used both for rendering AND for the no-fabrication
-    containment check in smoke (verifies drawn text ⊆ validated text)."""
-    return _MARKER_RE.sub("", text or "").strip()
+    """Remove ⟦ev:id⟧ markers from text and normalize the whitespace
+    they leave behind. Idempotent. Operates line-by-line so a slide's
+    title/body newline separator is preserved verbatim.
+
+    Used both for rendering AND for the no-fabrication containment
+    check in smoke (verifies drawn text ⊆ validated text)."""
+    if not text:
+        return ""
+    out: list[str] = []
+    for line in text.split("\n"):
+        # Strip the marker → collapse 2+ spaces → remove pre-punct spaces.
+        line = _MARKER_RE.sub("", line)
+        line = _MULTI_WS_RE.sub(" ", line)
+        line = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", line)
+        out.append(line.strip())
+    return "\n".join(out).strip()
 
 
 # --------------------------------------------------------------------------

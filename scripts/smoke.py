@@ -7104,6 +7104,62 @@ def main() -> None:
               f"visual layer adds no copy outside the validated "
               f"content. §6/§7 holds at the pixel boundary.")
 
+        # ---- 24d MARKER-RESIDUE WHITESPACE (presentation polish) --
+        # The visual layer must not leave double-spaces where the
+        # ⟦ev:id⟧ marker used to sit, and must not leave an orphan
+        # space before sentence punctuation when the LLM emits
+        # "X⟦ev:7⟧ ; Y" constructions. Two assertions:
+        #   1. strip_markers() handles every shape directly (unit-
+        #      style — proves the helper is correct).
+        #   2. No drawn line in any rendered slide contains "  "
+        #      (double space) — proves the rendered output is clean
+        #      even when fed marker-laden LLM prose.
+        # Neither assertion touches the trust layer or the claim
+        # contents — both check rendered whitespace ONLY.
+        cases = [
+            # (input, expected) — covers every shape the brief flags.
+            ("42⟦ev:19⟧ runs",      "42 runs"),
+            ("42 ⟦ev:19⟧ runs",     "42 runs"),   # leading space + marker
+            ("42⟦ev:19⟧.",          "42."),       # marker before period
+            ("42⟦ev:19⟧",           "42"),        # marker at end of clause
+            ("ready status ; 0⟦ev:9⟧ remain",
+             "ready status; 0 remain"),            # orphan space before ;
+            ("All 5⟦ev:7⟧ artifacts ready ; 0⟦ev:9⟧ pending",
+             "All 5 artifacts ready; 0 pending"),  # paired counts
+            ("title line\n42 ⟦ev:19⟧ body",
+             "title line\n42 body"),                # newline preserved
+        ]
+        for input_text, expected in cases:
+            got = strip_markers(input_text)
+            assert got == expected, (
+                f"strip_markers regression on case {input_text!r}:\n"
+                f"  expected: {expected!r}\n"
+                f"  got:      {got!r}")
+        # And no drawn line in either of the rendered sets (24b)
+        # carries a double space.
+        for manifest in manifests_set + manifests_unset:
+            for drawn_line in manifest["drawn_lines"]:
+                assert "  " not in drawn_line, (
+                    f"MARKER-RESIDUE bug: rendered slide contains a "
+                    f"double-space. Slide={manifest.get('idx')}, "
+                    f"slot={manifest.get('slot')!r}, "
+                    f"line={drawn_line!r}. strip_markers did not "
+                    "normalize the whitespace around the stripped "
+                    "marker.")
+                # Also: no orphan space before sentence punctuation
+                # in a rendered line.
+                for punct in (",", ".", ";", ":", "!", "?"):
+                    assert f" {punct}" not in drawn_line, (
+                        f"orphan space-before-{punct!r} in rendered "
+                        f"slide #{manifest.get('idx')}: "
+                        f"line={drawn_line!r}")
+        print(f"[OK] Carousel (24d): MARKER-RESIDUE WHITESPACE — "
+              f"strip_markers normalizes every shape (7 unit cases "
+              f"green); no drawn line in any rendered slide contains "
+              f"a double-space or an orphan-space-before-punctuation. "
+              f"§6/§7 unchanged — claims still bound, only the "
+              f"presentation whitespace cleaned.")
+
         # Cleanup tmp dirs from #24b so they don't accumulate in dev.
         for org_tmp in (org_tmp_1, org_tmp_2):
             tmp_path = _sroot() / org_tmp

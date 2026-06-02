@@ -45,8 +45,12 @@ Routing either through `scoped()` creates a chicken-and-egg break.
 ## Tenancy
 `org_id` is on every tenant table; this is multi-tenant from line one (Onit is just the
 first `orgs` row). Never key tenancy off client input — derive the org from the
-SSO-verified email domain. In dev, auth trusts the `X-Dev-User-Email` header; prod swaps in
-Google Workspace SSO (verify the `hd` domain claim, derive org from domain).
+SSO-verified email domain. Real auth lives at `/auth/login` (Microsoft Entra today;
+provider-agnostic seam at `app/auth_providers/` for Google later). In dev with
+`DEV_AUTH_BYPASS=true`, `current_user` ALSO accepts `X-Dev-User-Email`; in prod that path
+is unreachable (app refuses to boot with bypass on). **The allowlist is the gate, not the
+provider** — `email_is_allowed()` in `app/config.py` decides who comes in; provider auth
+is necessary but not sufficient.
 
 ## Database
 Dev = SQLite with WAL + `busy_timeout` (required because the API and Worker are two
@@ -73,7 +77,10 @@ block in `.replit` untouched. The published site builds and runs the TS app
 - `TriggerRunIn.task` is currently dropped — not persisted on the `Run`, not passed to
   `ctx.task`. Harmless for `market_intel` (ignores it). Wire it through when an agent needs
   per-run input.
-- RLS not live until the `SET app.current_org` wiring above exists.
+- RLS not live until the `SET app.current_org` wiring above exists. **This is the
+  prerequisite before opening the deploy to UNTRUSTED users.** Allowlist-gated trusted users
+  are fine without it — the app-layer `scoped()` guard is the live tenant boundary. If the
+  allowlist ever widens to strangers, wire `SET app.current_org` first.
 
 ## Roadmap
 - P0 (done): chassis + `market_intel`, end to end.

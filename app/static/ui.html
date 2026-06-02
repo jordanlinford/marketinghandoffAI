@@ -1145,11 +1145,14 @@
 </main>
 
 <script>
-// ---- TODO(prod): replace dev email header with the SSO session cookie. ----
-// In dev, the page holds the current email in memory and sends it on every
-// fetch as X-Dev-User-Email. No localStorage by design — refresh resets.
+// Auth: a real session cookie set by /auth/callback drives prod auth.
+// In dev with DEV_AUTH_BYPASS=true, the dev-email input lets you send
+// the X-Dev-User-Email header instead (used by smoke + curl). The
+// input STARTS BLANK now (no hardcoded fallback — that was a security
+// footgun) and is only used when explicitly typed. /auth/me on page
+// load resolves the real session if one exists.
 const state = {
-  email: 'jordan@onit.com',
+  email: '',
   me: null,
   runs: [],
   selectedRunId: null,
@@ -1171,12 +1174,28 @@ const state = {
   isDirty: false,        // working differs from the saved profile
 };
 
+// Auth model: the prod path uses a session cookie set by /auth/callback;
+// the dev path additionally accepts X-Dev-User-Email when state.email is
+// set (the dev-email input near the top). On a 401 from any API call, we
+// bounce to /auth/login — works for both real-OAuth sessions that expired
+// and dev sessions that were never established.
 async function api(path, opts = {}) {
   const headers = Object.assign(
-    { 'Content-Type': 'application/json', 'X-Dev-User-Email': state.email },
+    { 'Content-Type': 'application/json' },
     opts.headers || {},
   );
-  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  // Send the dev header only when state.email is set. Real OAuth users
+  // never see the dev-email input; their session cookie does the work.
+  if (state.email) headers['X-Dev-User-Email'] = state.email;
+  const res = await fetch(path, Object.assign({},
+    { credentials: 'same-origin' }, opts, { headers }));
+  if (res.status === 401) {
+    // Session missing/expired (or dev bypass off + no header).
+    // Redirect to login; the post-login redirect lands back here.
+    window.location = '/auth/login?next='
+      + encodeURIComponent(window.location.pathname + window.location.search);
+    throw new Error('Not authenticated — redirecting to login.');
+  }
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`${res.status} ${res.statusText}: ${text}`);
@@ -1188,9 +1207,12 @@ async function api(path, opts = {}) {
 async function apiUpload(path, file) {
   const form = new FormData();
   form.append('file', file);
+  const headers = {};
+  if (state.email) headers['X-Dev-User-Email'] = state.email;
   const res = await fetch(path, {
     method: 'POST',
-    headers: { 'X-Dev-User-Email': state.email },
+    credentials: 'same-origin',
+    headers,
     body: form,
   });
   if (!res.ok) {
